@@ -4,71 +4,57 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Ledge</string>
 	<key>CFBundleExecutable</key>
 	<string>Ledge</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.egemert.ledge</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Ledge</string>
-	<key>CFBundleDisplayName</key>
-	<string>Ledge</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>1.0.1</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 Ege Mert Balçık</string>
-	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Ledge reads what Music and Spotify are playing so it can show playback in the notch.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Ledge shows connection and battery for your AirPods and other Bluetooth devices.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Ledge shows your next event and a calendar in the notch.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Ledge parks new screenshots on its shelf, so it needs to read them where macOS saves them.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Ledge shows the files you drop on the notch, including ones from Documents.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Ledge shows the files you drop on the notch, including ones from Downloads.</string>
+	<key>NSFocusStatusUsageDescription</key>
+	<string>Ledge shows a card when you switch a Focus on or off.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Ege Mert Balçık</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Ledge uses your location to show local weather. You can pick a city manually instead.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-
-	<!-- Accessory app: no Dock icon, no menu bar of its own. -->
-	<key>LSUIElement</key>
+	<key>SUEnableAutomaticChecks</key>
 	<true/>
-
-	<!--
-	  Sparkle updates. The appcast rides GitHub Releases: every release uploads
-	  a fresh appcast.xml beside the DMG, and latest/download always points at
-	  it. Setting SUEnableAutomaticChecks explicitly also skips Sparkle's
-	  first-launch "check automatically?" dialog.
-	-->
 	<key>SUFeedURL</key>
 	<string>https://github.com/egemertbalcik/Ledge/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>c7cjhefsiuxGHf1XM2qyK5yQRjrrAm3pSW+yQCsNn1s=</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
-
-	<!--
-	  Usage strings for every permission the app can request. A missing usage
-	  string is a hard crash at the moment of the request, not a denial.
-	-->
-	<key>NSCalendarsFullAccessUsageDescription</key>
-	<string>Ledge shows your next event and a calendar in the notch.</string>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Ledge uses your location to show local weather. You can pick a city manually instead.</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Ledge shows connection and battery for your AirPods and other Bluetooth devices.</string>
-	<key>NSFocusStatusUsageDescription</key>
-	<string>Ledge shows a card when you switch a Focus on or off.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Ledge reads what Music and Spotify are playing so it can show playback in the notch.</string>
-	<key>NSDesktopFolderUsageDescription</key>
-	<string>Ledge parks new screenshots on its shelf, so it needs to read them where macOS saves them.</string>
-	<key>NSDownloadsFolderUsageDescription</key>
-	<string>Ledge shows the files you drop on the notch, including ones from Downloads.</string>
-	<key>NSDocumentsFolderUsageDescription</key>
-	<string>Ledge shows the files you drop on the notch, including ones from Documents.</string>
 </dict>
 </plist>
