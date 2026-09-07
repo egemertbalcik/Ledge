@@ -55,6 +55,7 @@ struct PreferencesTests {
         let mirror = Mirror(reflecting: Preferences(store: MemoryPreferenceStore()))
         let excluded: Set<String> = [
             "_store", "_isLoading", "_hasCompletedOnboarding", "_hasBeenIntroduced",
+            "_tourPage",
         ]
         let stored = mirror.children.compactMap { child -> String? in
             guard let label = child.label,

@@ -74,6 +74,7 @@ struct HUDSettingsTab: View {
 
     @Bindable var preferences: Preferences
     let actions: SettingsActions
+    let model: SettingsModel
 
     @State private var isTrusted = false
 
@@ -100,6 +101,18 @@ struct HUDSettingsTab: View {
                     Button("Grant Accessibility access…") {
                         actions.requestAccessibility()
                     }
+                } else if preferences.suppressSystemHUD, !model.isSuppressingSystemHUD {
+                    // Granted, wanted, and still not happening. macOS can hold
+                    // a fresh grant back until the app is restarted, and until
+                    // this line existed the only evidence was the system
+                    // readout carrying on as if Ledge were not there.
+                    Label(
+                        "Accessibility is granted, but macOS has not handed over the "
+                            + "key press yet. Quit and reopen Ledge.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
                 }
 
                 Text("""

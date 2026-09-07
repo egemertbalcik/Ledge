@@ -115,8 +115,7 @@ public final class HUDCoordinator {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
                 guard let self else { return }
-                if MediaKeyInterceptor.isTrusted {
-                    self.apply()   // starts the tap and cancels this task
+                if MediaKeyInterceptor.isTrusted, self.startTap() {
                     return
                 }
             }
@@ -155,18 +154,17 @@ public final class HUDCoordinator {
                 .write(toFile: trustPath, atomically: true, encoding: .utf8)
         }
 
-        if preferences.suppressSystemHUD, MediaKeyInterceptor.isTrustedNow {
-            trustRetry?.cancel()
-            trustRetry = nil
-            let started = interceptor.start(suppressSystemHUD: true)
-            Self.log.notice("native HUD suppression \(started ? "active" : "FAILED to start", privacy: .public)")
-            if !started {
-                Self.log.error("suppression requested but the tap did not start")
-            }
-            applyBrightnessWatching()
+        if preferences.suppressSystemHUD, MediaKeyInterceptor.isTrusted {
+            // A failure here is not the end of the attempt. The grant can be
+            // seconds old and the system can still refuse the tap; arming the
+            // retry on *that* is what the old code missed, because it only
+            // ever armed it when the trust check itself said no — and the
+            // trust check of the day could not say no.
+            if !startTap() { waitForTrust() }
         } else {
             interceptor.stop()
             applyBrightnessWatching()
+            onSuppressionChanged?(false)
             if preferences.suppressSystemHUD {
                 Self.log.notice("suppression requested but Accessibility is not granted — waiting")
                 // Begin the tap the moment the grant lands, no relaunch needed.
@@ -180,6 +178,28 @@ public final class HUDCoordinator {
             }
         }
     }
+
+    /// Starts the tap and reports whether it took. The only caller of
+    /// `interceptor.start` — success cancels the retry, failure is announced.
+    @discardableResult
+    private func startTap() -> Bool {
+        let started = interceptor.start(suppressSystemHUD: true)
+        Self.log.notice("native HUD suppression \(started ? "active" : "FAILED to start", privacy: .public)")
+        if started {
+            trustRetry?.cancel()
+            trustRetry = nil
+        } else {
+            Self.log.error("suppression requested but the tap did not start")
+        }
+        applyBrightnessWatching()
+        onSuppressionChanged?(started)
+        return started
+    }
+
+    /// Told after every attempt to start or stop the tap, with what actually
+    /// happened. Settings draws this rather than the preference, so a switch
+    /// that is on can never claim a tap that is not running.
+    public var onSuppressionChanged: ((Bool) -> Void)?
 
     public var isSuppressing: Bool { interceptor.isRunning }
 

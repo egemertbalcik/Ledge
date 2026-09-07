@@ -103,6 +103,11 @@ public final class LedgeCoordinator {
 
     private func permissionGranted(_ kind: PermissionKind) {
         if kind == .automation { ScriptingNowPlayingSource.forgetDenials() }
+        // A gained grant needs re-deciding exactly as much as a lost one. Only
+        // the loss did this, so Accessibility granted while the app ran left
+        // the tap unstarted until the next launch — with the settings switch
+        // saying it was suppressing the whole time.
+        if kind == .accessibility { hud.revalidateTrust() }
         // Accessibility exists in this app for exactly one purpose, and the
         // row the user granted it from says so: Ledge's readout *instead of*
         // the system's. Granting it and still getting both is not a subtle
@@ -131,8 +136,36 @@ public final class LedgeCoordinator {
     /// the window was already open — a grant made from the tour, or from
     /// System Settings with nothing of ours on screen, moves nothing.
     private func raiseSettingsAfterGrant() {
+        // Only while the user is out granting something they asked for from
+        // this window. Any gain at all used to bring the window forward, and
+        // since a permission could appear to flap several times a minute, the
+        // app repeatedly stole focus from whatever the user was doing —
+        // including from System Settings, where they were trying to grant.
+        guard permissionWatch != nil else { return }
         guard let settingsWindow, settingsWindow.isVisible else { return }
         present(settingsWindow)
+    }
+
+    /// Warns before the one grant that takes the app down with it.
+    ///
+    /// macOS quits an application the moment Full Disk Access is switched on
+    /// for it. Ledge disappearing mid-sentence — taking the settings window,
+    /// or the welcome tour, with it — reads as a crash caused by granting a
+    /// permission, which is the worst possible moment to look broken.
+    ///
+    /// - Returns: whether to go ahead.
+    private func confirmBeforeOpening(_ kind: PermissionKind) -> Bool {
+        guard kind == .fullDiskAccess else { return true }
+        let alert = NSAlert()
+        alert.messageText = "macOS will quit Ledge when you turn this on"
+        alert.informativeText = """
+            That is normal: the system restarts an app after granting it Full \
+            Disk Access. Reopen Ledge afterwards and it will pick up where it \
+            left off.
+            """
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// How long to keep looking for a permission the user was just sent to
@@ -159,6 +192,7 @@ public final class LedgeCoordinator {
                 guard self.permissions.status(of: kind) != before else { continue }
                 self.revalidatePermissions()
                 self.raiseSettingsAfterGrant()
+                self.permissionWatch = nil
                 return
             }
         }
@@ -444,7 +478,9 @@ public final class LedgeCoordinator {
                 actions: self.makeSettingsActions(),
                 openSettings: { [weak self] in self?.showSettings() },
                 openSource: { NSWorkspace.shared.open(Self.sourceURL) },
-                finish: finish
+                finish: finish,
+                startPage: Int(self.preferences.tourPage),
+                onPage: { [weak self] page in self?.preferences.tourPage = Double(page) }
             )
         },
         onFinish: { [weak self] in self?.onboardingFinished() }
@@ -456,10 +492,17 @@ public final class LedgeCoordinator {
     private func onboardingFinished() {
         let wasFirstRun = !preferences.hasCompletedOnboarding
         preferences.hasCompletedOnboarding = true
+        preferences.tourPage = 0
         // Everything that can raise a system dialog was held back until the
-        // tour had explained what Ledge is; this is the moment it may run.
+        // tour had explained what Ledge is. It may run now — but not *this
+        // instant*: the first automation query is itself a prompt (see
+        // `mayAskAboutPlayers`), and firing it here put the Automation dialog
+        // on screen at the exact moment the tour window vanished, with
+        // nothing left to explain it. That is the ambush the deferral exists
+        // to prevent, four pages later. The query happens on its own the next
+        // time something reads the permission — opening the Permissions pane,
+        // or a media card wanting a player.
         permissions.mayAskAboutPlayers = true
-        revalidatePermissions()
         activities.startEnabled()
         if wasFirstRun { playWelcome() }
     }
@@ -1210,6 +1253,9 @@ public final class LedgeCoordinator {
     }
 
     private func startHUD() {
+        // The settings window draws the tap's real state, so it has to hear
+        // about every attempt — including the ones that fail.
+        hud.onSuppressionChanged = { [weak self] _ in self?.refreshSettingsModel() }
         hud.onReadout = { [weak self] readout in
             guard let self else { return }
             // Every readout, ahead of every gate: an open Levels card follows
@@ -1689,6 +1735,7 @@ public final class LedgeCoordinator {
     ///
     /// Only ever *checks* — nothing here can prompt, so it is safe on a timer.
     private func refreshSettingsModel() {
+        settingsModel.isSuppressingSystemHUD = hud.isSuppressing
         // Deliberately does *not* re-read the permissions: this runs from many
         // places, and every read would quietly become the new baseline, so a
         // revocation could be absorbed between two of them and never acted on.
@@ -1733,6 +1780,8 @@ public final class LedgeCoordinator {
         parkedHUDCheck = nil
         permissionWatch?.cancel()
         permissionWatch = nil
+        windowSettle?.cancel()
+        windowSettle = nil
         preferences.onReset = {}
         focusBaseline?.stopWatching()
         focusBaseline = nil
@@ -2686,7 +2735,7 @@ public final class LedgeCoordinator {
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
             requestAccessibility: { MediaKeyInterceptor.requestTrust() },
             requestPermission: { [weak self] kind in
-                guard let self else { return }
+                guard let self, self.confirmBeforeOpening(kind) else { return }
                 Task { @MainActor in
                     let status = await self.permissions.request(kind)
                     if status == .granted { self.permissionGranted(kind) }
@@ -2698,8 +2747,9 @@ public final class LedgeCoordinator {
                 }
             },
             openPermissionSettings: { [weak self] kind in
-                self?.permissions.openSettings(for: kind)
-                self?.watchForPermission(kind)
+                guard let self, self.confirmBeforeOpening(kind) else { return }
+                self.permissions.openSettings(for: kind)
+                self.watchForPermission(kind)
             },
             // Opening the pane is a third moment worth re-reading at, and it
             // must act on what it finds rather than merely draw it: seeing
@@ -2722,15 +2772,47 @@ public final class LedgeCoordinator {
     /// actually brings it to the top.
     private func present(_ window: NSWindow) {
         // macOS refuses programmatic activation that is not backed by a user
-        // event, so a window opened at launch (LEDGE_DEBUG) lands behind the
-        // frontmost app. Opened from the menu bar item there is a real click
-        // behind it and normal ordering works, so the float is debug-only.
-        if DebugSwitches.isOn("LEDGE_DEBUG") {
-            window.level = .floating
-        }
+        // event, so a window opened at launch, or while System Settings is
+        // frontmost, lands *behind* whatever the user is looking at. For an
+        // accessory app that is fatal: no Dock icon, no Cmd-Tab entry, no way
+        // back to a window you cannot see.
+        //
+        // The tour has always floated itself over this problem
+        // (`OnboardingPresenter.show`). This did the same — but only under
+        // LEDGE_DEBUG, which compiles away in release, so the one path that
+        // exists to prove the app started could open behind Safari and prove
+        // nothing. Float unconditionally, then drop back to a normal window
+        // as soon as it is genuinely in front, so it does not spend its life
+        // hovering over other applications.
+        if !NSApp.isActive { window.level = .floating }
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        settleWindowLevel(window)
         Self.log.notice("settings window presented at \(window.frame.debugDescription, privacy: .public)")
     }
+
+    /// Returns a floated window to the normal level once it is actually key.
+    ///
+    /// The float is a way past macOS's refusal to activate an app that has no
+    /// user event behind it — not a wish to sit above everything for the rest
+    /// of the session. A settings window that never drops back is its own bug
+    /// report.
+    private func settleWindowLevel(_ window: NSWindow) {
+        guard window.level == .floating else { return }
+        windowSettle?.cancel()
+        windowSettle = Task { @MainActor [weak window] in
+            for _ in 0..<20 {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let window, window.isVisible else { return }
+                if window.isKeyWindow || NSApp.isActive {
+                    window.level = .normal
+                    return
+                }
+            }
+            window?.level = .normal
+        }
+    }
+
+    private var windowSettle: Task<Void, Never>?
 }

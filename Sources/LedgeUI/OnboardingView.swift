@@ -25,10 +25,12 @@ public struct OnboardingView: View {
     // so each page can be reviewed without clicking through the tour.
     private static let pageCount = 5
     // Clamped to the last page, not to a number that was the last page once.
-    @State private var page = min(
-        max(Int(DebugSwitches.value("LEDGE_ONBOARDING_PAGE") ?? "") ?? 0, 0),
-        OnboardingView.pageCount - 1
-    )
+    @State private var page: Int
+
+    /// Told the page number whenever it changes, so the tour can be resumed
+    /// where it stopped. It can stop without being finished: granting Full
+    /// Disk Access from page four makes macOS quit Ledge on the spot.
+    private let onPage: (Int) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -37,8 +39,13 @@ public struct OnboardingView: View {
         actions: SettingsActions,
         openSettings: @escaping () -> Void,
         openSource: @escaping () -> Void,
-        finish: @escaping () -> Void
+        finish: @escaping () -> Void,
+        startPage: Int = 0,
+        onPage: @escaping (Int) -> Void = { _ in }
     ) {
+        let debugPage = Int(DebugSwitches.value("LEDGE_ONBOARDING_PAGE") ?? "")
+        _page = State(initialValue: min(max(debugPage ?? startPage, 0), Self.pageCount - 1))
+        self.onPage = onPage
         self.model = model
         self.actions = actions
         self.openSettings = openSettings
@@ -189,6 +196,9 @@ public struct OnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear { actions.refreshPermissions() }
+        // Recorded as it happens rather than at the end: the tour can be cut
+        // short by the very thing it asks for.
+        .onChange(of: page) { _, now in onPage(now) }
         // Granting happens in a system dialog outside this window, so the
         // state is re-read rather than assumed.
         .task { await poll() }

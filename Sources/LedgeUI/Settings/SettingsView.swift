@@ -269,7 +269,7 @@ public struct SettingsView: View {
         case .compact:
             CompactSettingsTab(preferences: preferences, geometry: geometry)
         case .hud:
-            HUDSettingsTab(preferences: preferences, actions: actions)
+            HUDSettingsTab(preferences: preferences, actions: actions, model: model)
         case .permissions:
             PermissionsSettingsTab(model: model, actions: actions)
         case .about:

@@ -168,6 +168,11 @@ public enum Prefs {
     /// from a launch that failed; the first one always opens one.
     public static let hasBeenIntroduced = PrefKey<Bool>("general.introduced", default: false)
 
+    /// The tour page the user last reached. Granting Full Disk Access makes
+    /// macOS quit the app outright, so a tour can be killed halfway through
+    /// by doing what the tour asked; without this it began again at page one.
+    public static let tourPage = PrefKey<Double>("general.tourPage", default: 0)
+
     // Developer
     public static let debugTint = PrefKey<Bool>("developer.debugTint", default: false)
 
@@ -297,6 +302,7 @@ public final class Preferences {
 
     public var hasCompletedOnboarding: Bool { didSet { persist(hasCompletedOnboarding, Prefs.hasCompletedOnboarding) } }
     public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
+    public var tourPage: Double { didSet { persist(tourPage, Prefs.tourPage) } }
     public var debugTint: Bool { didSet { persist(debugTint, Prefs.debugTint) } }
 
     public init(store: PreferenceStoring) {
@@ -351,6 +357,7 @@ public final class Preferences {
         advanced = store.value(for: Prefs.advanced)
         hasCompletedOnboarding = store.value(for: Prefs.hasCompletedOnboarding)
         hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
+        tourPage = store.value(for: Prefs.tourPage)
         debugTint = store.value(for: Prefs.debugTint)
     }
 

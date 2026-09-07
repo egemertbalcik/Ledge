@@ -128,7 +128,7 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         // Asked of the live system, not the process cache: a grant revoked
         // while the app runs never reaches the cache, and this status is what
         // the Permissions pane draws and what the revalidation compares.
-        MediaKeyInterceptor.isTrustedNow ? .granted : .notDetermined
+        MediaKeyInterceptor.isTrusted ? .granted : .notDetermined
     }
 
     private func calendarStatus() -> PermissionStatus {
@@ -185,6 +185,10 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
     /// only tie up another thread behind the first.
     private var automationQueryInFlight = false
 
+    /// Whether a query has ever come back. Until it has, the deadline may fill
+    /// in "not requested"; afterwards the real answer stands.
+    private var hasAutomationAnswer = false
+
     /// Called when a background query changes the cached answer, so whoever
     /// built a snapshot from the stale one can build it again.
     public var onAutomationStatusChanged: (() -> Void)?
@@ -199,6 +203,16 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
     /// TCC will not let them take back from inside the app.
     public var mayAskAboutPlayers = false
 
+    /// When the last Apple Event query was started. Every other permission is
+    /// a local read; this one is an IPC round-trip to another application, and
+    /// the settings pane snapshots every two seconds.
+    private var lastAutomationQuery: TimeInterval = -.greatestFiniteMagnitude
+
+    /// The shortest gap between two queries. Long enough that an open pane is
+    /// not a stream of Apple Events, short enough that a grant made in System
+    /// Settings is noticed while the user is still looking at the window.
+    private static let automationQueryInterval: TimeInterval = 10
+
     private func automationStatus() -> PermissionStatus {
         guard mayAskAboutPlayers else { return .notDetermined }
 
@@ -212,7 +226,11 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             automationCache = .notApplicableNow
             return automationCache
         }
-        startAutomationQuery(for: running)
+        let now = Date().timeIntervalSinceReferenceDate
+        if now - lastAutomationQuery >= Self.automationQueryInterval {
+            lastAutomationQuery = now
+            startAutomationQuery(for: running)
+        }
         return automationCache
     }
 
@@ -236,6 +254,7 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             await MainActor.run {
                 guard let self else { return }
                 self.automationQueryInFlight = false
+                self.hasAutomationAnswer = true
                 guard answer != self.automationCache else { return }
                 self.automationCache = answer
                 self.onAutomationStatusChanged?()
@@ -251,6 +270,15 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             await MainActor.run {
                 guard let self, self.automationQueryInFlight else { return }
                 Self.log.notice("automation: permission query did not answer in time")
+                // Only ever for the *first* reading. Downgrading an answer we
+                // already have was a lie in the other direction, and an
+                // expensive one: the query reliably outruns this deadline, so
+                // every pass flipped granted -> notDetermined -> granted, which
+                // the shell read as a permission lost and regained. Each cycle
+                // tore down the now-playing provider and pulled the settings
+                // window to the front, a few seconds apart, for as long as the
+                // Permissions pane was open.
+                guard !self.hasAutomationAnswer else { return }
                 guard self.automationCache != .notDetermined else { return }
                 self.automationCache = .notDetermined
                 self.onAutomationStatusChanged?()
@@ -328,8 +356,12 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
 
         guard FileManager.default.fileExists(atPath: path.path) else {
             // The file is absent on a machine that has never configured a
-            // Focus. Nothing to grant access to, so nothing to report.
-            return .unavailable
+            // Focus. That says nothing about the permission — and reporting
+            // "unavailable on this Mac" drew a row with no button on it, for
+            // something perfectly grantable, on exactly the machines least
+            // likely to have set a Focus up yet. Undetermined is the honest
+            // answer: unknown, and worth offering.
+            return .notDetermined
         }
         // Reading one byte is enough to know, and avoids pulling a whole file
         // into memory just to answer a settings row. A refused read cannot

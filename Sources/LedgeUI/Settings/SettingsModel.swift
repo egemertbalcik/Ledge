@@ -26,6 +26,12 @@ public final class SettingsModel {
     /// diagnose.
     public var isLaunchedFromTerminal = false
 
+    /// Whether the key tap is *actually* running — not whether it was asked
+    /// for. The switch below it is a wish; this is what came of the wish, and
+    /// a user watching the macOS readout appear over Ledge's own is owed the
+    /// difference in writing rather than in a log line nobody reads.
+    public var isSuppressingSystemHUD = false
+
     public init() {}
 
     public func status(of kind: PermissionKind) -> PermissionStatus {

@@ -86,33 +86,36 @@ public final class MediaKeyInterceptor {
 
     public var isRunning: Bool { eventTap != nil }
 
-    /// Whether the app is trusted for Accessibility, without prompting.
+    /// Whether the app can actually intercept media keys right now.
     ///
-    /// Cheap, and answered from a cache the process fills on its first call —
-    /// which is exactly why it must not be the only check. See `isTrustedNow`.
+    /// One question, one answer, asked of the live system — and asked in the
+    /// only way that is honest: by creating the *same* tap `start()` will
+    /// create, and seeing whether the system hands one over.
+    ///
+    /// Two wrong answers were possible before, and the app gave both:
+    ///
+    /// - `AXIsProcessTrusted()` reads a per-process cache filled on the first
+    ///   call. A grant *revoked* while the app runs never reaches it, so the
+    ///   app believed it was suppressing the system readout long after the tap
+    ///   had been killed.
+    /// - A probe tap asking for no events at all — a session tap, listen-only,
+    ///   over a mask holding only `.null` — is granted to *anybody*. It is not
+    ///   a permission check, it is a formality that always succeeds, so the
+    ///   app also believed it was trusted when it had never been granted
+    ///   anything. That one told every new user their Accessibility permission
+    ///   was already in place, and hid the button that would have granted it.
+    ///
+    /// What makes this version a real question is that it asks for something
+    /// only the grant can buy: the HID tap, as a `.defaultTap` — the right to
+    /// *swallow* a key press rather than watch it go by. Torn down at once;
+    /// this is a question, not a subscription. Cheap enough for the settings
+    /// pane's poll, and the only thing any decision here consults.
     public static var isTrusted: Bool {
-        AXIsProcessTrusted()
-    }
-
-    /// The same question, asked of the live system rather than the cache.
-    ///
-    /// `AXIsProcessTrusted()` reads a per-process cache populated the first
-    /// time it is called. A grant *revoked* while the app runs never reaches
-    /// that cache, so the app went on believing it could suppress the system
-    /// readout long after it could not — the tap was dead, the native HUD was
-    /// back, and nothing knew.
-    ///
-    /// Creating a session event tap is the cheapest call that actually
-    /// consults the live database: without the grant it returns nil. The tap
-    /// listens for nothing and is torn down immediately; this is a question,
-    /// not a subscription. Too expensive for a poll, which is why it is asked
-    /// on waking and on becoming active rather than on a timer.
-    public static var isTrustedNow: Bool {
         guard let probe = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: CGEventMask(1 << CGEventType.null.rawValue),
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(1 << systemDefinedType.rawValue),
             callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
             userInfo: nil
         ) else { return false }
