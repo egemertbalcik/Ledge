@@ -8,7 +8,7 @@ You already look up there. Ledge puts what you're checking anyway — the song,
 the timer, the next meeting — in the black bar you've been ignoring since 2021.
 Quiet when nothing is happening, there the moment something is.
 
-<a href="https://github.com/egemertbalcik/Ledge/releases/download/v1.0.0/Ledge-1.0.0.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download Ledge for macOS"></a>
+<a href="https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download Ledge for macOS"></a>
 <a href="https://buymeacoffee.com/egebalcik" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
 
 [ledgeapp.dev](https://ledgeapp.dev) · free · open source · no account, no telemetry
@@ -102,7 +102,7 @@ and it can never be sold on the App Store. The source for all of it is here.
 
 ## Install
 
-[Download the DMG](https://github.com/egemertbalcik/Ledge/releases/download/v1.0.0/Ledge-1.0.0.dmg),
+[Download the DMG](https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg),
 drag Ledge into Applications, and open it **from Finder** — macOS gives the
 permissions to whatever launched the app, so starting it from a terminal hands
 them to the terminal instead. After that it keeps itself up to date with
