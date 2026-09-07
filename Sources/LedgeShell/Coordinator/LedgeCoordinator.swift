@@ -483,13 +483,23 @@ public final class LedgeCoordinator {
                 onPage: { [weak self] page in self?.preferences.tourPage = Double(page) }
             )
         },
-        onFinish: { [weak self] in self?.onboardingFinished() }
+        onFinish: { [weak self] completed in self?.onboardingFinished(completed: completed) }
     )
 
     /// Presents the tour: at first launch, and again on request from Settings.
     public func showOnboarding() { onboarding.show() }
 
-    private func onboardingFinished() {
+    /// - Parameter completed: whether the user reached the end and pressed
+    ///   Done. A tour that was merely closed leaves the flag alone, so it is
+    ///   offered again next launch — the cards still run meanwhile, but the
+    ///   explanation has not been given yet and the app does not pretend it
+    ///   has.
+    private func onboardingFinished(completed: Bool) {
+        guard completed else {
+            Self.log.notice("onboarding: closed before the end — will offer again")
+            activities.startEnabled()
+            return
+        }
         let wasFirstRun = !preferences.hasCompletedOnboarding
         preferences.hasCompletedOnboarding = true
         preferences.tourPage = 0
@@ -1780,8 +1790,6 @@ public final class LedgeCoordinator {
         parkedHUDCheck = nil
         permissionWatch?.cancel()
         permissionWatch = nil
-        windowSettle?.cancel()
-        windowSettle = nil
         preferences.onReset = {}
         focusBaseline?.stopWatching()
         focusBaseline = nil
@@ -2777,42 +2785,23 @@ public final class LedgeCoordinator {
         // accessory app that is fatal: no Dock icon, no Cmd-Tab entry, no way
         // back to a window you cannot see.
         //
-        // The tour has always floated itself over this problem
-        // (`OnboardingPresenter.show`). This did the same — but only under
-        // LEDGE_DEBUG, which compiles away in release, so the one path that
-        // exists to prove the app started could open behind Safari and prove
-        // nothing. Float unconditionally, then drop back to a normal window
-        // as soon as it is genuinely in front, so it does not spend its life
-        // hovering over other applications.
-        if !NSApp.isActive { window.level = .floating }
+        // The tour floats for the same reason (`OnboardingPresenter.show`).
+        // This used to float only under LEDGE_DEBUG, which compiles away in
+        // release — so the one path that exists to prove the app started could
+        // open behind Safari and prove nothing.
+        //
+        // It stays floating for as long as it is open, and that is deliberate.
+        // A settings window that sinks behind other applications is merely
+        // annoying for a normal app, and unusable for this one: an accessory
+        // app has no Dock icon and no Cmd-Tab entry, so a buried window is a
+        // window the user has to hunt for with Mission Control — and the times
+        // it sinks are the worst possible ones, because granting a permission
+        // means going to System Settings, which takes the front.
+        window.level = .floating
         window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        settleWindowLevel(window)
         Self.log.notice("settings window presented at \(window.frame.debugDescription, privacy: .public)")
     }
 
-    /// Returns a floated window to the normal level once it is actually key.
-    ///
-    /// The float is a way past macOS's refusal to activate an app that has no
-    /// user event behind it — not a wish to sit above everything for the rest
-    /// of the session. A settings window that never drops back is its own bug
-    /// report.
-    private func settleWindowLevel(_ window: NSWindow) {
-        guard window.level == .floating else { return }
-        windowSettle?.cancel()
-        windowSettle = Task { @MainActor [weak window] in
-            for _ in 0..<20 {
-                try? await Task.sleep(for: .milliseconds(100))
-                guard let window, window.isVisible else { return }
-                if window.isKeyWindow || NSApp.isActive {
-                    window.level = .normal
-                    return
-                }
-            }
-            window?.level = .normal
-        }
-    }
-
-    private var windowSettle: Task<Void, Never>?
 }

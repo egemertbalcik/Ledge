@@ -28,12 +28,13 @@ final class OnboardingPresenter {
     /// settings model, the actions, the links — belongs to the coordinator.
     private let makeView: (@escaping () -> Void) -> OnboardingView
 
-    /// Called once, whichever way the tour ends.
-    private let onFinish: () -> Void
+    /// Called once, whichever way the tour ends, with whether the user
+    /// actually got to the end of it.
+    private let onFinish: (Bool) -> Void
 
     init(
         makeView: @escaping (@escaping () -> Void) -> OnboardingView,
-        onFinish: @escaping () -> Void
+        onFinish: @escaping (Bool) -> Void
     ) {
         self.makeView = makeView
         self.onFinish = onFinish
@@ -69,7 +70,7 @@ final class OnboardingPresenter {
         }
         Self.log.notice("onboarding: presenting welcome window")
 
-        let view = makeView { [weak self] in self?.finish() }
+        let view = makeView { [weak self] in self?.finish(completed: true) }
 
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.windowSize),
@@ -96,26 +97,30 @@ final class OnboardingPresenter {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
-        // Closing with the title-bar button is also a decision: the tour was
-        // offered and declined. Without this only "Done" recorded completion
-        // and the window re-appeared on every launch.
+        // Closing with the title-bar button is not an answer. It used to
+        // count as one, which made the tour trivial to lose: one stray click
+        // on a red dot and the only explanation of what Ledge is, and which
+        // permissions it needs and why, was gone for good — on an app whose
+        // whole interface is a shape around a notch. It comes back on the
+        // next launch, on the page it was left, until somebody reaches the
+        // end and presses Done.
         closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.finish() }
+            MainActor.assumeIsolated { self?.finish(completed: false) }
         }
     }
 
     /// Tears the window down and tells the coordinator, once.
-    func finish() {
+    func finish(completed: Bool) {
         if let closeObserver {
             NotificationCenter.default.removeObserver(closeObserver)
         }
         closeObserver = nil
         window?.close()
         window = nil
-        onFinish()
+        onFinish(completed)
     }
 }

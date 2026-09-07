@@ -146,7 +146,7 @@ public enum Prefs {
 
     // General
     public static let launchAtLogin = PrefKey<Bool>("general.launchAtLogin", default: false)
-    public static let hideFromScreenCapture = PrefKey<Bool>("general.hideFromScreenCapture", default: true)
+    public static let hideFromScreenCapture = PrefKey<Bool>("general.hideFromScreenCapture", default: false)
 
     /// Reveals the fine-tuning panes — shape, motion, ear geometry, timings.
     /// Deliberately has no control of its own: they exist for tuning the app,
