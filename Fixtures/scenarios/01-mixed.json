@@ -1,0 +1,97 @@
+{
+  "name": "mixed",
+  "steps": [
+    {
+      "at": 1.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "nowPlaying",
+          "source": "sample.player",
+          "nowPlaying": {
+            "title": "Test Track One",
+            "artist": "Sample Artist",
+            "album": "Fixture Album",
+            "isPlaying": true,
+            "elapsed": 42,
+            "duration": 214,
+            "sourceName": "Sample Player",
+            "accent": { "red": 0.85, "green": 0.36, "blue": 0.28 }
+          }
+        }
+      }
+    },
+    {
+      "at": 3.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "device",
+          "source": "sample.earbuds",
+          "expiresAfter": 6,
+          "device": {
+            "name": "Test Earbuds",
+            "symbolName": "airpods.gen3",
+            "isConnected": true,
+            "batteryLevels": { "Case": 0.9, "Left": 0.82, "Right": 0.79 }
+          }
+        }
+      }
+    },
+    {
+      "at": 6.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "focus",
+          "source": "sample.focus",
+          "focus": {
+            "name": "Deep Work",
+            "symbolName": "moon.fill",
+            "isActive": true
+          }
+        }
+      }
+    },
+    {
+      "at": 9.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "event",
+          "source": "sample.event",
+          "event": {
+            "title": "Design review",
+            "location": "Room 2",
+            "startsIn": 900,
+            "accent": { "red": 0.36, "green": 0.55, "blue": 0.9 }
+          }
+        }
+      }
+    },
+    {
+      "at": 12.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "power",
+          "source": "sample.battery",
+          "expiresAfter": 5,
+          "power": {
+            "percentage": 0.18,
+            "isCharging": false,
+            "isLowPower": true,
+            "timeRemaining": 2700
+          }
+        }
+      }
+    },
+    {
+      "at": 16.0,
+      "action": {
+        "type": "retract",
+        "id": { "kind": "focus", "source": "sample.focus" }
+      }
+    }
+  ]
+}

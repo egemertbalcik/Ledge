@@ -1,0 +1,115 @@
+{
+  "name": "demo-cards",
+  "steps": [
+    {
+      "at": 0.5,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "weather",
+          "source": "demo.weather",
+          "weather": {
+            "temperatureCelsius": 24,
+            "symbolName": "sun.max.fill",
+            "condition": "Clear",
+            "city": "Lisbon",
+            "isDay": true,
+            "highCelsius": 27,
+            "lowCelsius": 18,
+            "usesDeviceLocation": false,
+            "hourly": [
+              { "hour": 13, "temperatureCelsius": 24, "symbolName": "sun.max.fill", "isNow": true },
+              { "hour": 14, "temperatureCelsius": 26, "symbolName": "sun.max.fill", "isNow": false },
+              { "hour": 15, "temperatureCelsius": 27, "symbolName": "sun.max.fill", "isNow": false },
+              { "hour": 16, "temperatureCelsius": 26, "symbolName": "cloud.sun.fill", "isNow": false },
+              { "hour": 17, "temperatureCelsius": 24, "symbolName": "cloud.sun.fill", "isNow": false },
+              { "hour": 18, "temperatureCelsius": 22, "symbolName": "cloud.fill", "isNow": false }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "at": 1.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "event",
+          "source": "demo.calendar",
+          "priority": 20,
+          "event": {
+            "title": "Design review",
+            "location": "Studio",
+            "startsIn": 1500,
+            "hasEvent": true,
+            "accent": { "red": 0.36, "green": 0.55, "blue": 0.9 },
+            "monthEventDays": [3, 7, 12, 18, 23, 27, 30],
+            "monthEvents": [
+              { "day": 3, "entries": [ { "title": "Kick-off", "time": "10:00" } ] },
+              { "day": 7, "entries": [ { "title": "Ship v1.0", "time": "09:30" }, { "title": "Retro", "time": "16:00" } ] },
+              { "day": 12, "entries": [ { "title": "Dentist", "time": "11:15" } ] },
+              { "day": 18, "entries": [ { "title": "Flight to Berlin", "time": "07:40" } ] },
+              { "day": 23, "entries": [ { "title": "Coffee with Sam", "time": "15:00" } ] },
+              { "day": 27, "entries": [ { "title": "Standup", "time": "09:15" }, { "title": "1:1", "time": "13:00" } ] },
+              { "day": 30, "entries": [ { "title": "Design review", "time": "14:00" }, { "title": "Studio visit", "time": "17:30" } ] }
+            ],
+            "monthWindows": [
+              {
+                "year": 2026, "month": 8,
+                "eventDays": [3, 7, 12, 18, 23, 27, 30],
+                "events": [
+                  { "day": 3, "entries": [ { "title": "Kick-off", "time": "10:00" } ] },
+                  { "day": 7, "entries": [ { "title": "Ship v1.0", "time": "09:30" }, { "title": "Retro", "time": "16:00" } ] },
+                  { "day": 12, "entries": [ { "title": "Dentist", "time": "11:15" } ] },
+                  { "day": 18, "entries": [ { "title": "Flight to Berlin", "time": "07:40" } ] },
+                  { "day": 23, "entries": [ { "title": "Coffee with Sam", "time": "15:00" } ] },
+                  { "day": 27, "entries": [ { "title": "Standup", "time": "09:15" }, { "title": "1:1", "time": "13:00" } ] },
+                  { "day": 30, "entries": [ { "title": "Design review", "time": "14:00" }, { "title": "Studio visit", "time": "17:30" } ] }
+                ]
+              },
+              {
+                "year": 2026, "month": 9,
+                "eventDays": [2, 8, 15, 21],
+                "events": [
+                  { "day": 2, "entries": [ { "title": "Planning", "time": "10:00" } ] },
+                  { "day": 8, "entries": [ { "title": "Launch review", "time": "14:30" } ] },
+                  { "day": 15, "entries": [ { "title": "Offsite", "time": "09:00" } ] },
+                  { "day": 21, "entries": [ { "title": "Board update", "time": "11:00" } ] }
+                ]
+              },
+              {
+                "year": 2026, "month": 7,
+                "eventDays": [6, 14, 29],
+                "events": [
+                  { "day": 6, "entries": [ { "title": "Interview", "time": "13:00" } ] },
+                  { "day": 14, "entries": [ { "title": "Sprint review", "time": "15:00" } ] },
+                  { "day": 29, "entries": [ { "title": "Handover", "time": "10:30" } ] }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "at": 3600.0,
+      "action": {
+        "type": "publish",
+        "activity": {
+          "kind": "weather",
+          "source": "demo.weather",
+          "weather": {
+            "temperatureCelsius": 24,
+            "symbolName": "sun.max.fill",
+            "condition": "Clear",
+            "city": "Lisbon",
+            "isDay": true,
+            "highCelsius": 27,
+            "lowCelsius": 18,
+            "usesDeviceLocation": false
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Not sandboxed. The app has to read IOKit power state, talk to Bluetooth,
+	  drive AppleScript, and dlopen private frameworks; none of that survives
+	  the sandbox.
+	-->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!--
+	  Hardened-runtime resource-access entitlements. On recent macOS a hardened
+	  app that calls EventKit / CoreLocation gets a silent no-op (request returns
+	  false, error nil, status stays notDetermined, no prompt) unless it declares
+	  the resource it intends to touch. Declaring them lets the prompt appear.
+	-->
+	<key>com.apple.security.personal-information.calendars</key>
+	<true/>
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+	<key>com.apple.security.device.bluetooth</key>
+	<true/>
+
+	<!--
+	  Apple Events. The playback reads go through a child osascript, which is
+	  attributed to Ledge as the responsible process — but the *status* check
+	  (AEDeterminePermissionToAutomateTarget) runs in-process, and under the
+	  hardened runtime it answers "not permitted" for a process without this
+	  entitlement no matter what the user granted. Without it the Permissions
+	  pane showed Automation as denied forever.
+	-->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>
