@@ -162,6 +162,12 @@ public enum Prefs {
     /// False until the first-run window has been dismissed.
     public static let hasCompletedOnboarding = PrefKey<Bool>("general.onboardingDone", default: false)
 
+    /// False until Ledge has shown this user *something* it can be steered
+    /// from — the tour, or Settings in its place. An accessory app draws no
+    /// window of its own, so a launch that opens neither is indistinguishable
+    /// from a launch that failed; the first one always opens one.
+    public static let hasBeenIntroduced = PrefKey<Bool>("general.introduced", default: false)
+
     // Developer
     public static let debugTint = PrefKey<Bool>("developer.debugTint", default: false)
 
@@ -290,6 +296,7 @@ public final class Preferences {
     public var advanced: Bool { didSet { persist(advanced, Prefs.advanced) } }
 
     public var hasCompletedOnboarding: Bool { didSet { persist(hasCompletedOnboarding, Prefs.hasCompletedOnboarding) } }
+    public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
     public var debugTint: Bool { didSet { persist(debugTint, Prefs.debugTint) } }
 
     public init(store: PreferenceStoring) {
@@ -343,6 +350,7 @@ public final class Preferences {
         hideFromScreenCapture = store.value(for: Prefs.hideFromScreenCapture)
         advanced = store.value(for: Prefs.advanced)
         hasCompletedOnboarding = store.value(for: Prefs.hasCompletedOnboarding)
+        hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
         debugTint = store.value(for: Prefs.debugTint)
     }
 

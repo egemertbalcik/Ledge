@@ -27,6 +27,7 @@ public final class LedgeCoordinator {
     )
     private var hoverTracker: HoverTracker<CGDirectDisplayID>?
     private var settingsWindow: NSWindow?
+    private var permissionWatch: Task<Void, Never>?
 
     /// Notification tokens, kept so they can be removed. `addObserver(forName:)`
     /// returns an object the centre retains until it is handed back; dropping
@@ -118,6 +119,49 @@ public final class LedgeCoordinator {
             activities.restartProvider(registration.id)
         }
         refreshSettingsModel()
+        raiseSettingsAfterGrant()
+    }
+
+    /// Brings the settings window back after the user has granted something.
+    ///
+    /// The grant happens in System Settings, which opens *over* Ledge's
+    /// window, and Ledge is an accessory app: once it is behind something
+    /// there is no Dock icon and no Cmd-Tab entry to get back to it, so the
+    /// window had to be hunted for among everything else on screen. Only when
+    /// the window was already open — a grant made from the tour, or from
+    /// System Settings with nothing of ours on screen, moves nothing.
+    private func raiseSettingsAfterGrant() {
+        guard let settingsWindow, settingsWindow.isVisible else { return }
+        present(settingsWindow)
+    }
+
+    /// How long to keep looking for a permission the user was just sent to
+    /// System Settings to grant.
+    private static let permissionWatchWindow: TimeInterval = 240
+
+    /// Watches for the answer while the user is away in System Settings.
+    ///
+    /// TCC broadcasts nothing, so without this the grant is only noticed when
+    /// Ledge next becomes active — which is the very thing the user cannot do
+    /// without first finding the window. Bounded, and only ever running while
+    /// a request the user made is outstanding and the settings window is up.
+    private func watchForPermission(_ kind: PermissionKind) {
+        permissionWatch?.cancel()
+        let before = permissions.status(of: kind)
+        // Automation is read by sending an Apple Event to a player, so it is
+        // asked for less often than the rest, which are local reads.
+        let interval: TimeInterval = kind == .automation ? 2 : 1
+        permissionWatch = Task { @MainActor [weak self] in
+            for _ in 0..<Int(Self.permissionWatchWindow / interval) {
+                try? await Task.sleep(for: .seconds(interval))
+                guard let self, !Task.isCancelled else { return }
+                guard self.settingsWindow?.isVisible == true else { return }
+                guard self.permissions.status(of: kind) != before else { continue }
+                self.revalidatePermissions()
+                self.raiseSettingsAfterGrant()
+                return
+            }
+        }
     }
 
     private func handlePreferencesReset() {
@@ -248,8 +292,32 @@ public final class LedgeCoordinator {
         applyDebugOverrides()
         startHoverTracking()
         observeSystemChanges()
-        onboarding.showIfNeeded(hasCompletedOnboarding: preferences.hasCompletedOnboarding)
+        introduceIfNeeded()
         sayHello()
+    }
+
+    /// The first launch always leaves the user with a window in front of them.
+    ///
+    /// Normally that is the tour. But someone whose onboarding flag is already
+    /// set — an upgrade, a reinstall, a copy carried over from another Mac —
+    /// gets no tour, and Ledge is an accessory app: no Dock icon, no window,
+    /// nothing in the Cmd-Tab list. That launch is indistinguishable from one
+    /// that failed, and was read as exactly that. Settings stands in, once.
+    private func introduceIfNeeded() {
+        // Development launches open Settings themselves and must not consume
+        // the one introduction the real first launch is owed.
+        guard !DebugSwitches.isOn("LEDGE_DEBUG") else {
+            onboarding.showIfNeeded(hasCompletedOnboarding: preferences.hasCompletedOnboarding)
+            return
+        }
+        let tourShown = onboarding.showIfNeeded(
+            hasCompletedOnboarding: preferences.hasCompletedOnboarding
+        )
+        guard !preferences.hasBeenIntroduced else { return }
+        preferences.hasBeenIntroduced = true
+        guard !tourShown else { return }
+        Self.log.notice("first launch without the tour — opening Settings instead")
+        showSettings()
     }
 
     /// How long the eyes are on screen: exactly as long as their own
@@ -1663,6 +1731,8 @@ public final class LedgeCoordinator {
         restingHold = false
         parkedHUDCheck?.cancel()
         parkedHUDCheck = nil
+        permissionWatch?.cancel()
+        permissionWatch = nil
         preferences.onReset = {}
         focusBaseline?.stopWatching()
         focusBaseline = nil
@@ -2621,10 +2691,15 @@ public final class LedgeCoordinator {
                     let status = await self.permissions.request(kind)
                     if status == .granted { self.permissionGranted(kind) }
                     self.refreshSettingsModel()
+                    // Most requests send the user to System Settings rather
+                    // than answering here; the watch is what notices when they
+                    // do the thing, and brings this window back.
+                    if status != .granted { self.watchForPermission(kind) }
                 }
             },
             openPermissionSettings: { [weak self] kind in
                 self?.permissions.openSettings(for: kind)
+                self?.watchForPermission(kind)
             },
             // Opening the pane is a third moment worth re-reading at, and it
             // must act on what it finds rather than merely draw it: seeing

@@ -40,17 +40,23 @@ final class OnboardingPresenter {
     }
 
     /// First launch only, and never in the middle of development.
-    func showIfNeeded(hasCompletedOnboarding: Bool) {
+    ///
+    /// - Returns: whether the tour was actually put up. The caller needs to
+    ///   know, because a first launch that shows nothing at all looks like a
+    ///   launch that failed — see `introduceIfNeeded()`.
+    @discardableResult
+    func showIfNeeded(hasCompletedOnboarding: Bool) -> Bool {
         guard !hasCompletedOnboarding else {
             Self.log.debug("onboarding: already completed")
-            return
+            return false
         }
         // Suppressed under debug launches so it does not interrupt development.
         guard !DebugSwitches.isOn("LEDGE_DEBUG") else {
             Self.log.debug("onboarding: suppressed under LEDGE_DEBUG")
-            return
+            return false
         }
         show()
+        return true
     }
 
     /// Presents the tour: at first launch, and again on request from Settings.
