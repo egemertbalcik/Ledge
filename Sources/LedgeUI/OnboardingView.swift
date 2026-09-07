@@ -185,7 +185,14 @@ public struct OnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 6) {
-                ForEach(model.permissions) { row in
+                // Full Disk Access is deliberately not offered here. It is the
+                // broadest permission macOS has, granting it makes the system
+                // quit the app on the spot, and all it buys Ledge is the
+                // *name* of the Focus you turned on instead of the word
+                // "Focus". That is not a trade to put in front of somebody in
+                // their first two minutes. It stays in Settings for anyone who
+                // wants the label.
+                ForEach(model.permissions.filter { $0.kind != .fullDiskAccess }) { row in
                     permissionRow(row)
                 }
             }

@@ -113,6 +113,16 @@ final class OnboardingPresenter {
         }
     }
 
+    /// Lifts the tour above other applications, or lets it sit among them.
+    ///
+    /// It floats so it cannot be lost behind whatever the user was doing. It
+    /// stops floating while they are answering a system dialog or working in
+    /// System Settings, because a permission prompt drawn *underneath* the
+    /// window that asked for it is a button that does nothing.
+    func setFloating(_ floating: Bool) {
+        window?.level = floating ? .floating : .normal
+    }
+
     /// Tears the window down and tells the coordinator, once.
     func finish(completed: Bool) {
         if let closeObserver {

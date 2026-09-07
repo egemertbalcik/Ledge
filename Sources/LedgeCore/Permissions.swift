@@ -56,7 +56,7 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .focusStatus:
             "Lets Ledge see whether a Focus is on, so it can show the card when you switch one on or off."
         case .fullDiskAccess:
-            "Adds the Focus mode's own name and icon, which macOS keeps in a protected file. Without it the card still appears, just as \"Focus\"."
+            "Optional, and rarely worth it. It adds the Focus mode's own name and icon, which macOS keeps in a protected file — without it the card still appears, just as \"Focus\". macOS quits Ledge when you turn this on."
         }
     }
 

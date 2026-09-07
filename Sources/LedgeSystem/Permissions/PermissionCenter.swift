@@ -388,7 +388,14 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
 
         switch permission {
         case .accessibility:
+            // The prompt is a courtesy, not the grant: the switch lives in
+            // System Settings either way, and macOS shows this dialog at most
+            // once per app — after it has been dismissed, later calls do
+            // nothing at all. A button that silently does nothing is how this
+            // permission became impossible to turn on from inside the app, so
+            // the pane is opened as well, every time.
             MediaKeyInterceptor.requestTrust()
+            openSettings(for: .accessibility)
 
         case .calendars:
             let statusBefore = EKEventStore.authorizationStatus(for: .event).rawValue
@@ -416,7 +423,17 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             // There is no standalone request. The prompt appears when an Apple
             // event is actually sent, so the honest move is to send a harmless
             // one and let macOS ask.
+            //
+            // Asking is itself consent to ask: until the user pressed this,
+            // queries were held back (see `mayAskAboutPlayers`), which also
+            // meant the status could only ever read "not requested" — so
+            // granting it here could never show up in the row that asked.
+            mayAskAboutPlayers = true
             await requestAutomation()
+            // The answer arrives on a background query; make sure the next
+            // reading actually runs one rather than serving the rate-limited
+            // cache from before the grant.
+            lastAutomationQuery = -.greatestFiniteMagnitude
 
         case .bluetooth:
             // Requesting means starting a CBCentralManager — the one thing that

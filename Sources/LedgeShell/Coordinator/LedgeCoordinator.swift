@@ -146,6 +146,23 @@ public final class LedgeCoordinator {
         present(settingsWindow)
     }
 
+    /// Gets Ledge's own windows out of the way of a system dialog.
+    ///
+    /// Both the tour and the settings window float, so they cannot be lost
+    /// behind other applications. The exception is the moment they send the
+    /// user to a permission prompt or to System Settings: a floating window
+    /// covers the dialog it just asked for, and the user sees a button that
+    /// does nothing. They come back up when the user comes back to Ledge.
+    private func standAsideForSystemUI() {
+        settingsWindow?.level = .normal
+        onboarding.setFloating(false)
+    }
+
+    private func reclaimFront() {
+        if settingsWindow?.isVisible == true { settingsWindow?.level = .floating }
+        onboarding.setFloating(true)
+    }
+
     /// Warns before the one grant that takes the app down with it.
     ///
     /// macOS quits an application the moment Full Disk Access is switched on
@@ -678,7 +695,12 @@ public final class LedgeCoordinator {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.revalidatePermissions() }
+            MainActor.assumeIsolated {
+                self?.revalidatePermissions()
+                // Back from System Settings: the windows that stood aside for
+                // the dialog take the front again.
+                self?.reclaimFront()
+            }
         })
 
         // Anything a removed feature left in the keychain goes now, rather
@@ -2744,6 +2766,7 @@ public final class LedgeCoordinator {
             requestAccessibility: { MediaKeyInterceptor.requestTrust() },
             requestPermission: { [weak self] kind in
                 guard let self, self.confirmBeforeOpening(kind) else { return }
+                self.standAsideForSystemUI()
                 Task { @MainActor in
                     let status = await self.permissions.request(kind)
                     if status == .granted { self.permissionGranted(kind) }
@@ -2756,6 +2779,7 @@ public final class LedgeCoordinator {
             },
             openPermissionSettings: { [weak self] kind in
                 guard let self, self.confirmBeforeOpening(kind) else { return }
+                self.standAsideForSystemUI()
                 self.permissions.openSettings(for: kind)
                 self.watchForPermission(kind)
             },
