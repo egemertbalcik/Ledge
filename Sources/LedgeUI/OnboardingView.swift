@@ -185,14 +185,7 @@ public struct OnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 6) {
-                // Full Disk Access is deliberately not offered here. It is the
-                // broadest permission macOS has, granting it makes the system
-                // quit the app on the spot, and all it buys Ledge is the
-                // *name* of the Focus you turned on instead of the word
-                // "Focus". That is not a trade to put in front of somebody in
-                // their first two minutes. It stays in Settings for anyone who
-                // wants the label.
-                ForEach(model.permissions.filter { $0.kind != .fullDiskAccess }) { row in
+                ForEach(model.permissions) { row in
                     permissionRow(row)
                 }
             }
@@ -405,8 +398,6 @@ public struct OnboardingView: View {
             "Lets Ledge catch the volume and brightness keys, so its readout replaces the system's grey square instead of appearing under it."
         case .focusStatus:
             "Sees whether a Focus is on, so the notch can say so and stay quiet during one."
-        case .fullDiskAccess:
-            "Reads the Focus mode's own name and icon from your Mac's own file. Nothing leaves the machine."
         }
     }
 
@@ -418,7 +409,6 @@ public struct OnboardingView: View {
         case .automation: "music.note"
         case .accessibility: "speaker.wave.2.fill"
         case .focusStatus: "moon.fill"
-        case .fullDiskAccess: "lock.doc.fill"
         }
     }
 

@@ -21,12 +21,16 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     /// Needed for local weather without a manually chosen city.
     case location
 
-    /// Needed to know whether a Focus is on. Ordinary and promptable, unlike
-    /// Full Disk Access — this is what makes the Focus card possible at all.
+    /// Needed to know whether a Focus is on. Ordinary and promptable, and
+    /// what makes the Focus card possible at all.
+    ///
+    /// Full Disk Access used to sit beside this, asked for so the card could
+    /// print the Focus's own name rather than the word "Focus". It was the
+    /// broadest permission macOS grants, the system quit the app when it was
+    /// turned on, and it bought a label. It is gone: if a Mac happens to have
+    /// granted it for other reasons the name still appears, and otherwise the
+    /// card says "Focus" and nobody is asked for anything.
     case focusStatus
-
-    /// Needed to read Focus mode *names*. An upgrade, not a requirement.
-    case fullDiskAccess
 
     public var displayName: String {
         switch self {
@@ -36,7 +40,6 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .bluetooth: "Bluetooth"
         case .location: "Location"
         case .focusStatus: "Focus"
-        case .fullDiskAccess: "Full Disk Access"
         }
     }
 
@@ -55,26 +58,17 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
             "Lets Ledge show local weather automatically. You can pick a city manually instead."
         case .focusStatus:
             "Lets Ledge see whether a Focus is on, so it can show the card when you switch one on or off."
-        case .fullDiskAccess:
-            "Optional, and rarely worth it. It adds the Focus mode's own name and icon, which macOS keeps in a protected file — without it the card still appears, just as \"Focus\". macOS quits Ledge when you turn this on."
         }
     }
 
     /// Whether the app can present a system prompt for this, or whether the
     /// user has to grant it by hand.
     ///
-    /// Two cannot be prompted for:
-    ///
-    /// - **Full Disk Access** has no request API at all. It can only be probed
-    ///   by trying a protected read and seeing whether it fails.
-    /// - **Accessibility** does show a prompt, but the actual grant still
-    ///   happens in System Settings — the prompt is only a shortcut there.
-    public var isRequestable: Bool {
-        switch self {
-        case .accessibility, .automation, .calendars, .bluetooth, .location, .focusStatus: true
-        case .fullDiskAccess: false
-        }
-    }
+    /// All of them can be asked for now. Accessibility is the odd one: it does
+    /// show a prompt, but the grant still happens in System Settings — the
+    /// prompt is only a shortcut there, and one macOS shows at most once, so
+    /// the pane is opened alongside it.
+    public var isRequestable: Bool { true }
 }
 
 public enum PermissionStatus: String, Equatable, Sendable {

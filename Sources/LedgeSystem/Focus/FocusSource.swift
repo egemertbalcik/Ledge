@@ -174,13 +174,18 @@ public final class FileFocusSource: FocusSource {
         // change, which orphans a per-file descriptor after the first write.
         let descriptor = open(Self.databaseDirectory.path, O_EVTONLY)
         guard descriptor >= 0 else {
-            // Either no Full Disk Access, or the directory simply does not
-            // exist yet — an account that never toggled Focus has none.
-            Self.log.notice("cannot watch Focus database — no Full Disk Access or no Focus history")
+            // Either the directory does not exist yet — an account that never
+            // toggled Focus has none — or it is there and unreadable, which
+            // means Full Disk Access. Ledge does not ask for that: the Focus
+            // card works from the Focus-status permission, and the database
+            // only ever added the mode's *name*. So this is a note, not a
+            // problem to solve.
+            Self.log.notice("Focus database not readable — mode names will read as \"Focus\"")
             Self.diag("startWatching: OPEN FAILED path=\(Self.databaseDirectory.path) errno=\(errno)")
-            // Full Disk Access can't be prompted; poll until the user grants it,
-            // then begin watching without a relaunch — same idea as the HUD's
-            // Accessibility retry.
+            // The directory can appear later — the first time this account
+            // turns a Focus on — and on a Mac that happens to have granted
+            // Full Disk Access for other reasons the names become readable
+            // too. Worth noticing, not worth hurrying for.
             scheduleReadyRetry()
             return
         }
@@ -203,23 +208,22 @@ public final class FileFocusSource: FocusSource {
         watcher = source
     }
 
-    /// Polls for Full Disk Access while it is missing, then starts watching the
-    /// moment it lands and re-reads, so a Focus already on shows immediately.
+    /// Waits for the Focus database to become readable, then starts watching
+    /// and re-reads, so a Focus already on shows immediately.
     private func scheduleReadyRetry() {
         readyRetry?.cancel()
         readyRetry = Task { @MainActor [weak self] in
-            // Brisk while the grant dialog is plausibly on screen, backing off
-            // to a slow idle: with FDA granted but no Focus database (an
-            // account that never toggled Focus) this loop is the app's steady
-            // state for its whole life, and a 2-second stat forever is churn
-            // for nothing.
+            // This is the steady state on most Macs, not a transient: nobody
+            // is being asked for anything, so nothing is about to change in
+            // the next few seconds. Start brisk in case a Focus is being set
+            // up right now, then settle to a stat every few minutes.
             var delay: Double = 2
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(delay))
-                delay = min(delay * 1.5, 30)
+                delay = min(delay * 1.5, 300)
                 guard let self, let onChange = self.pendingOnChange else { return }
                 if self.isReadable {
-                    Self.diag("readyRetry: FDA now readable — starting watch")
+                    Self.diag("readyRetry: database now readable — starting watch")
                     self.startWatching(onChange)  // now the open() succeeds
                     onChange()                    // surface a Focus already active
                     return

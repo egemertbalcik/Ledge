@@ -41,7 +41,6 @@ private enum PreviewShell {
             PermissionRow(kind: .bluetooth, status: .denied),
             PermissionRow(kind: .location, status: .notDetermined),
             PermissionRow(kind: .focusStatus, status: .granted),
-            PermissionRow(kind: .fullDiskAccess, status: .notDetermined),
         ]
         m.providers = [
             ProviderDescriptor(id: "nowplaying", displayName: "Now Playing", kind: .nowPlaying,

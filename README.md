@@ -130,7 +130,7 @@ on without it.
 | Automation | Cover art and scrubbing in Music and Spotify | Music still shows up, just without the artwork |
 | Calendars | Your next event, and the month | No calendar card |
 | Bluetooth | Connections the moment they happen, and AirPods proximity | Still read, just a beat later |
-| Full Disk Access | The Focus mode's real name and icon | No Focus card |
+| Focus status | The notch says when a Focus is on, and stays quiet during it | Announcements come through regardless |
 | Location | Weather for wherever you are | Weather for a city you type in |
 
 ## Build it yourself

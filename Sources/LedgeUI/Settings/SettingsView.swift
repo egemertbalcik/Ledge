@@ -28,8 +28,7 @@ public struct SettingsActions {
     public var requestPermission: (PermissionKind) -> Void
 
     /// Opens the System Settings pane that grants it — the only remedy once a
-    /// permission has been denied, and the only action at all for Full Disk
-    /// Access, which cannot be requested programmatically.
+    /// permission has been denied, since TCC will not prompt twice.
     public var openPermissionSettings: (PermissionKind) -> Void
 
     /// Re-reads every permission. Cheap, and never prompts.

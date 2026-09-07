@@ -109,7 +109,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         case .bluetooth: bluetoothStatus()
         case .location: locationStatus()
         case .focusStatus: focusStatusStatus()
-        case .fullDiskAccess: fullDiskAccessStatus()
         }
     }
 
@@ -335,11 +334,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    /// Full Disk Access has no query API and no request API.
-    ///
-    /// The only honest test is to read something it protects and see whether it
-    /// works. `FileManager.isReadableFile` is no use — under TCC it answers
-    /// `true` and the read then fails.
     /// Whether Ledge may ask the system if a Focus is on.
     private func focusStatusStatus() -> PermissionStatus {
         switch focusStatus.authorization {
@@ -350,29 +344,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    private func fullDiskAccessStatus() -> PermissionStatus {
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/DoNotDisturb/DB/ModeConfigurations.json")
-
-        guard FileManager.default.fileExists(atPath: path.path) else {
-            // The file is absent on a machine that has never configured a
-            // Focus. That says nothing about the permission — and reporting
-            // "unavailable on this Mac" drew a row with no button on it, for
-            // something perfectly grantable, on exactly the machines least
-            // likely to have set a Focus up yet. Undetermined is the honest
-            // answer: unknown, and worth offering.
-            return .notDetermined
-        }
-        // Reading one byte is enough to know, and avoids pulling a whole file
-        // into memory just to answer a settings row. A refused read cannot
-        // tell "never granted" from "revoked" — Full Disk Access has no
-        // prompt and no not-determined state of its own — so it reads as not
-        // yet granted rather than "Denied", which accused every fresh Mac of a
-        // refusal nobody made. The remedy is System Settings either way.
-        guard let handle = try? FileHandle(forReadingFrom: path) else { return .notDetermined }
-        defer { try? handle.close() }
-        return (try? handle.read(upToCount: 1)) != nil ? .granted : .notDetermined
-    }
 
     // MARK: - Requesting
 
@@ -453,9 +424,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
 
         case .focusStatus:
             await focusStatus.requestAuthorization()
-
-        case .fullDiskAccess:
-            break
         }
 
         let result = status(of: permission)
@@ -533,7 +501,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         case .bluetooth: anchor = "Privacy_Bluetooth"
         case .location: anchor = "Privacy_LocationServices"
         case .focusStatus: anchor = "Privacy_Focus"
-        case .fullDiskAccess: anchor = "Privacy_AllFiles"
         }
 
         let url = URL(
