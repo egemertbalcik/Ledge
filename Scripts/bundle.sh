@@ -93,6 +93,32 @@ fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$PLIST"
 echo "CFBundleVersion $BUILD_NUMBER"
 
+# A debug build is a different app, and macOS is told so.
+#
+# It used to carry the shipped identifier, which meant the two shared
+# everything macOS keys to it: the same TCC grants and the same preferences
+# domain. A rebuild-and-relaunch during development would take over the
+# installed app's Accessibility grant — TCC binds a grant to the signature
+# that was in front of it, and the two are signed with different certificates
+# — so the installed copy silently lost a permission its switch still claimed
+# to have. It also consumed first-run flags, making a genuine first launch
+# impossible to test on a machine that had ever built the app. Whole evenings
+# went into chasing that.
+#
+# The name changes with it, so two entries in System Settings' permission
+# lists can be told apart.
+if [[ "${LEDGE_DIST:-0}" != "1" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.egemert.ledge.debug" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName Ledge (debug)" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Ledge (debug)" "$PLIST" 2>/dev/null || \
+        /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Ledge (debug)" "$PLIST"
+    # And it must never update itself into the real app.
+    for key in SUFeedURL SUEnableAutomaticChecks; do
+        /usr/libexec/PlistBuddy -c "Delete :$key" "$PLIST" 2>/dev/null || true
+    done
+    echo "CFBundleIdentifier com.egemert.ledge.debug (development build)"
+fi
+
 # A distribution bundle must run on both Intel and Apple Silicon. Checked here,
 # on the copies, so an arm64-only executable from a plain `swift build` cannot
 # be shipped by pointing bundle.sh at the wrong directory.

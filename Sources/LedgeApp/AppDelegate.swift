@@ -123,7 +123,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    private static let showSettingsRequest = Notification.Name("com.egemert.ledge.showSettings")
+    /// Named after *this* bundle, so a development build and the installed app
+    /// cannot answer each other's requests. They used to share one name, and
+    /// opening either would pop the other one's settings window.
+    private static let showSettingsRequest = Notification.Name(
+        "\(Bundle.main.bundleIdentifier ?? "com.egemert.ledge").showSettings"
+    )
     private var showSettingsToken: (any NSObjectProtocol)?
 
     private func observeShowSettingsRequests() {

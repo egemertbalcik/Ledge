@@ -34,6 +34,13 @@ trap 'rm -f "$ERRLOG"' EXIT
 # information, or similar detritus not allowed".
 xattr -cr "$APP"
 
+# Read back from the bundle rather than hardcoded: bundle.sh gives a
+# development build its own identifier, and `codesign --identifier` is what TCC
+# actually binds a grant to. Signing a debug bundle as the shipped identifier
+# would leave the collision in place with the plist merely pretending otherwise.
+BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Contents/Info.plist")"
+
+
 # --deep is deliberately not used: it re-signs nested code with the outer
 # entitlements, which is wrong and is a documented footgun.
 # Nested code must be signed independently, and BEFORE the outer bundle, or
@@ -47,7 +54,7 @@ xattr -cr "$APP"
 shopt -s nullglob
 for dylib in "$APP"/Contents/Frameworks/*.dylib; do
     codesign --force "$TIMESTAMP" \
-        --identifier com.egemert.ledge.mediaadapter \
+        --identifier "$BUNDLE_ID.mediaadapter" \
         --sign "$IDENTITY" "$dylib"
     echo "signed nested $(basename "$dylib")"
 done
@@ -80,7 +87,7 @@ if [[ -d "$SPARKLE_FW" ]]; then
     echo "signed nested Sparkle.framework"
 fi
 
-ARGS=(--force "$TIMESTAMP" --identifier com.egemert.ledge)
+ARGS=(--force "$TIMESTAMP" --identifier "$BUNDLE_ID")
 
 if [[ "$IDENTITY" != "-" ]]; then
     # Hardened runtime only with a real identity — it interferes with dlopen of
@@ -112,7 +119,7 @@ if ! codesign "${ARGS[@]}" --sign "$IDENTITY" "$APP" 2>"$ERRLOG"; then
         # Keep every flag except --entitlements. Dropping --options runtime
         # here too would silently ship a build without the hardened runtime,
         # differing from the intended output with nothing to signal it.
-        RETRY=(--force "$TIMESTAMP" --identifier com.egemert.ledge)
+        RETRY=(--force "$TIMESTAMP" --identifier "$BUNDLE_ID")
         [[ "$IDENTITY" != "-" ]] && RETRY+=(--options runtime)
         codesign "${RETRY[@]}" --sign "$IDENTITY" "$APP"
     else
