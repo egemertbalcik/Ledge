@@ -213,6 +213,13 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
     private static let automationQueryInterval: TimeInterval = 10
 
     private func automationStatus() -> PermissionStatus {
+        // Reads "not requested" while the gate is shut, which is true of this
+        // app's asking and not necessarily of the grant: someone who allowed
+        // Automation for a previous install is told it has not been requested
+        // until they press the button, which then finds it already granted.
+        // The alternative is worse — the query is itself a prompt (see
+        // `mayAskAboutPlayers`), so an honest reading here would put a system
+        // dialog in front of a first-time user with nothing to explain it.
         guard mayAskAboutPlayers else { return .notDetermined }
 
         let running = Self.automationTargets.filter {

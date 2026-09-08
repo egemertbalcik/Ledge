@@ -2803,10 +2803,19 @@ public final class LedgeCoordinator {
                     let status = await self.permissions.request(kind)
                     if status == .granted { self.permissionGranted(kind) }
                     self.refreshSettingsModel()
-                    // Most requests send the user to System Settings rather
-                    // than answering here; the watch is what notices when they
-                    // do the thing, and brings this window back.
-                    if status != .granted { self.watchForPermission(kind) }
+                    // Some prompts are the app's own — Calendar, Location,
+                    // Bluetooth answer here and now, without the user ever
+                    // leaving Ledge. Standing aside for those and waiting for
+                    // a return that never comes left the window it was asked
+                    // from sitting among other applications.
+                    if status == .granted {
+                        self.reclaimFront()
+                    } else {
+                        // The rest send the user to System Settings; the watch
+                        // notices when they do the thing, and brings the
+                        // window back then.
+                        self.watchForPermission(kind)
+                    }
                 }
             },
             openPermissionSettings: { [weak self] kind in
