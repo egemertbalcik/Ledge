@@ -72,12 +72,23 @@ public enum Prefs {
     /// so the ordinary HUD costs the user nothing.
     public static let hudEnabled = PrefKey<Bool>("hud.enabled", default: true)
     public static let hudBrightnessEnabled = PrefKey<Bool>("hud.brightnessEnabled", default: true)
-    /// Off by default, and needs Accessibility. Suppression swallows the key
-    /// press, so a mistake here means a key that does nothing — an event tap
-    /// that eats input must be something the user switched on, never a
-    /// default that self-activates the moment Accessibility is granted for
-    /// any other reason.
-    public static let suppressSystemHUD = PrefKey<Bool>("hud.suppressSystem", default: false)
+    /// On by default, and gated on Accessibility, which is the only thing that
+    /// makes it possible at all.
+    ///
+    /// It was off, on the reasoning that a tap which swallows key presses must
+    /// be switched on deliberately. In practice the reasoning was wrong twice
+    /// over. Somebody grants Accessibility for exactly one reason — the
+    /// permission's own description says so: Ledge's readout *instead of* the
+    /// system's grey square — and then got both anyway, with a switch
+    /// elsewhere in Settings they had no reason to look for. And the fallback
+    /// it protects against is not a key that does nothing: without the grant
+    /// the tap cannot be created, so nothing is swallowed and macOS behaves
+    /// exactly as it always did.
+    ///
+    /// So: granted means suppressed, from the first launch, with no second
+    /// switch to find. Anyone who wants the system readout back turns this
+    /// off, and their answer is remembered.
+    public static let suppressSystemHUD = PrefKey<Bool>("hud.suppressSystem", default: true)
     /// 1/16 matches the size of one press of the hardware key.
     public static let hudVolumeStep = PrefKey<Double>("hud.volumeStep", default: 0.0625)
     public static let hudBrightnessStep = PrefKey<Double>("hud.brightnessStep", default: 0.0625)

@@ -108,17 +108,6 @@ public final class LedgeCoordinator {
         // the tap unstarted until the next launch — with the settings switch
         // saying it was suppressing the whole time.
         if kind == .accessibility { hud.revalidateTrust() }
-        // Accessibility exists in this app for exactly one purpose, and the
-        // row the user granted it from says so: Ledge's readout *instead of*
-        // the system's. Granting it and still getting both is not a subtle
-        // disappointment — it reads as the permission having done nothing.
-        //
-        // Only when the switch has never been touched: someone who turned
-        // suppression off deliberately keeps their answer.
-        if kind == .accessibility, !preferences.hasStoredValue(Prefs.suppressSystemHUD.name) {
-            preferences.suppressSystemHUD = true
-            Self.log.notice("accessibility granted — system HUD suppression on by default")
-        }
         for registration in activities.registeredProviders
         where registration.permission == kind {
             activities.restartProvider(registration.id)
