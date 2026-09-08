@@ -179,9 +179,9 @@ public enum Prefs {
     /// from a launch that failed; the first one always opens one.
     public static let hasBeenIntroduced = PrefKey<Bool>("general.introduced", default: false)
 
-    /// The tour page the user last reached, so it resumes where it stopped
-    /// rather than starting over. A tour can end without being finished —
-    /// closed, quit, or the app restarted by the system mid-way.
+    /// The tour page the user last reached. Granting Full Disk Access makes
+    /// macOS quit the app outright, so a tour can be killed halfway through
+    /// by doing what the tour asked; without this it began again at page one.
     public static let tourPage = PrefKey<Double>("general.tourPage", default: 0)
 
     // Developer

@@ -152,6 +152,28 @@ public final class LedgeCoordinator {
         onboarding.setFloating(true)
     }
 
+    /// Warns before the one grant that takes the app down with it.
+    ///
+    /// macOS quits an application the moment Full Disk Access is switched on
+    /// for it. Ledge disappearing mid-sentence — taking the settings window,
+    /// or the welcome tour, with it — reads as a crash caused by granting a
+    /// permission, which is the worst possible moment to look broken.
+    ///
+    /// - Returns: whether to go ahead.
+    private func confirmBeforeOpening(_ kind: PermissionKind) -> Bool {
+        guard kind == .fullDiskAccess else { return true }
+        let alert = NSAlert()
+        alert.messageText = "macOS will quit Ledge when you turn this on"
+        alert.informativeText = """
+            That is normal: the system restarts an app after granting it Full \
+            Disk Access. Reopen Ledge afterwards and it will pick up where it \
+            left off.
+            """
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     /// How long to keep looking for a permission the user was just sent to
     /// System Settings to grant.
     private static let permissionWatchWindow: TimeInterval = 240
@@ -2742,7 +2764,7 @@ public final class LedgeCoordinator {
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
             requestAccessibility: { MediaKeyInterceptor.requestTrust() },
             requestPermission: { [weak self] kind in
-                guard let self else { return }
+                guard let self, self.confirmBeforeOpening(kind) else { return }
                 self.standAsideForSystemUI()
                 Task { @MainActor in
                     let status = await self.permissions.request(kind)
@@ -2755,7 +2777,7 @@ public final class LedgeCoordinator {
                 }
             },
             openPermissionSettings: { [weak self] kind in
-                guard let self else { return }
+                guard let self, self.confirmBeforeOpening(kind) else { return }
                 self.standAsideForSystemUI()
                 self.permissions.openSettings(for: kind)
                 self.watchForPermission(kind)

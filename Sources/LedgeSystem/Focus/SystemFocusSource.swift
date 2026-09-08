@@ -27,7 +27,16 @@ public final class SystemFocusSource: FocusSource {
     /// How often the fallback path re-asks the system regardless of events.
     /// One ~21 ms round trip at this cadence is background noise; it exists so
     /// a missed event costs a slow update rather than a dead card.
-    private static let backstopInterval: TimeInterval = 30
+    /// How often the fallback asks the system whether a Focus is on.
+    ///
+    /// This is the *only* signal for anyone without Full Disk Access, because
+    /// the database whose changes would wake us is unreadable without it — so
+    /// it is also the card's entire latency. Thirty seconds meant a Focus card
+    /// that arrived long after the switch was flipped, which reads as the app
+    /// being asleep. The read is a ~21 ms XPC round trip on a background task;
+    /// four seconds of that is a fraction of a percent of one core, and it is
+    /// what makes the card feel connected to the switch.
+    private static let backstopInterval: TimeInterval = 4
 
     /// What last prompted a reading — the filesystem event or the timer.
     /// Only ever read by the trace: which of the two is doing the work is the
