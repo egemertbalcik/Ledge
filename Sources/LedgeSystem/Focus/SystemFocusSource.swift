@@ -24,14 +24,11 @@ public final class SystemFocusSource: FocusSource {
 
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "focus")
 
-    /// How often the fallback path re-asks the system regardless of events.
-    /// One ~21 ms round trip at this cadence is background noise; it exists so
-    /// a missed event costs a slow update rather than a dead card.
     /// How often the fallback asks the system whether a Focus is on.
     ///
-    /// This is the *only* signal for anyone without Full Disk Access, because
-    /// the database whose changes would wake us is unreadable without it — so
-    /// it is also the card's entire latency. Thirty seconds meant a Focus card
+    /// This is the *only* signal for anyone who has not given Ledge the Focus
+    /// folder, because the database whose changes would wake us cannot be read
+    /// without it — so it is also the card's entire latency. Thirty seconds meant a Focus card
     /// that arrived long after the switch was flipped, which reads as the app
     /// being asleep. The read is a ~21 ms XPC round trip on a background task;
     /// four seconds of that is a fraction of a percent of one core, and it is

@@ -29,6 +29,48 @@ public final class LedgeCoordinator {
     private var settingsWindow: NSWindow?
     private var permissionWatch: Task<Void, Never>?
 
+    /// The one folder Ledge ever asks for by name, and the reason it does not
+    /// ask for Full Disk Access to get at the same thing.
+    private lazy var focusFolder = FocusDatabaseAccess(
+        bookmark: { [weak self] in self?.preferences.focusFolderBookmark ?? "" },
+        storeBookmark: { [weak self] in self?.preferences.focusFolderBookmark = $0 }
+    )
+
+    /// Asks for the Focus database folder, and rebuilds the card on an answer.
+    ///
+    /// The panel opens *on* the folder, so granting is one click: `~/Library`
+    /// is hidden in the Finder, and somebody sent to find it themselves would
+    /// not.
+    private func chooseFocusFolder() {
+        let folder = FocusDatabaseAccess.databaseFolder
+        guard FileManager.default.fileExists(atPath: folder.path) else {
+            let alert = NSAlert()
+            alert.messageText = "Turn a Focus on first"
+            alert.informativeText = """
+                macOS makes this folder the first time a Focus is used. Turn one \
+                on, then come back — there is nothing here to grant yet.
+                """
+            alert.runModal()
+            return
+        }
+        standAsideForSystemUI()
+        let panel = NSOpenPanel()
+        panel.message = "Give Ledge this one folder, so the Focus card is immediate and shows the mode's name."
+        panel.prompt = "Grant Access"
+        panel.directoryURL = folder
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        NSApp.activate(ignoringOtherApps: true)
+        defer { reclaimFront() }
+        guard panel.runModal() == .OK, let picked = panel.url else { return }
+        focusFolder.remember(picked)
+        // The provider found the database shut when it started; it has to be
+        // built again to watch what it can now see.
+        activities.restartProvider("focus")
+        refreshSettingsModel()
+    }
+
     /// Notification tokens, kept so they can be removed. `addObserver(forName:)`
     /// returns an object the centre retains until it is handed back; dropping
     /// the token leaks the registration and makes `start()` non-idempotent.
@@ -150,28 +192,6 @@ public final class LedgeCoordinator {
     private func reclaimFront() {
         if settingsWindow?.isVisible == true { settingsWindow?.level = .floating }
         onboarding.setFloating(true)
-    }
-
-    /// Warns before the one grant that takes the app down with it.
-    ///
-    /// macOS quits an application the moment Full Disk Access is switched on
-    /// for it. Ledge disappearing mid-sentence — taking the settings window,
-    /// or the welcome tour, with it — reads as a crash caused by granting a
-    /// permission, which is the worst possible moment to look broken.
-    ///
-    /// - Returns: whether to go ahead.
-    private func confirmBeforeOpening(_ kind: PermissionKind) -> Bool {
-        guard kind == .fullDiskAccess else { return true }
-        let alert = NSAlert()
-        alert.messageText = "macOS will quit Ledge when you turn this on"
-        alert.informativeText = """
-            That is normal: the system restarts an app after granting it Full \
-            Disk Access. Reopen Ledge afterwards and it will pick up where it \
-            left off.
-            """
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// How long to keep looking for a permission the user was just sent to
@@ -317,6 +337,9 @@ public final class LedgeCoordinator {
         // Disturb before starting Ledge was peeked at like anyone else.
         // Same source the provider uses, so the baseline is right whether the
         // database is readable or only the system's on/off answer is.
+        // Before anything reads the Focus database: the folder the user gave
+        // is only readable while its scope is held open.
+        focusFolder.restore()
         focusBaseline = SystemFocusSource()
         focusBaseline?.startWatching { [weak self] in
             guard let self else { return }
@@ -2764,7 +2787,7 @@ public final class LedgeCoordinator {
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
             requestAccessibility: { MediaKeyInterceptor.requestTrust() },
             requestPermission: { [weak self] kind in
-                guard let self, self.confirmBeforeOpening(kind) else { return }
+                guard let self else { return }
                 self.standAsideForSystemUI()
                 Task { @MainActor in
                     let status = await self.permissions.request(kind)
@@ -2777,7 +2800,7 @@ public final class LedgeCoordinator {
                 }
             },
             openPermissionSettings: { [weak self] kind in
-                guard let self, self.confirmBeforeOpening(kind) else { return }
+                guard let self else { return }
                 self.standAsideForSystemUI()
                 self.permissions.openSettings(for: kind)
                 self.watchForPermission(kind)
@@ -2793,7 +2816,9 @@ public final class LedgeCoordinator {
                 self.refreshSettingsModel()
             },
             showOnboarding: { [weak self] in self?.showOnboarding() },
-            openSource: { NSWorkspace.shared.open(Self.sourceURL) }
+            openSource: { NSWorkspace.shared.open(Self.sourceURL) },
+            chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() },
+            focusFolderGranted: { [weak self] in self?.focusFolder.isReadable ?? false }
         )
     }
 

@@ -234,6 +234,25 @@ struct PermissionsSettingsTab: View {
                 }
             }
 
+            // Not a system permission, so it sits above them rather than
+            // among them: one folder the user hands over in an open panel,
+            // which is what Full Disk Access would otherwise be asked for.
+            Section("Focus folder") {
+                LabeledContent("Status") {
+                    Text(actions.focusFolderGranted() ? "Granted" : "Not granted")
+                        .foregroundStyle(actions.focusFolderGranted() ? .green : .orange)
+                        .font(.caption.weight(.semibold))
+                }
+                Text("""
+                    macOS keeps the Focus you are in inside one folder. Given                     that folder, the Focus card follows the switch immediately                     and shows the mode's own name and icon; without it Ledge                     asks the system every few seconds and the card reads                     "Focus". Nothing else in the folder is used, and nothing                     leaves your Mac.
+                    """)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                if !actions.focusFolderGranted() {
+                    Button("Choose Folder…") { actions.chooseFocusFolder() }
+                }
+            }
+
             ForEach(model.permissions) { row in
                 Section(row.kind.displayName) {
                     LabeledContent("Status") {

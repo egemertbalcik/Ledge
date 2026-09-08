@@ -174,13 +174,17 @@ public final class FileFocusSource: FocusSource {
         // change, which orphans a per-file descriptor after the first write.
         let descriptor = open(Self.databaseDirectory.path, O_EVTONLY)
         guard descriptor >= 0 else {
-            // Either no Full Disk Access, or the directory simply does not
-            // exist yet — an account that never toggled Focus has none.
-            Self.log.notice("cannot watch Focus database — no Full Disk Access or no Focus history")
+            // Either Ledge has not been given the folder, or the directory
+            // simply does not exist yet — an account that has never turned a
+            // Focus on has none.
+            Self.log.notice("""
+                Focus database not readable — the card will follow the timer, and \
+                modes will read as "Focus". Settings offers the folder.
+                """)
             Self.diag("startWatching: OPEN FAILED path=\(Self.databaseDirectory.path) errno=\(errno)")
-            // Full Disk Access can't be prompted; poll until the user grants it,
-            // then begin watching without a relaunch — same idea as the HUD's
-            // Accessibility retry.
+            // The folder can be given at any moment from Settings, and the
+            // directory itself appears the first time this account turns a
+            // Focus on. Either way, start watching without a relaunch.
             scheduleReadyRetry()
             return
         }

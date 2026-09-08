@@ -184,6 +184,14 @@ public enum Prefs {
     /// by doing what the tour asked; without this it began again at page one.
     public static let tourPage = PrefKey<Double>("general.tourPage", default: 0)
 
+    /// A security-scoped bookmark to the Focus database folder, base64 encoded.
+    ///
+    /// Written when the user picks `~/Library/DoNotDisturb/DB` in an open
+    /// panel, which is what buys the right to read it — see
+    /// `FocusDatabaseAccess`. Empty until then, and empty is a perfectly good
+    /// state: the Focus card works without it.
+    public static let focusFolderBookmark = PrefKey<String>("focus.folderBookmark", default: "")
+
     // Developer
     public static let debugTint = PrefKey<Bool>("developer.debugTint", default: false)
 
@@ -314,6 +322,7 @@ public final class Preferences {
     public var hasCompletedOnboarding: Bool { didSet { persist(hasCompletedOnboarding, Prefs.hasCompletedOnboarding) } }
     public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
     public var tourPage: Double { didSet { persist(tourPage, Prefs.tourPage) } }
+    public var focusFolderBookmark: String { didSet { persist(focusFolderBookmark, Prefs.focusFolderBookmark) } }
     public var debugTint: Bool { didSet { persist(debugTint, Prefs.debugTint) } }
 
     public init(store: PreferenceStoring) {
@@ -369,6 +378,7 @@ public final class Preferences {
         hasCompletedOnboarding = store.value(for: Prefs.hasCompletedOnboarding)
         hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
         tourPage = store.value(for: Prefs.tourPage)
+        focusFolderBookmark = store.value(for: Prefs.focusFolderBookmark)
         debugTint = store.value(for: Prefs.debugTint)
     }
 

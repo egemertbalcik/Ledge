@@ -25,15 +25,6 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     /// Full Disk Access — this is what makes the Focus card possible at all.
     case focusStatus
 
-    /// Makes the Focus card immediate, and gives the mode its own name.
-    ///
-    /// Never required, and never asked for during the tour. Without it Ledge
-    /// still knows a Focus is on, through the ordinary Focus-status
-    /// permission — but it learns by asking on a timer rather than by being
-    /// woken when the database changes, so the card can lag the switch, and
-    /// the mode reads as "Focus" rather than by name.
-    case fullDiskAccess
-
     public var displayName: String {
         switch self {
         case .accessibility: "Accessibility"
@@ -42,7 +33,6 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .bluetooth: "Bluetooth"
         case .location: "Location"
         case .focusStatus: "Focus"
-        case .fullDiskAccess: "Full Disk Access"
         }
     }
 
@@ -61,26 +51,17 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
             "Lets Ledge show local weather automatically. You can pick a city manually instead."
         case .focusStatus:
             "Lets Ledge see whether a Focus is on, so it can show the card when you switch one on or off."
-        case .fullDiskAccess:
-            "Optional. Makes the Focus card follow the switch straight away instead of within half a minute, and gives the mode its own name and icon. Without it the card still appears, just later and as \"Focus\". macOS quits Ledge when you turn this on — reopen it afterwards."
         }
     }
 
     /// Whether the app can present a system prompt for this, or whether the
     /// user has to grant it by hand.
     ///
-    /// Two cannot be prompted for:
-    ///
-    /// - **Full Disk Access** has no request API at all. It can only be probed
-    ///   by trying a protected read and seeing whether it fails.
-    /// - **Accessibility** does show a prompt, but the actual grant still
-    ///   happens in System Settings — the prompt is only a shortcut there.
-    public var isRequestable: Bool {
-        switch self {
-        case .accessibility, .automation, .calendars, .bluetooth, .location, .focusStatus: true
-        case .fullDiskAccess: false
-        }
-    }
+    /// All of them can be asked for. Accessibility is the odd one: it does
+    /// show a prompt, but the grant still happens in System Settings — the
+    /// prompt is only a shortcut there, and macOS shows it at most once, so
+    /// the pane is opened alongside it.
+    public var isRequestable: Bool { true }
 }
 
 public enum PermissionStatus: String, Equatable, Sendable {

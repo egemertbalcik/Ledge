@@ -131,7 +131,7 @@ on without it.
 | Calendars | Your next event, and the month | No calendar card |
 | Bluetooth | Connections the moment they happen, and AirPods proximity | Still read, just a beat later |
 | Focus status | The notch says when a Focus is on, and stays quiet during it | Announcements come through regardless |
-| Full Disk Access *(optional, not asked for)* | The Focus card follows the switch immediately, and names the mode | Still shown, within a few seconds, as "Focus" |
+| The Focus folder *(optional, not a system permission)* | The Focus card follows the switch immediately, and names the mode | Still shown, within a few seconds, as "Focus" |
 | Location | Weather for wherever you are | Weather for a city you type in |
 
 ## Build it yourself
