@@ -148,7 +148,7 @@ public final class HUDCoordinator {
         // verified after a LaunchServices launch (no stderr to read) and after
         // a live grant that `waitForTrust` picks up. Opt-in like the other
         // diagnostic dotfiles — a stranger's home directory is not a log.
-        if DebugSwitches.isOn("LEDGE_HUD_DIAG") {
+        if DebugSwitches.tracing("hud") {
             let trustPath = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-hud-trust")
             try? "suppress=\(preferences.suppressSystemHUD) trusted=\(MediaKeyInterceptor.isTrusted)"
                 .write(toFile: trustPath, atomically: true, encoding: .utf8)

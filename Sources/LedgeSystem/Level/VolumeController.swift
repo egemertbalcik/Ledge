@@ -161,7 +161,7 @@ public final class VolumeController {
             guard readout != self.lastDelivered else { return }
             self.lastDelivered = readout
             Self.delivered += 1
-            if DebugSwitches.isOn("LEDGE_TRACE_LEVELS") {
+            if DebugSwitches.tracing("levels") {
                 Self.log.debug("""
                     volume notify=\(Self.notified, privacy: .public) \
                     delivered=\(Self.delivered, privacy: .public) \

@@ -29,6 +29,12 @@ public final class SystemFocusSource: FocusSource {
     /// a missed event costs a slow update rather than a dead card.
     private static let backstopInterval: TimeInterval = 30
 
+    /// What last prompted a reading — the filesystem event or the timer.
+    /// Only ever read by the trace: which of the two is doing the work is the
+    /// difference between a Focus card that follows the switch and one that
+    /// arrives up to half a minute late.
+    fileprivate var lastWake = "startup"
+
     private let file: FileFocusSource
     private let status: FocusStatusReader
 
@@ -161,6 +167,12 @@ public final class SystemFocusSource: FocusSource {
             guard focused != self.fallbackFocused else { return }
             self.fallbackFocused = focused
             Self.log.debug("focus (system): \(focused ? "on" : "off", privacy: .public)")
+            if DebugSwitches.tracing("focus") {
+                Self.log.notice("""
+                    focus: now \(focused ? "on" : "off", privacy: .public) — \
+                    noticed by \(self.lastWake, privacy: .public)
+                    """)
+            }
             self.onChange?()
         }
     }
@@ -174,6 +186,7 @@ public final class SystemFocusSource: FocusSource {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.backstopInterval))
                 guard let self, !Task.isCancelled else { return }
+                self.lastWake = "the \(Int(Self.backstopInterval))s timer"
                 self.refresh()
             }
         }
@@ -196,7 +209,10 @@ public final class SystemFocusSource: FocusSource {
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info else { return }
             let source = Unmanaged<SystemFocusSource>.fromOpaque(info).takeUnretainedValue()
-            MainActor.assumeIsolated { source.refresh() }
+            MainActor.assumeIsolated {
+                source.lastWake = "filesystem event"
+                source.refresh()
+            }
         }
         guard let stream = FSEventStreamCreate(
             nil, callback, &context, [path] as CFArray,

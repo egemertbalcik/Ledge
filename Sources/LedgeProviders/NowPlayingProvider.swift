@@ -269,7 +269,7 @@ public final class NowPlayingProvider: ActivityProvider {
         // it either.
         let refusedAsWebContent = appsOnly() && hidesWebCard()
             && snapshot.map { !MediaOwner.isOpenableApp(bundleID: $0.appBundleID) } ?? false
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA"), snapshot == nil {
+        if DebugSwitches.tracing("media"), snapshot == nil {
             Self.log.notice("media: source reported nothing")
         }
         guard let snapshot, Self.shouldShow(snapshot), !refusedAsWebContent else {
@@ -326,7 +326,7 @@ public final class NowPlayingProvider: ActivityProvider {
             }
         }
 
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+        if DebugSwitches.tracing("media") {
             Self.log.notice("media: \(snapshot.appBundleID, privacy: .public) playing=\(snapshot.isPlaying, privacy: .public) elapsed=\(snapshot.elapsed, format: .fixed(precision: 1), privacy: .public) title=\(snapshot.title, privacy: .public)")
         }
 

@@ -218,7 +218,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         let now = now()
         noteTransportCommands(at: now)
 
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+        if DebugSwitches.tracing("media") {
             let state = demotedUntil.map { "demoted for \(Int($0 - now))s" } ?? "live"
             Self.log.notice("media/composite: adapter \(state, privacy: .public) available=\(self.adapter.isAvailable, privacy: .public)")
         }
@@ -252,7 +252,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         }
         previousAdapter = nil
 
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+        if DebugSwitches.tracing("media") {
             Self.log.notice("media/composite: adapter silent (available=\(self.adapter.isAvailable, privacy: .public))")
         }
 
@@ -287,7 +287,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         } else {
             silentWhileScriptingPlaying = 0
         }
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+        if DebugSwitches.tracing("media") {
             let what = scripted.map { "\($0.appBundleID) playing=\($0.isPlaying)" } ?? "nothing"
             Self.log.notice("media/composite: scripting says \(what, privacy: .public)")
         }

@@ -107,13 +107,13 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         var firstPaused: NowPlayingSnapshot?
 
         let running = Self.runningPlayers()
-        if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+        if DebugSwitches.tracing("media") {
             let names = running.map(\.displayName).joined(separator: ",")
             Self.log.notice("media/scripting: running players = [\(names, privacy: .public)]")
         }
         for player in running {
             guard let snapshot = await Self.query(player) else {
-                if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+                if DebugSwitches.tracing("media") {
                     Self.log.notice("media/scripting: \(player.displayName, privacy: .public) answered nothing")
                 }
                 continue

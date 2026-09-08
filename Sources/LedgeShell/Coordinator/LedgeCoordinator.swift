@@ -842,7 +842,7 @@ public final class LedgeCoordinator {
                 case .neverRested, .spent:
                     remaining = 0
                 }
-                if DebugSwitches.isOn("LEDGE_TRACE_MEDIA") {
+                if DebugSwitches.tracing("media") {
                     switch verdict {
                     case .neverRested:
                         Self.log.notice("linger refused: \(key ?? "-", privacy: .public) was never resting")
@@ -1277,7 +1277,7 @@ public final class LedgeCoordinator {
                 // into the satellite blob beside it — the split treatment the
                 // real Dynamic Island uses — instead of taking the whole
                 // compact view over. Every other phase keeps the ears readout.
-                if DebugSwitches.isOn("LEDGE_TRACE_LEVELS") {
+                if DebugSwitches.tracing("levels") {
                     Self.log.debug("""
                         readout \(readout.kind.rawValue, privacy: .public): \
                         phase=\(self.state.phase.rawValue, privacy: .public) \
@@ -1826,6 +1826,16 @@ public final class LedgeCoordinator {
         effects.run(produced)
 
         followEveryEvent(event)
+
+        // Every event and every phase it produced. The one trace that makes a
+        // report like "it did not react at first" answerable: whether the
+        // event arrived at all, and what the island decided to do with it.
+        if DebugSwitches.tracing("state") {
+            Self.log.notice("""
+                state: \(String(describing: event), privacy: .public) \
+                \(previous.rawValue, privacy: .public) -> \(self.state.phase.rawValue, privacy: .public)
+                """)
+        }
 
         guard state.phase != previous else { return }
         followPhaseChange(from: previous, event: event)
