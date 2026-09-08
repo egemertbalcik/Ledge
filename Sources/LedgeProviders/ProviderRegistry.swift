@@ -78,7 +78,16 @@ public enum ProviderRegistry {
         // the preview — need not build a store.
         shelfProvider: @escaping @MainActor () -> any ActivityProvider = {
             ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in }))
-        }
+        },
+        // The shell keeps its own Focus source for the quiet-during-Focus
+        // rule, which has to work whether or not the *card* is switched on.
+        // It passes that same source in here rather than letting a second one
+        // be built: two of them watch the same folder, run two timers, and ask
+        // the system the same question a millisecond apart — and because each
+        // keeps its own idea of the answer, they announce changes against each
+        // other's state. That was a Focus card peeking on and off every four
+        // seconds for as long as a Focus was on.
+        focusSource: @escaping @MainActor () -> any FocusSource = { SystemFocusSource() }
     ) -> [ProviderRegistration] {
         [
             ProviderRegistration(
@@ -199,7 +208,7 @@ public enum ProviderRegistry {
                 // Full Disk Access is an upgrade on top — it adds the mode's
                 // name and icon — but the card no longer depends on it.
                 permission: .focusStatus,
-                make: { FocusProvider(source: SystemFocusSource()) }
+                make: { FocusProvider(source: focusSource()) }
             ),
 
             ProviderRegistration(

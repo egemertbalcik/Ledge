@@ -101,13 +101,41 @@ public final class SystemFocusSource: FocusSource {
         return statusFocused ? genericFocus : nil
     }
 
+    /// Everyone listening, by token. Plural because the Focus answer has two
+    /// consumers — the card, and the rule that keeps the notch quiet during a
+    /// Focus — and giving them a source each meant two watchers asking macOS
+    /// the same question a millisecond apart, getting different answers, and
+    /// announcing changes against each other's state.
+    private var observers: [UUID: () -> Void] = [:]
+
+    /// Adds a listener without disturbing the others.
+    public func addObserver(_ onChange: @escaping () -> Void) -> UUID {
+        let token = UUID()
+        observers[token] = onChange
+        if observers.count == 1 && self.onChange == nil { beginWatching() }
+        return token
+    }
+
+    public func removeObserver(_ token: UUID) {
+        observers[token] = nil
+    }
+
+    private func notifyObservers() {
+        onChange?()
+        for observer in observers.values { observer() }
+    }
+
     public func startWatching(_ onChange: @escaping () -> Void) {
         stopWatching()
         self.onChange = onChange
+        beginWatching()
+    }
 
-        // The database path watches itself, and keeps retrying so a grant that
+    private func beginWatching() {
+
+        // The database path watches itself, and keeps retrying so access that
         // arrives later upgrades this source without a relaunch.
-        file.startWatching { [weak self] in self?.onChange?() }
+        file.startWatching { [weak self] in self?.notifyObservers() }
 
         // The fallback runs alongside rather than instead: Full Disk Access can
         // be revoked at any moment, and the system's answer costs nothing to
@@ -119,6 +147,7 @@ public final class SystemFocusSource: FocusSource {
     public func stopWatching() {
         file.stopWatching()
         onChange = nil
+        observers.removeAll()
         if let stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -171,6 +200,17 @@ public final class SystemFocusSource: FocusSource {
             guard let self, !Task.isCancelled else { return }
             self.probe = nil
             guard focused != self.fallbackFocused else { return }
+            // A change is confirmed before it is believed. The system's answer
+            // is not perfectly stable under repeated asking — two reads a
+            // millisecond apart have been seen to disagree — and an
+            // unconfirmed one turned into a card that peeked, left, and came
+            // back every few seconds for as long as a Focus was on. A real
+            // change survives a second look; a glitch does not.
+            let confirmed = await Task.detached(priority: .utility) { [status = self.status] in
+                try? await Task.sleep(for: .milliseconds(200))
+                return status.isFocused()
+            }.value
+            guard !Task.isCancelled, confirmed == focused else { return }
             self.fallbackFocused = focused
             Self.log.debug("focus (system): \(focused ? "on" : "off", privacy: .public)")
             if DebugSwitches.tracing("focus") {
@@ -179,7 +219,7 @@ public final class SystemFocusSource: FocusSource {
                     noticed by \(self.lastWake, privacy: .public)
                     """)
             }
-            self.onChange?()
+            self.notifyObservers()
         }
     }
 

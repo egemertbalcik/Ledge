@@ -986,6 +986,12 @@ public final class LedgeCoordinator {
             shelfProvider: { [weak self] in
                 guard let self else { return ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in })) }
                 return ShelfProvider(store: self.shelf)
+            },
+            // The same source the quiet-during-Focus rule reads, not a second
+            // one. See the parameter's own note: two of them argued.
+            focusSource: { [weak self] in
+                guard let base = self?.focusBaseline else { return SystemFocusSource() }
+                return SharedFocusSource(base)
             }
         )
         for registration in registrations {
