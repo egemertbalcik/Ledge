@@ -41,11 +41,11 @@ public struct SettingsActions {
     public var showOnboarding: () -> Void
     public var openSource: () -> Void
 
-    /// Asks for the Focus database folder in an open panel, and reports
-    /// whether it can be read. Not a TCC permission — one folder the user
-    /// hands over, in place of Full Disk Access over everything they own.
+    /// Asks for the Focus database folder in an open panel. Not a TCC
+    /// permission — one folder the user hands over, in place of Full Disk
+    /// Access over everything they own. Whether it *is* granted is drawn from
+    /// the model, so the row redraws when the answer changes.
     public var chooseFocusFolder: () -> Void
-    public var focusFolderGranted: () -> Bool
 
     public init(
         setLaunchAtLogin: @escaping (Bool) -> Bool,
@@ -62,8 +62,7 @@ public struct SettingsActions {
         setProviderEnabled: @escaping (String, Bool) -> Void = { _, _ in },
         showOnboarding: @escaping () -> Void = {},
         openSource: @escaping () -> Void = {},
-        chooseFocusFolder: @escaping () -> Void = {},
-        focusFolderGranted: @escaping () -> Bool = { false }
+        chooseFocusFolder: @escaping () -> Void = {}
     ) {
         self.showOnboarding = showOnboarding
         self.openSource = openSource
@@ -80,7 +79,6 @@ public struct SettingsActions {
         self.refreshPermissions = refreshPermissions
         self.setProviderEnabled = setProviderEnabled
         self.chooseFocusFolder = chooseFocusFolder
-        self.focusFolderGranted = focusFolderGranted
     }
 }
 

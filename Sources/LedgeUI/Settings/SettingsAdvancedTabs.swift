@@ -239,8 +239,8 @@ struct PermissionsSettingsTab: View {
             // which is what Full Disk Access would otherwise be asked for.
             Section("Focus folder") {
                 LabeledContent("Status") {
-                    Text(actions.focusFolderGranted() ? "Granted" : "Not granted")
-                        .foregroundStyle(actions.focusFolderGranted() ? .green : .orange)
+                    Text(model.focusFolderGranted ? "Granted" : "Not granted")
+                        .foregroundStyle(model.focusFolderGranted ? .green : .orange)
                         .font(.caption.weight(.semibold))
                 }
                 Text("""
@@ -248,7 +248,7 @@ struct PermissionsSettingsTab: View {
                     """)
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                if !actions.focusFolderGranted() {
+                if !model.focusFolderGranted {
                     Button("Choose Folder…") { actions.chooseFocusFolder() }
                 }
             }

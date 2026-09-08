@@ -32,6 +32,14 @@ public final class SettingsModel {
     /// difference in writing rather than in a log line nobody reads.
     public var isSuppressingSystemHUD = false
 
+    /// Whether the Focus database folder can be read.
+    ///
+    /// Observable state rather than a closure the view calls, because a view
+    /// only redraws when something it observes changes: the row went on saying
+    /// "Not granted" after the folder had been granted, until something else
+    /// happened to redraw the pane.
+    public var focusFolderGranted = false
+
     public init() {}
 
     public func status(of kind: PermissionKind) -> PermissionStatus {

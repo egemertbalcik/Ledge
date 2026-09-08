@@ -144,6 +144,14 @@ public final class SystemFocusSource: FocusSource {
         refresh()
     }
 
+    /// The user has just given (or withdrawn) access to the database folder.
+    /// Re-reads at once instead of waiting for a backoff or a timer tick.
+    public func accessChanged() {
+        file.recheckAccess()
+        refresh()
+        notifyObservers()
+    }
+
     public func stopWatching() {
         file.stopWatching()
         onChange = nil

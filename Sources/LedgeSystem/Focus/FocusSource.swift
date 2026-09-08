@@ -207,23 +207,39 @@ public final class FileFocusSource: FocusSource {
         watcher = source
     }
 
-    /// Polls for Full Disk Access while it is missing, then starts watching the
-    /// moment it lands and re-reads, so a Focus already on shows immediately.
+    /// Access has just been given: look again now rather than when the backoff
+    /// next comes round.
+    ///
+    /// The retry below settles to half a minute between attempts, which is
+    /// right for waiting on something nobody has been asked for — and wrong
+    /// for the moment straight after the user hands over the folder, where it
+    /// showed as up to thirty seconds of the app ignoring their Focus. The
+    /// user did something; answer immediately.
+    public func recheckAccess() {
+        guard let onChange = pendingOnChange else { return }
+        readyRetry?.cancel()
+        readyRetry = nil
+        guard isReadable else { return scheduleReadyRetry() }
+        startWatching(onChange)
+        onChange()
+    }
+
+    /// Waits for the database to become readable, then starts watching and
+    /// re-reads, so a Focus already on shows immediately.
     private func scheduleReadyRetry() {
         readyRetry?.cancel()
         readyRetry = Task { @MainActor [weak self] in
-            // Brisk while the grant dialog is plausibly on screen, backing off
-            // to a slow idle: with FDA granted but no Focus database (an
-            // account that never toggled Focus) this loop is the app's steady
-            // state for its whole life, and a 2-second stat forever is churn
-            // for nothing.
+            // This is the steady state on most Macs — nobody has been asked
+            // for the folder, and the account may never have turned a Focus on
+            // — so it settles to a slow idle rather than stat-ing forever.
+            // `recheckAccess()` covers the one moment that matters.
             var delay: Double = 2
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(delay))
                 delay = min(delay * 1.5, 30)
                 guard let self, let onChange = self.pendingOnChange else { return }
                 if self.isReadable {
-                    Self.diag("readyRetry: FDA now readable — starting watch")
+                    Self.diag("readyRetry: database now readable — starting watch")
                     self.startWatching(onChange)  // now the open() succeeds
                     onChange()                    // surface a Focus already active
                     return

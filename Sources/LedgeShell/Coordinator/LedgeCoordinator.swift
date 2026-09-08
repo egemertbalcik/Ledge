@@ -65,8 +65,11 @@ public final class LedgeCoordinator {
         defer { reclaimFront() }
         guard panel.runModal() == .OK, let picked = panel.url else { return }
         focusFolder.remember(picked)
-        // The provider found the database shut when it started; it has to be
-        // built again to watch what it can now see.
+        // Everything that gave up on the folder is told to look again, now:
+        // the source's own retry has backed off to half a minute by this
+        // point, which showed as the app ignoring a Focus for half a minute
+        // after being handed the thing it needed.
+        focusBaseline?.accessChanged()
         activities.restartProvider("focus")
         refreshSettingsModel()
     }
@@ -1786,6 +1789,7 @@ public final class LedgeCoordinator {
     /// Only ever *checks* — nothing here can prompt, so it is safe on a timer.
     private func refreshSettingsModel() {
         settingsModel.isSuppressingSystemHUD = hud.isSuppressing
+        settingsModel.focusFolderGranted = focusFolder.isReadable
         // Deliberately does *not* re-read the permissions: this runs from many
         // places, and every read would quietly become the new baseline, so a
         // revocation could be absorbed between two of them and never acted on.
@@ -2823,8 +2827,7 @@ public final class LedgeCoordinator {
             },
             showOnboarding: { [weak self] in self?.showOnboarding() },
             openSource: { NSWorkspace.shared.open(Self.sourceURL) },
-            chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() },
-            focusFolderGranted: { [weak self] in self?.focusFolder.isReadable ?? false }
+            chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() }
         )
     }
 
