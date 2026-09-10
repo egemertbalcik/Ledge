@@ -128,3 +128,66 @@ struct EarWidthTests {
         #expect(abs(size.width - (300 + NotchLayout.openCardGrowth)) < 0.001)
     }
 }
+
+@Suite("Layout boundary regressions")
+struct LayoutBoundaryTests {
+    private func geometry(scale: CGFloat, height: CGFloat = 956) -> NotchGeometry {
+        NotchGeometry(
+            screenSize: CGSize(width: 1470, height: height),
+            notchSize: CGSize(width: 180, height: 38),
+            notchCenterX: 735, isHardwareNotch: true, displayScale: scale
+        )
+    }
+
+    @Test("Draft compact ears retain their usable width after gutter insets", arguments: [CGFloat(36), 53, 90])
+    func compactPreviewWidth(ear: CGFloat) {
+        let geometry = geometry(scale: 1.2)
+        for gutter: CGFloat in [0, 10, 30] {
+            let layout = NotchLayout.peek(
+                geometry, bottomRadius: 14, gutterRadius: gutter, earWidth: ear
+            )
+            let usableEar = (layout.boundingSize.width - geometry.notchSize.width) / 2 - gutter
+            #expect(abs(usableEar - ear) < 0.001)
+            #expect(layout.boundingSize.height == geometry.notchSize.height + 0.5)
+        }
+    }
+
+    @Test("Route picker reserves three full rows at every display scale", arguments: [CGFloat(1), 1.1, 1.2])
+    func routeViewport(scale: CGFloat) {
+        let geometry = geometry(scale: scale)
+        for rows in [1, 3, 8] {
+            let card = NotchLayout.cardSize(
+                kind: .nowPlaying, phase: .expanded, base: CGSize(width: 420, height: 440),
+                geometry: geometry, routePickerRows: rows, hasSelection: true
+            )
+            // Convert back to the coordinate space used by expandedContent,
+            // then remove its notch inset and the menu's header and padding.
+            let viewport = card.height / scale - 38 - 30 - 44 - 12
+            let visibleRows = min(rows, 3)
+            let needed = CGFloat(visibleRows * 42 + (visibleRows - 1) * 8)
+            #expect(abs(viewport - needed) < 0.001)
+        }
+    }
+
+    @Test("Panel contains maximum-height cards with animation headroom", arguments: [CGFloat(1), 1.1, 1.2])
+    func panelCapacity(scale: CGFloat) {
+        let geometry = geometry(scale: scale)
+        let panel = NotchLayout.panelSize(for: geometry)
+        for kind in ActivityKind.allCases {
+            for rows in [0, 1, 3, 8] {
+                let card = NotchLayout.cardSize(
+                    kind: kind, phase: .expanded, base: CGSize(width: 420, height: 440),
+                    payload: kind == .weather ? .weather(WeatherPayload(
+                        temperatureCelsius: 20, rainSoonMinutes: 15
+                    )) : nil,
+                    calendarWeekRows: 6, timerContentHeight: 400,
+                    geometry: geometry, routePickerRows: rows, hasSelection: true
+                )
+                #expect(panel.height >= card.height + 31.99)
+            }
+        }
+        #expect(panel.width == geometry.screenSize.width)
+        #expect(panel.height <= geometry.screenSize.height)
+        #expect(NotchLayout.panelSize(for: self.geometry(scale: scale, height: 500)).height == 500)
+    }
+}

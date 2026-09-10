@@ -15,7 +15,7 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     /// Needed to read the next calendar event.
     case calendars
 
-    /// Needed to name connected Bluetooth devices.
+    /// Needed for immediate Bluetooth notifications and proximity scanning.
     case bluetooth
 
     /// Needed for local weather without a manually chosen city.
@@ -46,7 +46,7 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .calendars:
             "Lets Ledge show your next event. Without it, the calendar card is hidden."
         case .bluetooth:
-            "Lets Ledge name your connected devices. Without it, battery levels may still appear but without device names."
+            "Lets Ledge notice device connections and AirPods case openings as they happen. Without it, occasional battery checks remain available."
         case .location:
             "Lets Ledge show local weather automatically. You can pick a city manually instead."
         case .focusStatus:

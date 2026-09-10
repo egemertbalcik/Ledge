@@ -8,8 +8,8 @@ import os
 /// and noticing every way it can be finished.
 ///
 /// Split out of the coordinator because it is all window: a pinned size, a
-/// close observer, and the fact that closing with the title-bar button counts
-/// as an answer. What *happens* when the tour is done — permissions, providers,
+/// close observer, and the distinction between finishing and deferring it.
+/// What *happens* when the tour is done — permissions, providers,
 /// the welcome card — stays with the coordinator, which is the only thing that
 /// knows about any of those, and arrives here as one closure.
 @MainActor
@@ -24,16 +24,18 @@ final class OnboardingPresenter {
     private var window: NSWindow?
     private var closeObserver: (any NSObjectProtocol)?
 
+    var isVisible: Bool { window?.isVisible == true }
+
     /// Builds the tour's view. A closure because everything it needs — the
     /// settings model, the actions, the links — belongs to the coordinator.
-    private let makeView: (@escaping () -> Void) -> OnboardingView
+    private let makeView: (@escaping () -> Void, @escaping () -> Void) -> OnboardingView
 
     /// Called once, whichever way the tour ends, with whether the user
     /// actually got to the end of it.
     private let onFinish: (Bool) -> Void
 
     init(
-        makeView: @escaping (@escaping () -> Void) -> OnboardingView,
+        makeView: @escaping (@escaping () -> Void, @escaping () -> Void) -> OnboardingView,
         onFinish: @escaping (Bool) -> Void
     ) {
         self.makeView = makeView
@@ -70,7 +72,10 @@ final class OnboardingPresenter {
         }
         Self.log.notice("onboarding: presenting welcome window")
 
-        let view = makeView { [weak self] in self?.finish(completed: true) }
+        let view = makeView(
+            { [weak self] in self?.finish(completed: true) },
+            { [weak self] in self?.finish(completed: false) }
+        )
 
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: Self.windowSize),

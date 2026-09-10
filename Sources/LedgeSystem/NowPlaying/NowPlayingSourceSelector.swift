@@ -28,6 +28,7 @@ public enum NowPlayingSourceSelector {
 
     public static func choose(
         forceStub: Bool = false,
+        mayQueryPlayers: @escaping @MainActor () -> Bool = { true },
         probe: @MainActor () async -> Bool = { await MediaRemoteBridge.probeReadAccess() },
         adapterProbe: @MainActor () async -> (dylib: URL, host: AdapterHost)? = {
             await NowPlayingProbe.workingAdapter()
@@ -40,7 +41,7 @@ public enum NowPlayingSourceSelector {
             return Choice(source: StubNowPlayingSource(value: sampleSnapshot), reason: "forced stub")
         }
 
-        let scripting = ScriptingNowPlayingSource()
+        let scripting = ScriptingNowPlayingSource(mayQueryPlayers: mayQueryPlayers)
 
         if await probe() {
             // Not reachable on macOS 26.4 today. Left in so the day it becomes

@@ -133,17 +133,15 @@ public final class LedgeCoordinator {
 
     /// A permission was taken away while the app was running.
     ///
-    /// Everything gated on it is stopped rather than left polling something
-    /// that will never answer again. Accessibility is the one with a second
+    /// Required providers stop; optional providers adopt their fallbacks.
+    /// Accessibility is the one with a second
     /// casualty: the system has already killed the event tap, so the HUD
     /// coordinator has to be told it is no longer suppressing anything, or it
     /// would sit believing it owned a readout it had lost.
     private func permissionLost(_ kind: PermissionKind) {
-        for registration in activities.registeredProviders
-        where registration.permission == kind {
-            activities.suspendProvider(registration.id)
-        }
+        activities.permissionChanged(kind, isGranted: false)
         if kind == .accessibility { hud.revalidateTrust() }
+        if kind == .focusStatus { focusBaseline?.refresh() }
     }
 
     private func permissionGranted(_ kind: PermissionKind) {
@@ -153,10 +151,8 @@ public final class LedgeCoordinator {
         // the tap unstarted until the next launch — with the settings switch
         // saying it was suppressing the whole time.
         if kind == .accessibility { hud.revalidateTrust() }
-        for registration in activities.registeredProviders
-        where registration.permission == kind {
-            activities.restartProvider(registration.id)
-        }
+        activities.permissionChanged(kind, isGranted: true)
+        if kind == .focusStatus { focusBaseline?.refresh() }
         refreshSettingsModel()
         raiseSettingsAfterGrant()
     }
@@ -217,7 +213,7 @@ public final class LedgeCoordinator {
             for _ in 0..<Int(Self.permissionWatchWindow / interval) {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
-                guard self.settingsWindow?.isVisible == true else { return }
+                guard self.settingsWindow?.isVisible == true || self.onboarding.isVisible else { return }
                 guard self.permissions.status(of: kind) != before else { continue }
                 self.revalidatePermissions()
                 self.raiseSettingsAfterGrant()
@@ -497,12 +493,12 @@ public final class LedgeCoordinator {
     /// coordinator's, because permissions, providers and the welcome card are
     /// things only this knows about.
     private lazy var onboarding = OnboardingPresenter(
-        makeView: { [weak self] finish in
+        makeView: { [weak self] finish, deferTour in
             guard let self else {
                 return OnboardingView(model: SettingsModel(), actions: SettingsActions(
                     setLaunchAtLogin: { _ in false }, loginItemStatus: { "" },
                     copyToClipboard: { _ in }, quit: {}
-                ), openSettings: {}, openSource: {}, finish: finish)
+                ), openSettings: {}, openSource: {}, finish: finish, deferTour: deferTour)
             }
             self.refreshSettingsModel()
             return OnboardingView(
@@ -511,6 +507,7 @@ public final class LedgeCoordinator {
                 openSettings: { [weak self] in self?.showSettings() },
                 openSource: { NSWorkspace.shared.open(Self.sourceURL) },
                 finish: finish,
+                deferTour: deferTour,
                 startPage: Int(self.preferences.tourPage),
                 onPage: { [weak self] page in self?.preferences.tourPage = Double(page) }
             )
@@ -734,9 +731,10 @@ public final class LedgeCoordinator {
         }
 
         preferences.onReset = { [weak self] in self?.handlePreferencesReset() }
-        permissions.onAuthorizationChanged = { [weak self] kind, granted in
-            guard granted else { self?.refreshSettingsModel(); return }
-            self?.permissionGranted(kind)
+        permissions.onAuthorizationChanged = { [weak self] _, _ in
+            // Both grants and revocations pass through the same snapshot as
+            // activation and the request result. Duplicate callbacks are quiet.
+            self?.revalidatePermissions()
         }
         activities.start()
         registerProviders()
@@ -1006,7 +1004,8 @@ public final class LedgeCoordinator {
         Task { @MainActor [weak self] in
             guard let self else { return }
             let choice = await NowPlayingSourceSelector.choose(
-                forceStub: DebugSwitches.isOn("LEDGE_STUB_MEDIA")
+                forceStub: DebugSwitches.isOn("LEDGE_STUB_MEDIA"),
+                mayQueryPlayers: { [weak self] in self?.permissions.mayAskAboutPlayers ?? false }
             )
             Self.log.notice("now playing source: \(choice.reason, privacy: .public)")
             self.resolvedNowPlayingSource = choice.source
@@ -2783,6 +2782,26 @@ public final class LedgeCoordinator {
     public var onCheckForUpdates: () -> Void = {}
     public var canCheckForUpdates: () -> Bool = { false }
 
+    /// Both permission entry points use the same window and grant lifecycle.
+    private func requestPermission(_ kind: PermissionKind) {
+        // Usually seeded at startup. Also establish a before-reading if an
+        // explicit request is the first entry point, so its grant is a change.
+        if lastPermissionSnapshot.isEmpty { revalidatePermissions() }
+        standAsideForSystemUI()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let status = await self.permissions.request(kind)
+            // Update the snapshot as well as providers, so the next poll does
+            // not treat this same answer as a second grant and restart again.
+            self.revalidatePermissions()
+            if status == .granted {
+                self.reclaimFront()
+            } else {
+                self.watchForPermission(kind)
+            }
+        }
+    }
+
     private func makeSettingsActions() -> SettingsActions {
         SettingsActions(
             setLaunchAtLogin: { LoginItemService.setEnabled($0) },
@@ -2795,29 +2814,8 @@ public final class LedgeCoordinator {
             checkForUpdates: { [weak self] in self?.onCheckForUpdates() },
             canCheckForUpdates: { [weak self] in self?.canCheckForUpdates() ?? false },
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
-            requestAccessibility: { MediaKeyInterceptor.requestTrust() },
-            requestPermission: { [weak self] kind in
-                guard let self else { return }
-                self.standAsideForSystemUI()
-                Task { @MainActor in
-                    let status = await self.permissions.request(kind)
-                    if status == .granted { self.permissionGranted(kind) }
-                    self.refreshSettingsModel()
-                    // Some prompts are the app's own — Calendar, Location,
-                    // Bluetooth answer here and now, without the user ever
-                    // leaving Ledge. Standing aside for those and waiting for
-                    // a return that never comes left the window it was asked
-                    // from sitting among other applications.
-                    if status == .granted {
-                        self.reclaimFront()
-                    } else {
-                        // The rest send the user to System Settings; the watch
-                        // notices when they do the thing, and brings the
-                        // window back then.
-                        self.watchForPermission(kind)
-                    }
-                }
-            },
+            requestAccessibility: { [weak self] in self?.requestPermission(.accessibility) },
+            requestPermission: { [weak self] kind in self?.requestPermission(kind) },
             openPermissionSettings: { [weak self] kind in
                 guard let self else { return }
                 self.standAsideForSystemUI()

@@ -181,10 +181,7 @@ public final class LedgePanelController {
     /// Sized for the largest state the content can reach, plus headroom for the
     /// spring's overshoot, so nothing is ever clipped.
     private func panelSize(for geometry: NotchGeometry) -> CGSize {
-        CGSize(
-            width: geometry.screenSize.width,
-            height: min(geometry.screenSize.height * 0.6, 520)
-        )
+        NotchLayout.panelSize(for: geometry)
     }
 
     private func panelFrame(on screen: NSScreen, geometry: NotchGeometry) -> NSRect {
@@ -335,34 +332,18 @@ public final class LedgePanelController {
         Self.log.debug("interactive=\(interactive, privacy: .public)")
     }
 
-    /// The drawn shape, in global screen coordinates, for a given phase.
-    /// This is both the hover region and the click region.
-    private func expandedSize(for phase: NotchPhase) -> CGSize {
-        presentation.cardSize(preferences: preferences, geometry: geometry, phase: phase)
-    }
-
     /// The panel's CG window number, for excluding the overlay from a screen
     /// capture of what lies behind it.
     public var windowNumber: UInt32? {
         panel.map { UInt32($0.windowNumber) }
     }
 
+    /// The drawn shape in global screen coordinates, for hover and click routing.
     public func shapeRect(for phase: NotchPhase, hudHovered: Bool = false, hudExtraHeight: CGFloat = 0) -> CGRect? {
         guard let screen else { return nil }
-        let layout = NotchLayout.layout(
-            for: phase,
-            geometry: geometry,
-            // Must match `NotchOverlayView`: the calendar's expanded month grid
-            // grows the shape, so the hit region has to grow with it or a click
-            // near the grid's edge would fall through.
-            expandedSize: expandedSize(for: phase),
-            bottomRadius: preferences.bottomRadius,
-            closedBottomRadius: preferences.closedBottomRadius,
-            gutterRadius: preferences.gutterRadius,
-            // The hovered HUD grows downward for its adjustment bar; the hit
-            // region must include that or dragging the bar would fall through.
-            isHudInteractive: hudHovered,
-            hudExtraHeight: hudExtraHeight
+        let layout = presentation.layout(
+            preferences: preferences, geometry: geometry, phase: phase,
+            hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
         )
         let size = layout.boundingSize
         let rect = CGRect(

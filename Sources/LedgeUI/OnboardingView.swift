@@ -20,6 +20,7 @@ public struct OnboardingView: View {
     private let openSettings: () -> Void
     private let openSource: () -> Void
     private let finish: () -> Void
+    private let deferTour: () -> Void
 
     // A debug launch can open straight onto a page (LEDGE_ONBOARDING_PAGE=2),
     // so each page can be reviewed without clicking through the tour.
@@ -40,6 +41,7 @@ public struct OnboardingView: View {
         openSettings: @escaping () -> Void,
         openSource: @escaping () -> Void,
         finish: @escaping () -> Void,
+        deferTour: @escaping () -> Void = {},
         startPage: Int = 0,
         onPage: @escaping (Int) -> Void = { _ in }
     ) {
@@ -51,6 +53,7 @@ public struct OnboardingView: View {
         self.openSettings = openSettings
         self.openSource = openSource
         self.finish = finish
+        self.deferTour = deferTour
     }
 
     public var body: some View {
@@ -94,6 +97,9 @@ public struct OnboardingView: View {
         }
         .frame(width: 480, height: 596)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: page)
+        // Keep the observer outside the conditional pages so every step is
+        // saved, including those reached before Permissions first appears.
+        .onChange(of: page) { _, now in onPage(now) }
     }
 
     // MARK: - Pages
@@ -113,7 +119,7 @@ public struct OnboardingView: View {
                     "Music, calendar, weather, timer, sound and brightness, shelf. A finishing timer comes before a meeting in an hour, which comes before the weather — and nothing reorders while you are looking.")
             }
 
-            Text("Every one of them can be switched off — next page.")
+            Text("You can switch each one off in this tour or in Settings.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -168,7 +174,7 @@ public struct OnboardingView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 gesture("Hover", "Opens the card under the notch. Leave, and it closes.")
-                gesture("Click", "Keeps the card open after you leave. Click again to close it.")
+                gesture("Click", "Opens the full card. Click again, or move away from the notch, to close it.")
                 gesture("Swipe left or right", "Next or previous card. Middle-click does the same.")
                 gesture("Volume and brightness keys", "Show a readout in the notch. Hover it for a slider.")
                 gesture("Drag files onto the notch", "Keeps them on the shelf until you drag them out. New screenshots land there too.")
@@ -197,15 +203,12 @@ public struct OnboardingView: View {
                 }
             }
 
-            Text("Works without asking: battery, timers, sound and brightness levels, Caps Lock, the shelf, and weather for a city you type in.")
+            Text("Works without asking: battery, timers, sound and brightness levels, the shelf, and weather for a city you type in.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .onAppear { actions.refreshPermissions() }
-        // Recorded as it happens rather than at the end: the tour can be cut
-        // short by the very thing it asks for.
-        .onChange(of: page) { _, now in onPage(now) }
         // Granting happens in a system dialog outside this window, so the
         // state is re-read rather than assumed.
         .task { await poll() }
@@ -264,6 +267,9 @@ public struct OnboardingView: View {
             .accessibilityLabel("Page \(page + 1) of \(Self.pageCount)")
 
             Spacer()
+
+            Button("Finish later", action: deferTour)
+                .help("Close the tour and resume from this page next time.")
 
             // Fixed widths, because the words change and the positions must
             // not: "Settings…" is wider than "Back" and "Continue" wider than
@@ -398,7 +404,7 @@ public struct OnboardingView: View {
         case .location:
             "Asks the weather service what it is like where you are. Your position is rounded to about a kilometre first."
         case .bluetooth:
-            "Names the devices that connect, and notices an AirPods case opening. Without it they show up unnamed."
+            "Notices device connections and AirPods case openings as they happen. Occasional battery checks still work without it."
         case .automation:
             "Asks Music and Spotify what is playing, for the cover art and to let you scrub. Nothing else is sent to them."
         case .accessibility:

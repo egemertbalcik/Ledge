@@ -12,16 +12,19 @@ import Testing
 private final class SpyProvider: ActivityProvider {
     let identifier: String
     private(set) var started = false
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
 
     init(identifier: String) { self.identifier = identifier }
 
     func start() -> AsyncStream<ProviderEvent> {
         started = true
+        startCount += 1
         return AsyncStream { self.continuation = $0 }
     }
 
-    func stop() { continuation?.finish() }
+    func stop() { stopCount += 1; continuation?.finish(); continuation = nil }
 }
 
 @Suite("A provider waits for the permission it needs")
@@ -43,8 +46,7 @@ struct ProviderGatingTests {
         onboarded: Bool = true
     ) -> ActivityCoordinator {
         let preferences = Preferences(store: MemoryPreferenceStore())
-        // These tests are about permissions. Onboarding is its own gate, in
-        // front of this one, and has its own test below.
+        // Tour completion does not substitute for a permission grant.
         preferences.hasCompletedOnboarding = onboarded
         return ActivityCoordinator(
             presentation: NotchPresentation(),
@@ -103,20 +105,97 @@ struct ProviderGatingTests {
         #expect(activities.isProviderRunning("calendar"))
     }
 
-    /// A fresh Mac met the Automation dialog seconds after launch, before the
-    /// welcome tour had said what Ledge was — because a provider started and
-    /// asked. Nothing that touches a permission may run until the tour is done,
-    /// however freely the permission itself would have been given.
-    @Test("Nothing that needs a permission runs before the welcome tour")
-    func permissionedProvidersWaitForOnboarding() {
+    @Test("Deferring the tour does not block already authorized providers")
+    func authorizedProvidersDoNotDependOnTour() {
         let activities = coordinator(permitted: [.calendars], onboarded: false)
         activities.register(registration("calendar", .calendars))
         activities.register(registration("weather", nil))
         activities.startEnabled()
 
-        #expect(activities.isProviderRunning("calendar") == false)
-        // The ones that ask for nothing still run: the notch is alive behind
-        // the tour window, which is the first thing it shows off.
+        #expect(activities.isProviderRunning("calendar"))
         #expect(activities.isProviderRunning("weather"))
+    }
+
+    @Test("Denied providers cannot be constructed by toggle or reset", arguments: [false, true])
+    func allEntryPointsRespectPermission(onboarded: Bool) {
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        preferences.hasCompletedOnboarding = onboarded
+        var constructions = 0
+        var granted = false
+        let activities = ActivityCoordinator(
+            presentation: NotchPresentation(), preferences: preferences,
+            isPermitted: { _ in granted }
+        )
+        activities.register(ProviderRegistration(
+            id: "calendar", displayName: "Calendar", kind: .event, permission: .calendars,
+            make: { constructions += 1; return SpyProvider(identifier: "calendar") }
+        ))
+        activities.startEnabled()
+        activities.setProvider("calendar", enabled: false)
+        activities.setProvider("calendar", enabled: true)
+        preferences.resetToDefaults()
+        activities.reconcileWithPreferences()
+        #expect(constructions == 0)
+        #expect(!activities.isProviderRunning("calendar"))
+        granted = true
+        activities.permissionChanged(.calendars, isGranted: true)
+        #expect(constructions == 1)
+        #expect(activities.isProviderRunning("calendar"))
+        granted = false
+        activities.reconcileWithPreferences()
+        #expect(!activities.isProviderRunning("calendar"))
+        #expect(preferences.isProviderEnabled("calendar"))
+        activities.stop()
+    }
+
+    @Test("Optional media continues without restart when Automation becomes unavailable")
+    func optionalMediaSurvivesLoss() {
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        var granted = true
+        let provider = SpyProvider(identifier: "media")
+        let activities = ActivityCoordinator(
+            presentation: NotchPresentation(), preferences: preferences,
+            isPermitted: { _ in granted }
+        )
+        activities.register(ProviderRegistration(
+            id: "media", displayName: "Media", kind: .nowPlaying, permission: .automation,
+            permissionIsOptional: true, make: { provider }
+        ))
+        activities.startEnabled()
+        #expect(provider.startCount == 1)
+        granted = false
+        activities.permissionChanged(.automation, isGranted: false)
+        #expect(activities.isProviderRunning("media"))
+        #expect(provider.startCount == 1)
+        #expect(provider.stopCount == 0)
+        activities.setProvider("media", enabled: false)
+        granted = true
+        activities.permissionChanged(.automation, isGranted: true)
+        #expect(!activities.isProviderRunning("media"), "a grant must not undo the user's off switch")
+        activities.stop()
+    }
+
+    @Test("Location fallback runs before Done and rebuilds when Location is revoked")
+    func fallbackRebuildsWithoutDisabling() {
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        var made: [SpyProvider] = []
+        let activities = ActivityCoordinator(
+            presentation: NotchPresentation(), preferences: preferences, isPermitted: { _ in false }
+        )
+        activities.register(ProviderRegistration(
+            id: "weather", displayName: "Weather", kind: .weather, permission: .location,
+            permissionIsOptional: true, make: {
+                let provider = SpyProvider(identifier: "weather")
+                made.append(provider)
+                return provider
+            }
+        ))
+        activities.startEnabled()
+        #expect(made.count == 1)
+        activities.permissionChanged(.location, isGranted: false)
+        #expect(activities.isProviderRunning("weather"))
+        #expect(made.count == 2)
+        #expect(made.first?.stopCount == 1)
+        activities.stop()
     }
 }

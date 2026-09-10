@@ -11,6 +11,26 @@ import SwiftUI
 /// callers ask for it.
 extension NotchPresentation {
 
+    /// Shared drawing and interaction geometry, including temporary announcements.
+    public func layout(
+        preferences: Preferences,
+        geometry: NotchGeometry,
+        phase: NotchPhase,
+        hudHovered: Bool = false,
+        hudExtraHeight: CGFloat = 0
+    ) -> NotchLayout {
+        NotchLayout.layout(
+            for: phase, geometry: geometry,
+            expandedSize: cardSize(preferences: preferences, geometry: geometry, phase: phase),
+            bottomRadius: preferences.bottomRadius,
+            closedBottomRadius: preferences.closedBottomRadius,
+            gutterRadius: preferences.gutterRadius,
+            isHudInteractive: hudHovered,
+            hudExtraHeight: hudExtraHeight,
+            isAnnouncing: announcement != nil
+        )
+    }
+
     /// The size the open card wants, for a phase.
     ///
     /// The panel asks for a phase it is about to move to; the view asks for

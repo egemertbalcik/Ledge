@@ -71,7 +71,26 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         ),
     ]
 
-    public init() {}
+    /// Apple Events can raise a prompt even when only reading. Keep the
+    /// onboarding gate here, not on the whole media provider: the adapter
+    /// can supply system-wide media while the tour is unfinished.
+    private let mayQueryPlayers: @MainActor () -> Bool
+    private let availablePlayers: @MainActor () -> [Player]
+    private let readPlayer: @MainActor (Player) async -> NowPlayingSnapshot?
+
+    public convenience init(mayQueryPlayers: @escaping @MainActor () -> Bool = { true }) {
+        self.init(mayQueryPlayers: mayQueryPlayers, availablePlayers: Self.runningPlayers, readPlayer: Self.query)
+    }
+
+    init(
+        mayQueryPlayers: @escaping @MainActor () -> Bool,
+        availablePlayers: @escaping @MainActor () -> [Player],
+        readPlayer: @escaping @MainActor (Player) async -> NowPlayingSnapshot?
+    ) {
+        self.mayQueryPlayers = mayQueryPlayers
+        self.availablePlayers = availablePlayers
+        self.readPlayer = readPlayer
+    }
 
     /// True when at least one supported player is already running.
     ///
@@ -79,7 +98,7 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// telling a non-running app anything would launch it, and an overlay that
     /// opens Spotify on its own would be indefensible.
     public var isAvailable: Bool {
-        !Self.runningPlayers().isEmpty
+        mayQueryPlayers() && !availablePlayers().isEmpty
     }
 
     static func runningPlayers() -> [Player] {
@@ -92,10 +111,10 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// says Spotify or Music owns playback, the answer should still come from
     /// the scripting path that already works for them.
     public func snapshot(forBundleID bundleID: String) async -> NowPlayingSnapshot? {
-        guard let player = Self.players.first(where: { $0.bundleID == bundleID }),
-              !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
+        guard mayQueryPlayers(),
+              let player = availablePlayers().first(where: { $0.bundleID == bundleID })
         else { return nil }
-        return await Self.query(player)
+        return await readPlayer(player)
     }
 
     /// Whether this source knows how to script the given app at all.
@@ -104,15 +123,16 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     }
 
     public func snapshot() async -> NowPlayingSnapshot? {
+        guard mayQueryPlayers() else { return nil }
         var firstPaused: NowPlayingSnapshot?
 
-        let running = Self.runningPlayers()
+        let running = availablePlayers()
         if DebugSwitches.tracing("media") {
             let names = running.map(\.displayName).joined(separator: ",")
             Self.log.notice("media/scripting: running players = [\(names, privacy: .public)]")
         }
         for player in running {
-            guard let snapshot = await Self.query(player) else {
+            guard let snapshot = await readPlayer(player) else {
                 if DebugSwitches.tracing("media") {
                     Self.log.notice("media/scripting: \(player.displayName, privacy: .public) answered nothing")
                 }

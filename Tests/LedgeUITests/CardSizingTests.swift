@@ -77,3 +77,25 @@ struct CardSizingTests {
         #expect(presentation.hudExtraHeight(hovered: false) == 0)
     }
 }
+
+@Suite("Announcement interaction layout")
+@MainActor
+struct AnnouncementLayoutTests {
+    @Test("The strip belongs to the shared drawing and hit region only while announcing")
+    func stripIncluded() {
+        let geometry = NotchGeometry(
+            screenSize: CGSize(width: 1470, height: 956),
+            notchSize: CGSize(width: 180, height: 38),
+            notchCenterX: 735, isHardwareNotch: true
+        )
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        let presentation = NotchPresentation()
+        let compact = presentation.layout(preferences: preferences, geometry: geometry, phase: .peek)
+        presentation.announcement = NotchAnnouncement(title: "Charging", symbolName: "bolt.fill")
+        let announcing = presentation.layout(preferences: preferences, geometry: geometry, phase: .peek)
+        #expect(announcing.boundingSize.height == compact.boundingSize.height + 38)
+        #expect(announcing.boundingSize.width == compact.boundingSize.width)
+        presentation.announcement = nil
+        #expect(presentation.layout(preferences: preferences, geometry: geometry, phase: .peek) == compact)
+    }
+}

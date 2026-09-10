@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 import IOBluetooth
 import os
@@ -53,7 +54,7 @@ public struct BluetoothDeviceSnapshot: Equatable, Sendable {
 @MainActor
 public protocol BluetoothDeviceSource: AnyObject {
 
-    /// False when the Mac has no Bluetooth controller at all.
+    /// Whether this source can supply devices, including a permission-free fallback.
     var isAvailable: Bool { get }
 
     func connectedDevices() async -> [BluetoothDeviceSnapshot]
@@ -66,35 +67,17 @@ public protocol BluetoothDeviceSource: AnyObject {
     func stopWatching()
 }
 
-/// Connected devices and their battery levels, prompting as little as possible.
+/// Connected devices and their battery levels without requesting permission.
 ///
-/// `CBCentralManager` is the API everyone reaches for and is the wrong one here.
-/// It is gated on `kTCCServiceBluetoothAlways`, and merely creating the manager
-/// powers up the stack and puts a "Ledge would like to use Bluetooth" dialog on
-/// screen. For an overlay that has not been asked to do anything yet, that is a
-/// non-starter.
+/// Native controller reads, paired-device reads and notification registrations
+/// require an existing Bluetooth grant. The static CoreBluetooth authorization
+/// check never constructs a manager or starts a scan.
 ///
-/// `IOBluetooth` is the better path, but not a free one: Apple DTS have stated
-/// that IOBluetooth is gated by the same TCC service starting with Sonoma. It
-/// differs from CoreBluetooth in the ways that matter — it answers from the
-/// paired list instead of scanning, it never prompts on its own, and when access
-/// is refused it fails *silently*, returning an empty list rather than throwing.
-/// Silence is why nothing below treats an empty result as an error.
-///
-/// `system_profiler SPBluetoothDataType -json` is the un-gated leg, and the
-/// reason this works at all when the grant is missing. It is Apple-signed and
-/// carries the private `com.apple.bluetooth.system` entitlement, so it reads the
-/// stack on its own authority — and it reports connection state *and* per-
-/// component battery, which IOBluetooth does not expose at all. It is therefore
-/// the primary source, with IOBluetooth adding the LE links it can omit.
-///
-/// What IOBluetooth uniquely provides is a push: connect and disconnect
-/// notifications. Nothing else offers them, which is what keeps this off a
-/// timer. `system_profiler` costs ~150ms and is spawned only when a device
-/// actually connects or when the card is explicitly asked for its contents —
-/// never on a schedule. An overlay that woke a subprocess every few seconds
-/// forever would be indefensible, and connect events are already the only
-/// moments the answer changes in a way the card cares about.
+/// `system_profiler SPBluetoothDataType -json` remains available without that
+/// grant and supplies connection state and per-component battery levels. Native
+/// reads add LE links it can omit; native notifications provide immediate
+/// connect/disconnect events only while authorized. The profiler fallback still
+/// supports explicit reads and the provider's infrequent low-battery checks.
 @MainActor
 public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
 
@@ -119,21 +102,51 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
     private var onConnect: ((BluetoothDeviceSnapshot) -> Void)?
     private var onDisconnect: ((String) -> Void)?
 
-    public override init() {
+    private let mayAccessNative: () -> Bool
+    private let controllerAddress: () -> String?
+    private let readPairedDevices: () -> [IOBluetoothDevice]
+    private let registerConnect: (IOBluetoothDeviceSource) -> IOBluetoothUserNotification?
+    private let profileDevices: () async -> [String: BluetoothDeviceSnapshot]
+
+    public override convenience init() {
+        self.init(
+            mayAccessNative: { CBCentralManager.authorization == .allowedAlways },
+            controllerAddress: { IOBluetoothHostController.default()?.addressAsString() },
+            readPairedDevices: {
+                (IOBluetoothDevice.pairedDevices() ?? []).compactMap { $0 as? IOBluetoothDevice }
+            },
+            registerConnect: { source in
+                IOBluetoothDevice.register(
+                    forConnectNotifications: source,
+                    selector: #selector(IOBluetoothDeviceSource.deviceConnected(_:device:))
+                )
+            },
+            profileDevices: Self.profiledDevices
+        )
+    }
+
+    /// Inject the system boundaries so the no-permission path can be tested
+    /// without touching the Bluetooth stack or spawning a process.
+    init(
+        mayAccessNative: @escaping () -> Bool,
+        controllerAddress: @escaping () -> String?,
+        readPairedDevices: @escaping () -> [IOBluetoothDevice],
+        registerConnect: @escaping (IOBluetoothDeviceSource) -> IOBluetoothUserNotification?,
+        profileDevices: @escaping () async -> [String: BluetoothDeviceSnapshot]
+    ) {
+        self.mayAccessNative = mayAccessNative
+        self.controllerAddress = controllerAddress
+        self.readPairedDevices = readPairedDevices
+        self.registerConnect = registerConnect
+        self.profileDevices = profileDevices
         super.init()
     }
 
-    /// True when a controller exists and reports a real address.
-    ///
-    /// A Mac with Bluetooth removed or failed still vends a controller object,
-    /// but its address reads back as all zeroes — so the address is the test,
-    /// not the object. A refused permission may present the same way; both mean
-    /// the same thing to the caller, since the card is driven by notifications
-    /// that would not arrive either.
     public var isAvailable: Bool {
-        guard let address = IOBluetoothHostController.default()?.addressAsString() else {
-            return false
-        }
+        // Without authorization the profiler fallback is still usable. Do not
+        // inspect the native controller just to compute a settings label.
+        guard mayAccessNative() else { return true }
+        guard let address = controllerAddress() else { return false }
         return address.contains { $0.isHexDigit && $0 != "0" }
     }
 
@@ -142,13 +155,13 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
     public func connectedDevices() async -> [BluetoothDeviceSnapshot] {
         // `system_profiler` leads because it needs no grant and is the only
         // source of battery levels.
-        let profiled = await Self.profiledDevices()
+        let profiled = await profileDevices()
         var byAddress = profiled.filter { $0.value.isConnected }
 
-        // IOBluetooth sees LE links that `system_profiler` can leave out, so it
-        // only ever adds. When the permission is missing this loop is empty and
-        // the result is simply the profiled set.
-        for identity in Self.connectedIdentities()
+        // Recheck after the asynchronous profiler read: permission may have
+        // changed while the process was running.
+        let identities = mayAccessNative() ? connectedIdentities() : []
+        for identity in identities
         where byAddress[identity.address] == nil
             && Self.isAnnounceworthy(name: identity.name, classMajor: identity.classMajor) {
             byAddress[identity.address] = Self.snapshot(
@@ -171,12 +184,8 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
         let classMajor: BluetoothDeviceClassMajor
     }
 
-    private static func pairedDevices() -> [IOBluetoothDevice] {
-        (IOBluetoothDevice.pairedDevices() ?? []).compactMap { $0 as? IOBluetoothDevice }
-    }
-
-    private static func connectedIdentities() -> [Identity] {
-        pairedDevices().filter { $0.isConnected() }.compactMap(identity)
+    private func connectedIdentities() -> [Identity] {
+        readPairedDevices().filter { $0.isConnected() }.compactMap(Self.identity)
     }
 
     /// Whether a device's connection is worth announcing at all.
@@ -272,14 +281,12 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
         self.onConnect = onConnect
         self.onDisconnect = onDisconnect
 
-        connectRegistration = IOBluetoothDevice.register(
-            forConnectNotifications: self,
-            selector: #selector(deviceConnected(_:device:))
-        )
+        guard mayAccessNative() else { return }
+        connectRegistration = registerConnect(self)
 
         // Devices already connected when watching starts never send a connect
         // notification, so their disconnect has to be armed by hand.
-        for device in Self.pairedDevices() where device.isConnected() {
+        for device in readPairedDevices() where device.isConnected() {
             armDisconnect(for: device)
         }
 
@@ -307,7 +314,7 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
     }
 
     private func armDisconnect(for device: IOBluetoothDevice) {
-        guard let address = Self.address(of: device),
+        guard mayAccessNative(), let address = Self.address(of: device),
               disconnectRegistrations[address] == nil
         else { return }
 
@@ -330,8 +337,11 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
         device: IOBluetoothDevice
     ) {
         nonisolated(unsafe) let device = device
+        nonisolated(unsafe) let notification = notification
         Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard let self, self.mayAccessNative(),
+                  self.connectRegistration === notification
+            else { return }
             self.armDisconnect(for: device)
             guard let identity = Self.identity(of: device),
                   Self.isAnnounceworthy(
@@ -343,13 +353,16 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
             // One emission, after enrichment, rather than a bare snapshot now
             // and a battery update a moment later: the second would re-render
             // the card and make the levels appear to pop in.
-            let profiled = await Self.profiledDevices()
+            let profiled = await self.profileDevices()
             // The enrichment can take seconds; a flap inside that window has
             // already delivered the disconnect. Announcing the connect now
             // would present a device that is gone — and its one-shot
             // disconnect registration has spent itself, so no goodbye would
             // ever correct the card.
-            guard device.isConnected() else { return }
+            guard self.mayAccessNative(),
+                  self.connectRegistration === notification,
+                  device.isConnected()
+            else { return }
             guard let handler = self.onConnect else { return }
             handler(Self.snapshot(for: identity, profiled: profiled[identity.address]))
         }
@@ -359,13 +372,18 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
         _ notification: IOBluetoothUserNotification,
         device: IOBluetoothDevice
     ) {
-        nonisolated(unsafe) let device = device
+        nonisolated(unsafe) let notification = notification
         Task { @MainActor [weak self] in
-            guard let self, let address = Self.address(of: device) else { return }
+            // Resolve the address from our registration table rather than
+            // reading the device after a possible permission revocation.
+            guard let self, let address = self.disconnectRegistrations.first(where: {
+                $0.value === notification
+            })?.key else { return }
             // The registration is one-shot and has already invalidated itself;
             // only our reference to it needs clearing. Calling `unregister()`
             // here would be a second release of something IOBluetooth dropped.
             self.disconnectRegistrations.removeValue(forKey: address)
+            guard self.mayAccessNative() else { return }
             self.onDisconnect?(address)
         }
     }
@@ -680,4 +698,3 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
     }
     """
 }
-

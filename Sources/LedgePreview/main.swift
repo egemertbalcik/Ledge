@@ -48,7 +48,7 @@ private enum PreviewShell {
             ProviderDescriptor(id: "timer", displayName: "Timer", kind: .timer,
                                permission: nil, isEnabled: true, isAvailable: true),
             ProviderDescriptor(id: "weather", displayName: "Weather", kind: .weather,
-                               permission: .location, isEnabled: true, isAvailable: false),
+                               permission: .location, isEnabled: true, isAvailable: true),
             ProviderDescriptor(id: "calendar", displayName: "Calendar", kind: .event,
                                permission: .calendars, isEnabled: false, isAvailable: false),
         ]
@@ -69,12 +69,15 @@ private enum PreviewShell {
 final class PreviewDelegate: NSObject, NSApplicationDelegate {
 
     private var window: NSWindow?
+    private var tourPage = 0
+    private let previewsOnboarding = ProcessInfo.processInfo.environment["LEDGE_GALLERY_ONLY"] == "onboarding"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let only = ProcessInfo.processInfo.environment["LEDGE_GALLERY_ONLY"]
         let size: NSSize = switch only {
         case "settings": NSSize(width: 700, height: 560)
         case "onboarding": NSSize(width: 480, height: 596)
+        case "layout": NSSize(width: 700, height: 680)
         default: NSSize(width: 560, height: 1000)
         }
         let window = NSWindow(
@@ -83,6 +86,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         window.title = "Ledge — Card Gallery"
         switch only {
         case "settings":
@@ -93,13 +97,9 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
                 model: PreviewShell.model
             ))
         case "onboarding":
-            window.contentView = NSHostingView(rootView: OnboardingView(
-                model: PreviewShell.model,
-                actions: PreviewShell.actions,
-                openSettings: {},
-                openSource: {},
-                finish: {}
-            ))
+            installTour(in: window)
+        case "layout":
+            window.contentView = NSHostingView(rootView: LayoutGalleryView())
         default:
             window.contentView = NSHostingView(rootView: GalleryView())
         }
@@ -118,6 +118,37 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// In-memory progress keeps this harness separate from the real app's
+    /// preferences. Click the Dock icon after closing to check resumption.
+    private func installTour(in window: NSWindow) {
+        let hosting = NSHostingView(rootView: OnboardingView(
+            model: PreviewShell.model,
+            actions: PreviewShell.actions,
+            openSettings: {},
+            openSource: {},
+            finish: { [weak self] in
+                self?.tourPage = 0
+                self?.window?.close()
+            },
+            deferTour: { [weak self] in self?.window?.close() },
+            startPage: tourPage,
+            onPage: { [weak self] in self?.tourPage = $0 }
+        ))
+        hosting.sizingOptions = []
+        window.contentView = hosting
+        let size = NSSize(width: 480, height: 596)
+        window.setContentSize(size)
+        window.contentMinSize = size
+        window.contentMaxSize = size
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard previewsOnboarding, let window else { return true }
+        if !window.isVisible { installTour(in: window) }
+        window.makeKeyAndOrderFront(nil)
+        return false
+    }
+
     private static func snapshot(_ window: NSWindow, to path: String) {
         guard let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
@@ -128,7 +159,88 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !previewsOnboarding
+    }
+}
+
+/// Real overlay geometry at the largest supported display scale and card height.
+/// The window crops only the unused sides of the full-width synthetic panel.
+@MainActor
+private struct LayoutGalleryView: View {
+    private static let geometry = NotchGeometry(
+        screenSize: CGSize(width: 1470, height: 956),
+        notchSize: CGSize(width: 180, height: 38),
+        notchCenterX: 735, isHardwareNotch: true, displayScale: 1.2
+    )
+    @State private var preferences: Preferences
+    @State private var presentation: NotchPresentation
+    @State private var rainy = false
+    @State private var routeCount = 3
+
+    init() {
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        preferences.expandedHeight = NotchLayout.maximumExpandedHeight
+        let presentation = NotchPresentation()
+        presentation.phase = .expanded
+        presentation.selected = PreviewFixtures.nowPlaying
+        presentation.count = 2
+        _preferences = State(initialValue: preferences)
+        _presentation = State(initialValue: presentation)
+    }
+
+    var body: some View {
+        let panelSize = NotchLayout.panelSize(for: Self.geometry)
+        VStack(spacing: 10) {
+            HStack {
+                Picker("Card", selection: $rainy) {
+                    Text("Music").tag(false)
+                    Text("Rainy Weather").tag(true)
+                }
+                .pickerStyle(.segmented)
+                Picker("Outputs", selection: $routeCount) {
+                    ForEach([1, 3, 5], id: \.self) { Text("\($0)").tag($0) }
+                }
+                .frame(width: 140)
+                .disabled(rainy)
+            }
+            .padding(.horizontal)
+            Text("Scale 1.20 · notch 38 pt · Height 440 pt · panel \(panelSize.height, specifier: "%.1f") pt. Open Music’s audio output button to inspect rows.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            NotchOverlayView(
+                geometry: Self.geometry, preferences: preferences,
+                presentation: presentation,
+                nowPlayingActions: NowPlayingActions(outputs: {
+                    (1...routeCount).map { index in
+                        AudioOutputOption(
+                            id: UInt32(index), name: "Preview Output \(index)",
+                            isCurrent: index == 1, level: 0.6
+                        )
+                    }
+                })
+            )
+            .id(routeCount)
+            .frame(width: panelSize.width, height: panelSize.height)
+            .frame(width: 700)
+            .background(Color.gray.opacity(0.16))
+            .clipped()
+            .overlay(alignment: .bottom) { Rectangle().fill(.orange).frame(height: 1) }
+        }
+        .padding(.top, 12)
+        .frame(width: 700)
+        .onChange(of: rainy) { _, value in
+            presentation.routePickerRows = 0
+            presentation.selectedIndex = value ? 1 : 0
+            presentation.selected = value ? Activity(
+                id: ActivityID(kind: .weather, source: "preview.rain"), createdAt: 0,
+                payload: .weather(WeatherPayload(
+                    temperatureCelsius: 24, symbolName: "cloud.rain.fill",
+                    condition: "Rain arriving", city: "Preview City",
+                    hourly: PreviewFixtures.previewHours, rainSoonMinutes: 15
+                ))
+            ) : PreviewFixtures.nowPlaying
+        }
+        .onChange(of: routeCount) { _, _ in presentation.routePickerRows = 0 }
     }
 }
 

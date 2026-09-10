@@ -127,6 +127,7 @@ public enum ProviderRegistry {
                 // TCC service as CoreBluetooth. Without the grant the provider
                 // still runs, it just stops noticing changes as they happen.
                 permission: .bluetooth,
+                permissionIsOptional: true,
                 make: { BluetoothProvider(source: IOBluetoothDeviceSource()) }
             ),
 
@@ -219,6 +220,7 @@ public enum ProviderRegistry {
                 // the provider falls back to the typed city, so the feature
                 // still works and nothing prompts on its own.
                 permission: .location,
+                permissionIsOptional: true,
                 make: {
                     WeatherProvider(
                         source: OpenMeteoWeatherSource(),
@@ -281,7 +283,8 @@ public enum ProviderRegistry {
                 kind: registration.kind,
                 permission: registration.permission,
                 isEnabled: isEnabled(registration.id),
-                isAvailable: registration.permission.map(isPermitted) ?? true
+                isAvailable: registration.permissionIsOptional
+                    || (registration.permission.map(isPermitted) ?? true)
             )
         }
     }

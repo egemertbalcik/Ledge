@@ -280,16 +280,9 @@ public struct NotchOverlayView: View {
     }
 
     private var layout: NotchLayout {
-        .layout(
-            for: phase,
-            geometry: geometry,
-            expandedSize: expandedSize,
-            bottomRadius: preferences.bottomRadius,
-            closedBottomRadius: preferences.closedBottomRadius,
-            gutterRadius: preferences.gutterRadius,
-            isHudInteractive: isHovering,
-            hudExtraHeight: hudExtraHeight,
-            isAnnouncing: presentation.announcement != nil
+        presentation.layout(
+            preferences: preferences, geometry: geometry, phase: phase,
+            hudHovered: isHovering, hudExtraHeight: hudExtraHeight
         )
     }
 
@@ -744,7 +737,10 @@ public struct NotchOverlayView: View {
                     height: expandedSize.height / geometry.displayScale
                 )
                 .scaleEffect(geometry.displayScale, anchor: .top)
-                .frame(width: expandedSize.width, height: expandedSize.height)
+                // Scaling changes drawing, not layout size. Centering the
+                // reference-size child in this larger frame shifts it down
+                // again and clips the last route even when its height fits.
+                .frame(width: expandedSize.width, height: expandedSize.height, alignment: .top)
                 // Drawn over the card's own bottom padding rather than given a
                 // row of its own: in-flow, the dots were the first casualty of
                 // the cards' fixed heights and never actually rendered.

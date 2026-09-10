@@ -126,6 +126,7 @@ public final class TimerProvider: ActivityProvider {
     private let persistRecents: ([Int]) -> Void
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
     private var pending: DispatchWorkItem?
+    private var streamGeneration: UUID?
 
     /// Nil when no session exists at all.
     public private(set) var session: Session?
@@ -188,10 +189,18 @@ public final class TimerProvider: ActivityProvider {
     // MARK: - Lifecycle
 
     public func start() -> AsyncStream<ProviderEvent> {
-        AsyncStream { continuation in
+        stop()
+        let generation = UUID()
+        streamGeneration = generation
+        return AsyncStream { continuation in
             self.continuation = continuation
+            // Termination hops back to this actor; the old stream may finish
+            // after a new start, so its cleanup must stay with its own run.
             continuation.onTermination = { _ in
-                Task { @MainActor [weak self] in self?.stop() }
+                Task { @MainActor [weak self] in
+                    guard let self, self.streamGeneration == generation else { return }
+                    self.stop()
+                }
             }
             // A provider that is switched on mid-session keeps showing it;
             // otherwise the ready card stands so the timer can be started from
@@ -209,6 +218,7 @@ public final class TimerProvider: ActivityProvider {
     }
 
     public func stop() {
+        streamGeneration = nil
         cancelHandOver()
         pending?.cancel()
         pending = nil
@@ -275,9 +285,10 @@ public final class TimerProvider: ActivityProvider {
         current.pausedRemaining = current.remaining(at: now())
         current.deadline = nil
         session = current
-        pending?.cancel()
-        pending = nil
         publish()
+        // Countdown and stopwatch share a scheduler. Pausing one must keep
+        // publications alive for the other.
+        scheduleTick()
     }
 
     public func resume() {

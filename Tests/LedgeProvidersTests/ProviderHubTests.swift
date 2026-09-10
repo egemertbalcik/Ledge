@@ -56,6 +56,53 @@ struct ProviderHubTests {
         for _ in 0..<10 { await Task.yield() }
     }
 
+    @Test("Removal rejects an event that already resumed the consumer")
+    func removalRejectsInFlightEvent() async {
+        let hub = ProviderHub()
+        let provider = TestProvider(identifier: "a")
+        hub.add(provider)
+        hub.start()
+        await settle()
+        provider.publish("stale")
+        hub.remove("a")
+        await settle()
+        #expect(hub.queue.isEmpty)
+    }
+
+    @Test("Replacement rejects the old instance's in-flight events")
+    func replacementRejectsInFlightEvent() async {
+        let hub = ProviderHub()
+        let old = TestProvider(identifier: "a")
+        hub.add(old)
+        hub.start()
+        await settle()
+        old.publish("stale")
+        let replacement = TestProvider(identifier: "a")
+        hub.add(replacement)
+        hub.start()
+        replacement.publish("fresh")
+        await settle()
+        #expect(hub.queue.activities.map(\.id.source) == ["fresh"])
+        hub.remove("a")
+        #expect(hub.queue.isEmpty)
+    }
+
+    @Test("Stop and restart reject events from the previous run")
+    func restartRejectsInFlightEvent() async {
+        let hub = ProviderHub()
+        let provider = TestProvider(identifier: "a")
+        hub.add(provider)
+        hub.start()
+        await settle()
+        provider.publish("stale")
+        hub.stop()
+        hub.start()
+        provider.publish("fresh")
+        await settle()
+        #expect(hub.queue.activities.map(\.id.source) == ["fresh"])
+        hub.remove("a")
+    }
+
     @Test("Events reach the queue and notify")
     func eventsReachQueue() async {
         let hub = ProviderHub()
@@ -284,9 +331,13 @@ struct ProviderRegistryTests {
             isPermitted: { _ in false }
         )
         #expect(descriptors.allSatisfy { !$0.isEnabled })
-        // Now Playing needs Automation, so an ungranted permission marks it
-        // unavailable even though it is registered.
-        #expect(descriptors.contains { $0.permission == .automation && !$0.isAvailable })
+        // Optional capabilities must not make a working fallback look broken.
+        for id in ["nowplaying", "weather", "bluetooth"] {
+            #expect(descriptors.first { $0.id == id }?.isAvailable == true)
+        }
+        for id in ["calendar", "airpods-proximity", "bluetooth-power", "capslock"] {
+            #expect(descriptors.first { $0.id == id }?.isAvailable == false)
+        }
     }
 
     @Test("A provider needing no permission is always available")

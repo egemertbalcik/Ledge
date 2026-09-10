@@ -132,16 +132,13 @@ struct AppearanceSettingsTab: View {
             }
 
             Section("Expanded size") {
-                LabeledSlider(
-                    "Width",
-                    value: $preferences.expandedWidth,
-                    in: geometry.notchSize.width...geometry.screenSize.width,
-                    format: "%.0f"
-                )
+                Text("Adjust card width with Ear width in Compact. Calendar keeps a wider layout for its month grid.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 LabeledSlider(
                     "Height",
                     value: $preferences.expandedHeight,
-                    in: geometry.notchSize.height...440,
+                    in: geometry.notchSize.height...NotchLayout.maximumExpandedHeight,
                     format: "%.0f"
                 )
             }
@@ -281,12 +278,13 @@ struct ProviderDetailPane: View {
                 }
 
                 if let permission = descriptor.permission {
+                    let status = model.status(of: permission)
                     Section("Permission") {
                         LabeledContent(permission.displayName) {
-                            Text(descriptor.isAvailable ? "Granted" : "Not granted")
-                                .foregroundStyle(descriptor.isAvailable ? .green : .orange)
+                            Text(status.summary)
+                                .foregroundStyle(status.isUsable ? .green : .orange)
                         }
-                        if !descriptor.isAvailable {
+                        if !status.isUsable {
                             Button("Open Permissions…", action: openPermissions)
                         }
                     }

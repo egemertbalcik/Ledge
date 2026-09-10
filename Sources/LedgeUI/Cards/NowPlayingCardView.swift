@@ -531,7 +531,10 @@ public struct NowPlayingCardView: View {
         // breathing room from the artwork row's 12pt top inset; the menu's
         // header sat directly under the notch, which reads as the card being
         // cropped by it.
-        .padding(.top, 10)
+        .padding(.top, NotchLayout.routePickerTopPadding)
+        // Keep the scrolling viewport clear of the page dots and the shape's
+        // rounded bottom, including when the last of many outputs is reached.
+        .padding(.bottom, NotchLayout.routePickerBottomPadding)
         // The same margins the player keeps. The menu used to set its own, far
         // narrower ones so the capsules could be as wide as possible, and the
         // card visibly changed shape when the AirPlay button was pressed —

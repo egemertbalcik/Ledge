@@ -119,3 +119,42 @@ struct AutomationDenialLatchTests {
         #expect(ScriptingNowPlayingSource.indicatesAutomationDenial("") == false)
     }
 }
+
+@Suite("Scripting onboarding gate")
+@MainActor
+struct ScriptingOnboardingGateTests {
+    @MainActor
+    private final class Probe {
+        var allowed = false
+        var reads = 0
+        var enumerations = 0
+    }
+
+    @Test("Both scripting paths stay silent until explicitly allowed, then work without rebuilding")
+    func gateAppliesAtTheSource() async {
+        let probe = Probe()
+        let source = ScriptingNowPlayingSource(
+            mayQueryPlayers: { probe.allowed },
+            availablePlayers: { probe.enumerations += 1; return ScriptingNowPlayingSource.players },
+            readPlayer: { player in
+                probe.reads += 1
+                return NowPlayingSnapshot(
+                    title: "Track", artist: "Artist", isPlaying: true,
+                    appName: player.displayName, appBundleID: player.bundleID
+                )
+            }
+        )
+        #expect(!source.isAvailable)
+        #expect(await source.snapshot() == nil)
+        #expect(await source.snapshot(forBundleID: "com.apple.Music") == nil)
+        #expect(probe.reads == 0)
+        #expect(probe.enumerations == 0)
+        probe.allowed = true
+        #expect(source.isAvailable)
+        #expect(await source.snapshot()?.isPlaying == true)
+        #expect(await source.snapshot(forBundleID: "com.apple.Music")?.appBundleID == "com.apple.Music")
+        #expect(probe.reads == 2)
+        #expect(await source.snapshot(forBundleID: "unknown") == nil)
+        #expect(probe.reads == 2)
+    }
+}

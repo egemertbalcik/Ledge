@@ -33,6 +33,7 @@ public final class ProviderHub {
     private struct Entry {
         let provider: any ActivityProvider
         var task: Task<Void, Never>?
+        var generation: UUID?
 
         /// Ids this provider currently has standing in the queue.
         ///
@@ -83,10 +84,16 @@ public final class ProviderHub {
     /// Starts one provider by identifier, if it is registered and idle.
     public func start(_ identifier: String) {
         guard var entry = entries[identifier], !entry.isRunning else { return }
+        let generation = UUID()
+        entry.generation = generation
         let stream = entry.provider.start()
         entry.task = Task { @MainActor [weak self] in
             for await event in stream {
-                guard let self else { return }
+                // A yielded value may already have resumed this task before
+                // removal or restart cancelled it. Only the current run owns
+                // the right to mutate the queue and attribution.
+                guard !Task.isCancelled, let self,
+                      self.entries[identifier]?.generation == generation else { return }
                 self.record(event, from: identifier)
                 self.queue.apply(event)
                 self.onChange(self.queue)
@@ -138,6 +145,7 @@ public final class ProviderHub {
         for identifier in order {
             entries[identifier]?.task?.cancel()
             entries[identifier]?.task = nil
+            entries[identifier]?.generation = nil
             entries[identifier]?.provider.stop()
         }
     }

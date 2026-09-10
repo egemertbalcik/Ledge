@@ -39,7 +39,7 @@ public struct CompactSettingsTab: View {
                 LabeledSlider("Leading nudge", value: $leadingDraft, in: -20...20, format: "%.0f")
                 LabeledSlider("Trailing nudge", value: $trailingDraft, in: -20...20, format: "%.0f")
                 HStack {
-                    Text("Positive nudges move content toward the cutout. Width also sets every open card under the one-width rule.")
+                    Text("Positive nudges move content toward the cutout. Width also adjusts open cards; Calendar keeps a wider month grid.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -89,14 +89,19 @@ public struct CompactSettingsTab: View {
         // cannot stretch the island and unseat the hatch from the cutout.
         let scale: CGFloat = 0.66
         let cutout = geometry.notchSize.width
-        let width = cutout + widthDraft * 2
-        let height = geometry.notchSize.height + 1
+        let layout = NotchLayout.peek(
+            geometry, bottomRadius: preferences.bottomRadius,
+            gutterRadius: preferences.gutterRadius, earWidth: widthDraft
+        )
+        let width = layout.boundingSize.width
+        let height = layout.boundingSize.height
+        let shape = LedgeShape(
+            bottomRadius: layout.bottomRadius,
+            gutterRadius: layout.gutterRadius,
+            cornerSmoothing: preferences.cornerSmoothing
+        )
         return ZStack {
-            UnevenRoundedRectangle(
-                cornerRadii: .init(bottomLeading: 10, bottomTrailing: 10),
-                style: .continuous
-            )
-            .fill(.black)
+            shape.fill(.black)
 
             CompactEarsView(
                 activity: activity,
@@ -106,7 +111,10 @@ public struct CompactSettingsTab: View {
                 trailingOffset: trailingDraft
             )
             .environment(\.weatherUnits, preferences.weatherUnits)
-
+        }
+        .frame(width: width, height: height)
+        .clipShape(shape)
+        .overlay {
             // The hardware notch, hatched and seated exactly over the centre
             // cutout: content may never draw here, and the preview says so
             // instead of leaving a black void.
@@ -117,7 +125,6 @@ public struct CompactSettingsTab: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(width: width, height: height)
         .compositingGroup()
         .scaleEffect(scale)
         .frame(width: width * scale, height: height * scale)

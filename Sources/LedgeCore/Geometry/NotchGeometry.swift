@@ -127,9 +127,13 @@ public struct NotchLayout: Sendable, Equatable {
     /// Applies a new ear width to every compact phase and, through the width
     /// discipline, every card. NaN and extremes degrade to the default.
     public static func setEarWidth(_ width: CGFloat) {
-        let sane = width.isFinite ? min(max(width, 36), 90) : defaultEarWidth
+        let sane = sanitizedEarWidth(width)
         peekEarWidth = sane
         hudEarWidth = sane
+    }
+
+    private static func sanitizedEarWidth(_ width: CGFloat) -> CGFloat {
+        width.isFinite ? min(max(width, 36), 90) : defaultEarWidth
     }
 
     /// Extra height beyond the bare cutout for every compact phase. Half a
@@ -159,12 +163,13 @@ public struct NotchLayout: Sendable, Equatable {
         _ geometry: NotchGeometry,
         bottomRadius: CGFloat,
         gutterRadius: CGFloat,
-        announcing: Bool = false
+        announcing: Bool = false,
+        earWidth: CGFloat? = nil
     ) -> NotchLayout {
         expanded(
             geometry,
             size: CGSize(
-                width: geometry.notchSize.width + peekEarWidth * 2,
+                width: geometry.notchSize.width + (earWidth.map(sanitizedEarWidth) ?? peekEarWidth) * 2,
                 height: geometry.notchSize.height + compactExtraHeight
                     + (announcing ? announceExtraHeight(for: geometry) : 0)
             ),
@@ -196,7 +201,9 @@ public struct NotchLayout: Sendable, Equatable {
     public static let emptyHintsHeight: CGFloat = 106
 
     /// The card's own padding around the route menu.
-    public static let routePickerPadding: CGFloat = 30
+    public static let routePickerTopPadding: CGFloat = 10
+    public static let routePickerBottomPadding: CGFloat = 20
+    public static let routePickerPadding = routePickerTopPadding + routePickerBottomPadding
 
     /// The open card's size — the single source both the drawn shape and the
     /// shell's hit region use.
@@ -381,9 +388,9 @@ public struct NotchLayout: Sendable, Equatable {
         if routePickerRows > 0 {
             return sanitized(CGSize(
                 width: content.width,
-                height: geometry.notchSize.height
+                height: (geometry.notchSize.height
                     + routePickerHeight(rows: routePickerRows)
-                    + routePickerPadding
+                    + routePickerPadding) * scale
             ), geometry: geometry)
         }
 
@@ -537,6 +544,31 @@ public struct NotchLayout: Sendable, Equatable {
         }
     }
 
+    /// Upper end of the Appearance height control, in reference-display points.
+    public static let maximumExpandedHeight: CGFloat = 440
+    public static let weatherPrecipitationHeight: CGFloat = 19
+
+    /// Reserve the largest supported card before installing the hosting view.
+    /// This keeps changing Height from resizing the window mid-animation.
+    /// The 32pt margin covers the near-critically-damped expansion spring.
+    public static func panelSize(for geometry: NotchGeometry) -> CGSize {
+        let tallest = ActivityKind.allCases.map { kind in
+            let size = cardSize(
+                kind: kind, phase: .expanded,
+                base: CGSize(width: 0, height: maximumExpandedHeight),
+                calendarWeekRows: 6, timerContentHeight: .greatestFiniteMagnitude,
+                geometry: geometry, routePickerRows: 0, hasSelection: true
+            )
+            return size.height + (kind == .weather ? weatherPrecipitationHeight * geometry.displayScale : 0)
+        }.max() ?? 0
+        let routes = (geometry.notchSize.height + routePickerHeight(rows: 3)
+            + routePickerPadding) * geometry.displayScale
+        return CGSize(
+            width: geometry.screenSize.width,
+            height: min(geometry.screenSize.height, max(tallest, routes) + 32)
+        )
+    }
+
     /// The room the precipitation line needs, and zero when there is none.
     ///
     /// The weather card is the one card whose content changes shape: "Rain in
@@ -546,7 +578,7 @@ public struct NotchLayout: Sendable, Equatable {
     /// 11pt line plus the 5pt that separates it from the header.
     public static func weatherExtraHeight(for payload: ActivityPayload?) -> CGFloat {
         guard case .weather(let weather) = payload, weather.rainSoonMinutes != nil else { return 0 }
-        return 19
+        return weatherPrecipitationHeight
     }
 
     /// The expanded size to use for a given piece of content.

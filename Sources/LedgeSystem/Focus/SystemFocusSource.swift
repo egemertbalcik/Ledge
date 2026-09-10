@@ -41,16 +41,18 @@ public final class SystemFocusSource: FocusSource {
     /// arrives up to half a minute late.
     fileprivate var lastWake = "startup"
 
-    private let file: FileFocusSource
-    private let status: FocusStatusReader
+    private let file: any FocusSource
+    private let statusAuthorized: @MainActor () -> Bool
+    private let readStatus: @Sendable () -> Bool?
+    private let recheckFileAccess: @MainActor () -> Void
 
     private var onChange: (() -> Void)?
     private var stream: FSEventStreamRef?
     private var backstop: Task<Void, Never>?
     private var probe: Task<Void, Never>?
 
-    /// The last answer from the system, for the fallback path. Nil means "no
-    /// Focus", and the snapshot is deliberately generic: without the database
+    /// The last usable answer from the system, for the fallback path. An
+    /// unknown or unauthorized reading clears it. Without the database
     /// there is no name to show.
     private var fallbackFocused = false
 
@@ -64,14 +66,28 @@ public final class SystemFocusSource: FocusSource {
 
     public init(file: FileFocusSource = FileFocusSource(), status: FocusStatusReader = FocusStatusReader()) {
         self.file = file
-        self.status = status
+        self.statusAuthorized = { status.isAuthorized }
+        self.readStatus = { status.isFocused() }
+        self.recheckFileAccess = { file.recheckAccess() }
+    }
+
+    /// Injects readings without requiring a particular macOS permission state.
+    init(
+        file: any FocusSource,
+        statusAuthorized: @escaping @MainActor () -> Bool,
+        readStatus: @escaping @Sendable () -> Bool?
+    ) {
+        self.file = file
+        self.statusAuthorized = statusAuthorized
+        self.readStatus = readStatus
+        self.recheckFileAccess = {}
     }
 
     /// Whether *anything* can be reported: the database, or the system's
     /// on/off answer. False means the Focus card has no way to exist and the
     /// Permissions pane should say so.
     public var isReadable: Bool {
-        file.isReadable || status.isAuthorized
+        file.isReadable || statusAuthorized()
     }
 
     public func current() -> FocusSnapshot? {
@@ -79,7 +95,7 @@ public final class SystemFocusSource: FocusSource {
         return Self.resolve(
             fileSnapshot: file.isReadable ? file.current() : nil,
             fileReadable: file.isReadable,
-            statusFocused: fallbackFocused
+            statusFocused: statusAuthorized() && fallbackFocused
         )
     }
 
@@ -147,7 +163,7 @@ public final class SystemFocusSource: FocusSource {
     /// The user has just given (or withdrawn) access to the database folder.
     /// Re-reads at once instead of waiting for a backoff or a timer tick.
     public func accessChanged() {
-        file.recheckAccess()
+        recheckFileAccess()
         refresh()
         notifyObservers()
     }
@@ -191,34 +207,43 @@ public final class SystemFocusSource: FocusSource {
     private var hasPrimed = false
 
     private func primeIfNeeded() {
-        guard !hasPrimed, !file.isReadable, status.isAuthorized else { return }
+        guard !hasPrimed, !file.isReadable, statusAuthorized() else { return }
         hasPrimed = true
-        fallbackFocused = status.isFocused() ?? false
+        fallbackFocused = readStatus() ?? false
     }
 
     /// Re-asks the system out of band — on wake, and when the screens light.
     public func refresh() {
-        guard !file.isReadable, status.isAuthorized else { return }
-        guard probe == nil else { return }
+        guard statusAuthorized() else {
+            invalidateFallback()
+            return
+        }
+        guard !file.isReadable, probe == nil else { return }
         probe = Task { [weak self] in
-            // The read is a slow XPC round trip; keep it off the main actor.
-            let focused = await Task.detached(priority: .utility) { [status = self?.status] in
-                status?.isFocused() ?? false
+            guard let self else { return }
+            // Keep this probe registered through confirmation, so another
+            // refresh cannot start a competing reading in the meantime.
+            defer { if !Task.isCancelled { self.probe = nil } }
+            let focused = await Task.detached(priority: .utility) { [readStatus = self.readStatus] in
+                readStatus()
             }.value
-            guard let self, !Task.isCancelled else { return }
-            self.probe = nil
+            guard !Task.isCancelled else { return }
+            guard self.statusAuthorized(), let focused else {
+                self.invalidateFallback()
+                return
+            }
             guard focused != self.fallbackFocused else { return }
-            // A change is confirmed before it is believed. The system's answer
-            // is not perfectly stable under repeated asking — two reads a
-            // millisecond apart have been seen to disagree — and an
-            // unconfirmed one turned into a card that peeked, left, and came
-            // back every few seconds for as long as a Focus was on. A real
-            // change survives a second look; a glitch does not.
-            let confirmed = await Task.detached(priority: .utility) { [status = self.status] in
+            // Confirm changes because consecutive system readings can disagree.
+            let confirmed = await Task.detached(priority: .utility) { [readStatus = self.readStatus] in
                 try? await Task.sleep(for: .milliseconds(200))
-                return status.isFocused()
+                return readStatus()
             }.value
-            guard !Task.isCancelled, confirmed == focused else { return }
+            guard !Task.isCancelled else { return }
+            guard self.statusAuthorized(), let confirmed else {
+                self.invalidateFallback()
+                return
+            }
+            guard confirmed == focused else { return }
             self.fallbackFocused = focused
             Self.log.debug("focus (system): \(focused ? "on" : "off", privacy: .public)")
             if DebugSwitches.tracing("focus") {
@@ -229,6 +254,15 @@ public final class SystemFocusSource: FocusSource {
             }
             self.notifyObservers()
         }
+    }
+
+    private func invalidateFallback() {
+        probe?.cancel()
+        probe = nil
+        hasPrimed = false
+        let wasFocused = fallbackFocused
+        fallbackFocused = false
+        if wasFocused { notifyObservers() }
     }
 
     // MARK: - Fallback watching

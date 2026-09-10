@@ -432,3 +432,50 @@ struct TimerHandOverTests {
         #expect(sessions(in: events).contains { $0.isBreak } == false)
     }
 }
+
+@Suite("Timer stream lifecycle")
+@MainActor
+struct TimerLifecycleTests {
+    @Test("Old stream termination cannot stop an immediate restart")
+    func immediateRestartKeepsFreshStreamAlive() async {
+        let timer = TimerProvider()
+        let old = timer.start()
+        timer.stop()
+        let fresh = timer.start()
+        for _ in 0..<20 { await Task.yield() }
+        timer.startCustom(minutes: 1)
+        timer.stop()
+        var publications = 0
+        for await event in fresh {
+            if case .publish(let activity) = event, activity.id == TimerProvider.activityID {
+                publications += 1
+            }
+        }
+        withExtendedLifetime(old) {}
+        #expect(publications == 1)
+    }
+
+    @Test("Pausing the countdown preserves stopwatch publications")
+    func pausedCountdownKeepsStopwatchPublishing() async throws {
+        let timer = TimerProvider()
+        let stream = timer.start()
+        timer.stopwatchToggle()
+        timer.startCustom(minutes: 1)
+        timer.pause()
+        var publications = 0
+        let consumer = Task { @MainActor in
+            for await event in stream {
+                if case .publish = event { publications += 1 }
+            }
+        }
+        defer { timer.stop(); consumer.cancel() }
+        for _ in 0..<20 { await Task.yield() }
+        let before = publications
+        // The regular scheduler fires at least once per second. Test the
+        // publications, not the separate TimelineView stopwatch rendering.
+        try await Task.sleep(for: .milliseconds(1500))
+        #expect(publications > before)
+        #expect(timer.stopwatch.isRunning)
+        #expect(timer.session?.isRunning == false)
+    }
+}

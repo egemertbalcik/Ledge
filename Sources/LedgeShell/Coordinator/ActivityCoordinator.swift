@@ -90,11 +90,10 @@ public final class ActivityCoordinator {
             registration.id, defaultEnabled: registration.isEnabledByDefault
         ) else { return false }
         guard let permission = registration.permission else { return true }
-        // Nothing that touches a permission runs before the welcome tour is
-        // done — not even the ones that would only *read* a status. The read
-        // is what raised an Automation dialog on a fresh Mac seconds after
-        // launch, with no window on screen to say what had asked for it.
-        guard preferences.hasCompletedOnboarding else { return false }
+        // The tour explains capabilities; it is not a permission. Already
+        // authorized sources and optional fallbacks can run while it is
+        // deferred. Potentially prompting Apple Events are gated at the
+        // scripting source, so system-wide media can still work silently.
         guard !registration.permissionIsOptional else { return true }
         return isPermitted(permission)
     }
@@ -116,10 +115,7 @@ public final class ActivityCoordinator {
     /// A disabled provider is never constructed — `make` is deferred precisely
     /// so a switched-off source does no work and asks for no permission.
     public func startEnabled() {
-        for (id, registration) in registrations
-        where canRun(registration) && !hub.registeredIdentifiers.contains(id) {
-            hub.add(registration.make())
-        }
+        reconcileWithPreferences()
         hub.start()
 
         // Event-driven providers are silent until something happens, so without
@@ -140,24 +136,14 @@ public final class ActivityCoordinator {
     /// Enabling builds and starts it; disabling stops it and takes its cards
     /// off screen. Neither requires a relaunch.
     public func setProvider(_ id: String, enabled: Bool) {
-        guard let registration = registrations[id] else { return }
+        guard registrations[id] != nil else { return }
         preferences.setProvider(id, enabled: enabled)
-
-        if enabled {
-            if !hub.registeredIdentifiers.contains(id) {
-                hub.add(registration.make())
-            }
-            hub.start(id)
-            Self.log.notice("provider \(id, privacy: .public) enabled")
-        } else {
-            hub.remove(id)
-            Self.log.notice("provider \(id, privacy: .public) disabled")
-        }
+        reconcileProvider(id)
     }
 
     /// Whether a provider is currently registered (built and running).
     public func isProviderRunning(_ id: String) -> Bool {
-        hub.registeredIdentifiers.contains(id)
+        hub.runningIdentifiers.contains(id)
     }
 
     /// Brings the running set back in line with the preferences after they
@@ -166,16 +152,33 @@ public final class ActivityCoordinator {
     /// observes those keys. Starts what is now enabled and not running, stops
     /// what is now disabled and running.
     public func reconcileWithPreferences() {
-        for (id, registration) in registrations {
-            let wanted = preferences.isProviderEnabled(id, defaultEnabled: registration.isEnabledByDefault)
-            let running = hub.registeredIdentifiers.contains(id)
-            if wanted && !running {
-                hub.add(registration.make())
-                hub.start(id)
-                Self.log.notice("provider \(id, privacy: .public) enabled by reconcile")
-            } else if !wanted && running {
-                hub.remove(id)
-                Self.log.notice("provider \(id, privacy: .public) disabled by reconcile")
+        for id in registrations.keys.sorted() { reconcileProvider(id) }
+    }
+
+    private func reconcileProvider(_ id: String) {
+        guard let registration = registrations[id] else { return }
+        guard canRun(registration) else {
+            hub.remove(id)
+            return
+        }
+        if !hub.registeredIdentifiers.contains(id) {
+            hub.add(registration.make())
+        }
+        hub.start(id)
+    }
+
+    /// Required permissions stop their providers; optional ones fall back.
+    /// Losing Automation (including merely closing its target player) must
+    /// not interrupt system-wide media. Other optional sources are rebuilt
+    /// so they release cached location/device state and adopt their fallback.
+    public func permissionChanged(_ kind: PermissionKind, isGranted: Bool) {
+        for registration in registeredProviders where registration.permission == kind {
+            if !canRun(registration) {
+                suspendProvider(registration.id)
+            } else if isGranted || kind != .automation {
+                restartProvider(registration.id)
+            } else {
+                reconcileProvider(registration.id)
             }
         }
     }
