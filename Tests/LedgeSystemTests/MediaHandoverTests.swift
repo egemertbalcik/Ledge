@@ -135,4 +135,44 @@ struct MediaHandoverTests {
         }
         #expect(answer?.appBundleID == Self.safari)
     }
+
+    // MARK: - How quickly a new track lands
+
+    /// The "compact view is slow" report. Spotify announced a track change in
+    /// under a tenth of a second; the card kept the old title for two, because
+    /// every different item had to be seen twice, 1.2s apart, before it was
+    /// believed.
+    @Test("An app's next track is shown at once, not after corroboration")
+    func appTrackChangeIsImmediate() async {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "First"))
+        let scripting = Source(identifier: "scripting", value: track(Self.spotify, title: "First"))
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        #expect(await source.snapshot()?.title == "First")
+
+        // Next track, read a fifth of a second later — sooner than any
+        // corroboration window.
+        clock.now += 0.2
+        adapter.value = track(Self.spotify, title: "Second")
+        scripting.value = track(Self.spotify, title: "Second")
+        #expect(await source.snapshot()?.title == "Second")
+    }
+
+    /// The churn the corroboration exists for is still resisted: a browser
+    /// naming a different item once is not yet news.
+    @Test("A page's new item still has to persist before it is believed")
+    func pageTrackChangeStillCorroborates() async {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.chrome, title: "Clip"))
+        let scripting = Source(identifier: "scripting", value: nil)
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        #expect(await source.snapshot()?.title == "Clip")
+
+        clock.now += 0.2
+        adapter.value = track(Self.chrome, title: "Autoplay")
+        #expect(await source.snapshot()?.title == "Clip", "seen once is not enough")
+
+        clock.now += CompositeNowPlayingSource.challengerCorroboration
+        #expect(await source.snapshot()?.title == "Autoplay", "still there, so it is real")
+    }
 }

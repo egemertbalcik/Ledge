@@ -382,7 +382,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
            held.snapshot.trackKey != answered.trackKey,
            now - held.at < Self.heldGrace,
            !Self.hasFinished(held.snapshot, at: now, since: held.at),
-           !corroborated(answered, at: now) {
+           !corroborated(answered, heldBundleID: held.snapshot.appBundleID, at: now) {
             return Self.projecting(held.snapshot, from: held.at, to: now)
         }
         challenger = nil
@@ -433,7 +433,11 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
 
     /// Whether this different item has been seen before, long enough ago to
     /// mean it is still there rather than passing through.
-    private func corroborated(_ answered: NowPlayingSnapshot, at now: TimeInterval) -> Bool {
+    private func corroborated(
+        _ answered: NowPlayingSnapshot,
+        heldBundleID: String,
+        at now: TimeInterval
+    ) -> Bool {
         // Only something that is playing may take the seat. Switching to a
         // paused tab names it repeatedly, which is corroboration of a sort and
         // still not a reason to hand the card over: nothing was pressed, and
@@ -441,6 +445,29 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         guard answered.isPlaying else {
             challenger = nil
             return false
+        }
+        // The player that holds the seat, changing its own track, is taken at
+        // its word straight away.
+        //
+        // The churn corroboration exists for is web content — a browser
+        // handing its now-playing slot between autoplaying videos, eighty
+        // times in nine minutes — and it is still resisted here, including
+        // when it comes from the browser already holding the seat. But an
+        // application moving to its next track is not churn: when Spotify says
+        // the track changed, the track changed.
+        //
+        // Measured cost of not drawing that line: pressing Next left the old
+        // title, artwork and elapsed time on the card for two seconds while
+        // the new song played underneath. That is the whole of the "compact
+        // view is slow" report — the player announced the change in under a
+        // tenth of a second and the card sat on it.
+        //
+        // Only the incumbent gets this. A *different* player arriving is a
+        // handover, and handovers keep their own rules.
+        if answered.appBundleID == heldBundleID,
+           MediaOwner.isOpenableApp(bundleID: answered.appBundleID) {
+            challenger = nil
+            return true
         }
         if let challenger, challenger.trackKey == answered.trackKey {
             return now - challenger.at >= Self.challengerCorroboration
