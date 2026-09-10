@@ -62,6 +62,14 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     /// prompt is only a shortcut there, and macOS shows it at most once, so
     /// the pane is opened alongside it.
     public var isRequestable: Bool { true }
+
+    /// Whether granting this means leaving Ledge for System Settings.
+    ///
+    /// The others put a system dialog in front of the app and are answered
+    /// there and then, so the window that asked can come back to the front as
+    /// soon as the answer arrives. Accessibility is the exception: its prompt
+    /// is only a shortcut, and the switch itself lives in System Settings.
+    public var isGrantedInSystemSettings: Bool { self == .accessibility }
 }
 
 public enum PermissionStatus: String, Equatable, Sendable {

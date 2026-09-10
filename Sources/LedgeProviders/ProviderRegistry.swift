@@ -205,10 +205,14 @@ public enum ProviderRegistry {
                 id: "focus",
                 displayName: "Focus Modes",
                 kind: .focus,
-                // The system's own on/off answer, behind an ordinary prompt.
-                // Full Disk Access is an upgrade on top — it adds the mode's
-                // name and icon — but the card no longer depends on it.
+                // The system's own on/off answer, behind an ordinary prompt —
+                // preferred, and not the only way in. Given the Focus database
+                // folder, the source reads the mode straight from it, name and
+                // all, without the permission; requiring the grant anyway left
+                // a card that had everything it needed and was not allowed to
+                // run. Optional, like the weather's location.
                 permission: .focusStatus,
+                permissionIsOptional: true,
                 make: { FocusProvider(source: focusSource()) }
             ),
 

@@ -114,7 +114,15 @@ public final class HUDCoordinator {
         trustRetry = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(2))
-                guard let self else { return }
+                // Cancellation during the sleep is the case that matters:
+                // `Task.sleep` here is `try?`-swallowed, so a cancelled task
+                // wakes and carries straight on. Suppression switched off
+                // while this was asleep would have been re-started by a task
+                // whose only job was to serve a wish that no longer exists.
+                guard !Task.isCancelled, let self else { return }
+                // And the wish itself is re-read rather than assumed: the tap
+                // may only ever start because it is switched on *now*.
+                guard self.preferences.hudEnabled, self.preferences.suppressSystemHUD else { return }
                 if MediaKeyInterceptor.isTrusted, self.startTap() {
                     return
                 }

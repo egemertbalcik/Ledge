@@ -31,12 +31,17 @@ private final class SpyProvider: ActivityProvider {
 @MainActor
 struct ProviderGatingTests {
 
-    private func registration(_ id: String, _ permission: PermissionKind?) -> ProviderRegistration {
+    private func registration(
+        _ id: String,
+        _ permission: PermissionKind?,
+        optional: Bool = false
+    ) -> ProviderRegistration {
         ProviderRegistration(
             id: id,
             displayName: id,
             kind: .device,
             permission: permission,
+            permissionIsOptional: optional,
             make: { SpyProvider(identifier: id) }
         )
     }
@@ -197,5 +202,21 @@ struct ProviderGatingTests {
         #expect(made.count == 2)
         #expect(made.first?.stopCount == 1)
         activities.stop()
+    }
+
+    /// The Focus card can be fed two ways — the Focus-status permission, or
+    /// the database folder the user hands over in Settings — and requiring the
+    /// permission anyway left a card with everything it needed, not running.
+    @Test("The Focus card may run on the folder alone")
+    func focusRunsWithoutItsPermission() {
+        let activities = coordinator(permitted: [])
+        let focus = ProviderRegistry.all(nowPlayingProvider: { SpyProvider(identifier: "media") })
+            .first { $0.id == "focus" }
+        #expect(focus?.permission == .focusStatus, "still the preferred way in")
+        #expect(focus?.permissionIsOptional == true, "and not the only one")
+
+        activities.register(registration("focus", .focusStatus, optional: true))
+        activities.startEnabled()
+        #expect(activities.isProviderRunning("focus"))
     }
 }

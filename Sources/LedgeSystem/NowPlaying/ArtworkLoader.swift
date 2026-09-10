@@ -37,14 +37,25 @@ public final class ArtworkLoader {
     private var insertionOrder: [String] = []
     private let limit: Int
 
-    private let session: URLSession
+    /// How bytes are fetched. A closure rather than the session itself so the
+    /// failure latching — which is the part with rules — can be tested without
+    /// a network or a URL that behaves in a particular way.
+    private let fetch: @Sendable (URL) async throws -> (Data, URLResponse)
 
-    public init(limit: Int = 24) {
+    public init(
+        limit: Int = 24,
+        fetch: (@Sendable (URL) async throws -> (Data, URLResponse))? = nil
+    ) {
         self.limit = limit
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 8
-        configuration.requestCachePolicy = .returnCacheDataElseLoad
-        session = URLSession(configuration: configuration)
+        if let fetch {
+            self.fetch = fetch
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = 8
+            configuration.requestCachePolicy = .returnCacheDataElseLoad
+            let session = URLSession(configuration: configuration)
+            self.fetch = { try await session.data(from: $0) }
+        }
     }
 
     public func cached(for key: String) -> Artwork? {
@@ -60,7 +71,7 @@ public final class ArtworkLoader {
         defer { inFlight.remove(key) }
 
         do {
-            let (data, response) = try await session.data(from: url)
+            let (data, response) = try await fetch(url)
             if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
                 Self.log.debug("artwork http \(http.statusCode) for \(key, privacy: .public)")
                 failed.insert(key)
@@ -76,6 +87,14 @@ public final class ArtworkLoader {
             let artwork = Artwork(data: data, accent: accent)
             insert(artwork, for: key)
             return artwork
+        } catch is CancellationError {
+            // Cancelled says nothing about the cover: the caller lost interest,
+            // or the same track published again. Latching it as a failure held
+            // the artwork back for ninety seconds — for a download that was
+            // going perfectly well until we stopped it.
+            return nil
+        } catch let error as URLError where error.code == .cancelled {
+            return nil
         } catch {
             Self.log.debug("artwork fetch failed: \(error.localizedDescription, privacy: .public)")
             // A thrown error is transient — a Wi-Fi blip, a timed-out CDN —

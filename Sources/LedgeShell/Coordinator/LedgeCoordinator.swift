@@ -71,6 +71,7 @@ public final class LedgeCoordinator {
         // after being handed the thing it needed.
         focusBaseline?.accessChanged()
         activities.restartProvider("focus")
+        syncFocusQuietState()
         refreshSettingsModel()
     }
 
@@ -141,7 +142,25 @@ public final class LedgeCoordinator {
     private func permissionLost(_ kind: PermissionKind) {
         activities.permissionChanged(kind, isGranted: false)
         if kind == .accessibility { hud.revalidateTrust() }
-        if kind == .focusStatus { focusBaseline?.refresh() }
+        if kind == .focusStatus { syncFocusQuietState() }
+    }
+
+    /// Re-reads whether a Focus is on, rather than waiting to be told.
+    ///
+    /// The quiet-during-Focus rule follows the source's change callback, and a
+    /// change is only announced when the source's own idea of the answer
+    /// moves. Around a permission being granted it does not: starting the card
+    /// makes the shared source take its first reading silently — that priming
+    /// is deliberate, so a Focus already on at launch is a baseline rather
+    /// than news — and the refresh that follows then finds nothing changed and
+    /// announces nothing. The rule was left believing no Focus was on while
+    /// one was.
+    ///
+    /// So at the moments where the source may have learned something without
+    /// saying so, the coordinator asks.
+    private func syncFocusQuietState() {
+        focusBaseline?.refresh()
+        focusModeActive = focusBaseline?.current() != nil
     }
 
     private func permissionGranted(_ kind: PermissionKind) {
@@ -152,7 +171,7 @@ public final class LedgeCoordinator {
         // saying it was suppressing the whole time.
         if kind == .accessibility { hud.revalidateTrust() }
         activities.permissionChanged(kind, isGranted: true)
-        if kind == .focusStatus { focusBaseline?.refresh() }
+        if kind == .focusStatus { syncFocusQuietState() }
         refreshSettingsModel()
         raiseSettingsAfterGrant()
     }
@@ -210,6 +229,13 @@ public final class LedgeCoordinator {
         // asked for less often than the rest, which are local reads.
         let interval: TimeInterval = kind == .automation ? 2 : 1
         permissionWatch = Task { @MainActor [weak self] in
+            // Whichever way this ends — an answer, the window closing, the
+            // four minutes running out — the watch stops being "the user is
+            // out granting something". It is what `raiseSettingsAfterGrant`
+            // reads, so a watch left standing meant a grant made an hour later
+            // for some other reason could pull the settings window in front of
+            // whatever the user was doing.
+            defer { if !Task.isCancelled { self?.permissionWatch = nil } }
             for _ in 0..<Int(Self.permissionWatchWindow / interval) {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
@@ -217,7 +243,6 @@ public final class LedgeCoordinator {
                 guard self.permissions.status(of: kind) != before else { continue }
                 self.revalidatePermissions()
                 self.raiseSettingsAfterGrant()
-                self.permissionWatch = nil
                 return
             }
         }
@@ -2799,7 +2824,11 @@ public final class LedgeCoordinator {
             // Update the snapshot as well as providers, so the next poll does
             // not treat this same answer as a second grant and restart again.
             self.revalidatePermissions()
-            if status == .granted {
+            if status == .granted || !kind.isGrantedInSystemSettings {
+                // Answered here, whichever way. There is no return from System
+                // Settings to wait for, and standing aside for a dialog that
+                // has already closed left the window it was asked from sitting
+                // among other applications.
                 self.reclaimFront()
             } else {
                 self.watchForPermission(kind)

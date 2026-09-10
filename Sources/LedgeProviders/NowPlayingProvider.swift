@@ -30,6 +30,10 @@ public final class NowPlayingProvider: ActivityProvider {
     /// to any more cannot republish over the one that is.
     private var artworkFetch: Task<Void, Never>?
 
+    /// The track whose cover is being fetched, so a republish of the same
+    /// track does not cancel its own download.
+    private var artworkFetchKey: String?
+
     private let playingInterval: TimeInterval
     private let idleInterval: TimeInterval
 
@@ -239,6 +243,7 @@ public final class NowPlayingProvider: ActivityProvider {
         boostTask = nil
         artworkFetch?.cancel()
         artworkFetch = nil
+        artworkFetchKey = nil
         continuation?.finish()
         continuation = nil
         // A restarted provider must not believe it still owns a card the hub
@@ -398,14 +403,25 @@ public final class NowPlayingProvider: ActivityProvider {
            let url = snapshot.artworkURL,
            !artwork.hasFailed(for: snapshot.trackKey) {
             let key = snapshot.trackKey
-            artworkFetch?.cancel()
-            artworkFetch = Task { @MainActor [weak self] in
-                guard let self, await self.artwork.load(key: key, url: url) != nil else { return }
-                guard !Task.isCancelled, self.continuation != nil else { return }
-                // Still the same track? A skip during the fetch has already
-                // published its own card, and that one owns the screen.
-                guard self.lastTrackKey == key else { return }
-                await self.refreshNow()
+            // A fetch already running for *this* track is left alone. The card
+            // publishes every second while the cover downloads, and cancelling
+            // on each of those killed the download a second in — then the
+            // loader latched the cancellation as a failure and refused to try
+            // again for ninety seconds. Only a different track cancels.
+            if artworkFetchKey != key {
+                artworkFetch?.cancel()
+                artworkFetchKey = key
+                artworkFetch = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let loaded = await self.artwork.load(key: key, url: url)
+                    guard !Task.isCancelled else { return }
+                    if self.artworkFetchKey == key { self.artworkFetchKey = nil }
+                    guard loaded != nil, self.continuation != nil else { return }
+                    // Still the same track? A skip during the fetch has already
+                    // published its own card, and that one owns the screen.
+                    guard self.lastTrackKey == key else { return }
+                    await self.refreshNow()
+                }
             }
         }
     }
