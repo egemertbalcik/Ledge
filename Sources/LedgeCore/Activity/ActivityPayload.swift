@@ -657,6 +657,12 @@ public struct EventPayload: Equatable, Sendable, Codable {
     public var location: String
     /// Seconds until it starts. Negative once it has begun.
     public var startsIn: TimeInterval
+
+    /// Seconds until it ends. Negative once it is over, and nil when the end
+    /// is unknown. Kept beside `startsIn` because "has this meeting finished"
+    /// cannot be answered from a start time — a Join button with only a start
+    /// to go on stays on the card long after the call has ended.
+    public var endsIn: TimeInterval?
     public var accent: AccentColor
 
     /// Whether there is any event at all. When false the card shows the empty
@@ -684,6 +690,7 @@ public struct EventPayload: Equatable, Sendable, Codable {
         title: String,
         location: String = "",
         startsIn: TimeInterval,
+        endsIn: TimeInterval? = nil,
         accent: AccentColor = .neutral,
         hasEvent: Bool = true,
         meetingURL: String? = nil,
@@ -697,6 +704,7 @@ public struct EventPayload: Equatable, Sendable, Codable {
         self.title = title
         self.location = location
         self.startsIn = startsIn
+        self.endsIn = endsIn
         self.accent = accent
         self.hasEvent = hasEvent
         self.monthEventDays = monthEventDays

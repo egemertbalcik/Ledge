@@ -252,16 +252,19 @@ public struct NotchLayout: Sendable, Equatable {
     /// the dots occupy.
     public static func calendarDayListHeight(
         weekRows: Int,
-        hasJoinButton: Bool,
         notchHeight: CGFloat = referenceNotchHeight
     ) -> CGFloat {
         let content = calendarHeight(weekRows: weekRows, notchHeight: notchHeight)
             - notchHeight - 28
         let heading: CGFloat = 59
-        let join: CGFloat = hasJoinButton ? 30 : 0
+        // No allowance for the Join capsule: it rides beside the date now
+        // rather than in a band of its own, so it takes nothing from the list.
+        // The band it used to take was the difference between naming the day's
+        // events and counting them.
+        //
         // The list is text to the very edge of its last line, so it keeps a
         // little air over the dots rather than stopping level with them.
-        return max(0, content - heading - join - dotsBand - 6)
+        return max(0, content - heading - dotsBand - 6)
     }
 
     /// The shortest a listed event can be: one line of title, unwrapped.

@@ -110,6 +110,25 @@ public struct CalendarExpandedView: View {
         return formatter.string(from: date).uppercased()
     }
 
+    /// The real date behind a day number in one of the shown months.
+    private func date(day: Int, offset: Int) -> Date? {
+        var components = Calendar.current.dateComponents([.year, .month], from: month(at: offset))
+        components.day = day
+        return Calendar.current.date(from: components)
+    }
+
+    /// Opens Calendar.app on a given day.
+    ///
+    /// `calshow:` takes seconds since 2001, which is exactly what
+    /// `timeIntervalSinceReferenceDate` is. Noon rather than midnight, so a
+    /// timezone an hour either side of the formatter's cannot land the app on
+    /// the day before.
+    private func openCalendar(on date: Date) {
+        let noon = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: date) ?? date
+        guard let url = URL(string: "calshow:\(Int(noon.timeIntervalSinceReferenceDate))") else { return }
+        openURL(url)
+    }
+
     private func monthName(at offset: Int) -> String {
         let formatter = DateFormatter()
         formatter.locale = .current
@@ -184,21 +203,42 @@ public struct CalendarExpandedView: View {
                         .minimumScaleFactor(0.6)
                 }
             }
-            Text("\(day)")
-                .font(.system(size: 32, weight: .bold))
-                .foregroundStyle(.white)
+            // The Join capsule rides beside the date rather than under it.
+            //
+            // It used to have a band of its own, and that band came out of the
+            // list below: with a call to join, the day's events had less than
+            // one row's height left and the column fell back to saying "2
+            // events" instead of naming them — hiding the very thing the card
+            // is for in order to show a button about one of them. The date is
+            // 32 points tall and the capsule is shorter, so here it costs
+            // nothing at all.
+            HStack(alignment: .center, spacing: 8) {
+                // The date opens Calendar.app on this day, the way the weather
+                // card opens Weather. The rows below open their own event; this
+                // is for the day as a whole, and for a day whose events are not
+                // all listed.
+                Button {
+                    if let date = date(day: day, offset: selectedOffset) {
+                        openCalendar(on: date)
+                    }
+                } label: {
+                    Text("\(day)")
+                        .font(.system(size: 32, weight: .bold))
+                        .foregroundStyle(.white)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Open \(day) in Calendar")
+                if selectedOffset == 0 && day == grid.todayDay {
+                    joinButton
+                }
+                Spacer(minLength: 0)
+            }
 
             // A fixed gap, not a Spacer: a Spacer here pinned the events to the
             // bottom of the card, leaving a hole under the date and reading as
             // two unrelated blocks rather than "this day, and what is on it".
             Spacer().frame(height: 8)
-
-            // The card opens with today selected, so the Join capsule has to
-            // live here as well as in the upcoming summary — a meeting about
-            // to start must be joinable from the state the user actually sees.
-            if selectedOffset == 0 && day == grid.todayDay {
-                joinButton
-            }
 
             if entries.isEmpty {
                 Text("No events")
@@ -220,10 +260,7 @@ public struct CalendarExpandedView: View {
                 // right for one of those cases, and picking three was right
                 // for the deepest month and ran under the dots everywhere
                 // else.
-                let room = NotchLayout.calendarDayListHeight(
-                    weekRows: grid.weeks.count,
-                    hasJoinButton: selectedOffset == 0 && day == grid.todayDay
-                )
+                let room = NotchLayout.calendarDayListHeight(weekRows: grid.weeks.count)
                 if room < NotchLayout.calendarEntryRowHeight {
                     // A four-row month with today's join capsule leaves a few
                     // points. A row squeezed into that would be clipped, which
@@ -336,15 +373,26 @@ public struct CalendarExpandedView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The reason the imminent-event card exists at all: the link is buried
-    /// in the invitation, and the meeting is starting. Shown from ten minutes
-    /// out through the meeting itself.
+    /// The call to join, if there is one to join right now. The window itself
+    /// is `MeetingJoin`, which is pure and tested.
+    private var meetingToJoin: URL? {
+        guard payload.hasEvent,
+              let link = payload.meetingURL,
+              let url = URL(string: link),
+              url.scheme != nil
+        else { return nil }
+        return MeetingJoin.isOffered(
+            startsIn: payload.startsIn,
+            endsIn: payload.endsIn,
+            hasLink: true
+        ) ? url : nil
+    }
+
+    /// The reason the imminent-event card exists at all: the link is buried in
+    /// the invitation, and the meeting is about to start.
     @ViewBuilder
     private var joinButton: some View {
-        if let link = payload.meetingURL,
-           let url = URL(string: link),
-           payload.hasEvent,
-           payload.startsIn < 10 * 60 {
+        if let url = meetingToJoin {
             Button {
                 openURL(url)
             } label: {
@@ -361,7 +409,6 @@ public struct CalendarExpandedView: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(.bottom, 6)
             .accessibilityLabel("Join \(payload.title)")
         }
     }
@@ -374,9 +421,16 @@ public struct CalendarExpandedView: View {
                 .foregroundStyle(.red)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-            Text("\(grid.todayDay)")
-                .font(.system(size: 32, weight: .bold))
-                .foregroundStyle(.white)
+            Button {
+                openCalendar(on: now)
+            } label: {
+                Text("\(grid.todayDay)")
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundStyle(.white)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Open today in Calendar")
 
             Spacer().frame(height: 8)
 
@@ -395,6 +449,7 @@ public struct CalendarExpandedView: View {
                     .foregroundStyle(.white.opacity(0.55))
                     .lineLimit(1)
                 joinButton
+                    .padding(.top, 6)
             } else {
                 Text("No events")
                     .font(.cardControl)

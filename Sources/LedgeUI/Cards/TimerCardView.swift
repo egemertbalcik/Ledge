@@ -18,12 +18,16 @@ public struct TimerCardView: View {
         payload: TimerPayload,
         onContentHeight: @escaping (CGFloat) -> Void = { _ in },
         actions: TimerActions = TimerActions(),
-        isCompactWidth: Bool = false
+        isCompactWidth: Bool = false,
+        // The gallery renders the dial face, which is otherwise only reachable
+        // by clicking — a state nobody can review is a state that drifts.
+        startsDialling: Bool = false
     ) {
         self.payload = payload
         self.onContentHeight = onContentHeight
         self.actions = actions
         self.isCompactWidth = isCompactWidth
+        _isDialling = State(initialValue: startsDialling)
     }
 
     /// Which face is showing. Seeded from the payload's own mode — a card
@@ -33,6 +37,12 @@ public struct TimerCardView: View {
     private let onContentHeight: (CGFloat) -> Void
 
     @State private var face: Face?
+
+    /// Whether the dial is showing, and what it is showing. The length
+    /// survives closing the dial, so a user who dials 40 minutes, thinks
+    /// better of it and comes back finds 40 rather than the default again.
+    @State private var isDialling = false
+    @State private var dialledMinutes = 25
 
     enum Face: Equatable {
         case timer
@@ -131,22 +141,74 @@ public struct TimerCardView: View {
                 Spacer(minLength: 0)
             }
 
-            HStack(spacing: 7) {
-                presetChip("Focus", subtitle: "\(Int(payload.total / 60))m", tint: .orange) {
-                    actions.startFocus()
-                }
-                presetChip("Break", subtitle: nil, tint: .green) {
-                    actions.startBreak()
-                }
-                ForEach(quickMinutes, id: \.self) { minutes in
-                    presetChip(Self.minutesLabel(minutes), subtitle: nil, tint: nil) {
-                        actions.startCustom(minutes)
+            if isDialling {
+                dial
+            } else {
+                HStack(spacing: 7) {
+                    presetChip("Focus", subtitle: "\(Int(payload.total / 60))m", tint: .orange) {
+                        actions.startFocus()
+                    }
+                    presetChip("Break", subtitle: nil, tint: .green) {
+                        actions.startBreak()
+                    }
+                    ForEach(quickMinutes, id: \.self) { minutes in
+                        presetChip(Self.minutesLabel(minutes), subtitle: nil, tint: nil) {
+                            actions.startCustom(minutes)
+                        }
+                    }
+                    // Not a length: the way to any length. A dial glyph rather
+                    // than a number, so it does not read as one more preset.
+                    if !isCompactWidth {
+                        presetChip(nil, symbol: "dial.medium", subtitle: nil, tint: nil) {
+                            isDialling = true
+                        }
+                        .accessibilityLabel("Choose a length")
                     }
                 }
             }
         }
         .padding(.horizontal, isCompactWidth ? 12 : 0)
         .padding(.vertical, isCompactWidth ? 9 : 0)
+    }
+
+    /// The dial face: the length you are choosing, the rule you choose it on,
+    /// and the two things you can do about it.
+    ///
+    /// The number is the hero and everything else is quiet — the rule fades at
+    /// its ends, the buttons are the card's ordinary capsules. One bright
+    /// thing, the marker, says where the value is read.
+    private var dial: some View {
+        VStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("\(dialledMinutes)")
+                    .font(.system(size: 34, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    // The unit sits on the number's baseline, quiet and small:
+                    // the value is what changes as you drag, and the unit is
+                    // only there so the number means something.
+                    .contentTransition(.numericText())
+                Text(dialledMinutes < 60 ? "min" : DurationDial.spoken(dialledMinutes))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.45))
+            }
+            .animation(Motion.medium, value: dialledMinutes)
+
+            DurationDialView(
+                minutes: $dialledMinutes,
+                tint: tint,
+                setDragging: actions.setDragging
+            )
+
+            HStack(spacing: 7) {
+                capsuleButton("Back", tint: nil) { isDialling = false }
+                capsuleButton("Start", tint: tint) {
+                    actions.startCustom(dialledMinutes)
+                    isDialling = false
+                }
+            }
+        }
+        .transition(.opacity)
     }
 
     /// The neutral chips: recents first, the defaults filling what is left.
@@ -170,15 +232,21 @@ public struct TimerCardView: View {
     /// One duration chip: equal-width capsules filling the row, the way the
     /// Control Centre timer offers its durations.
     private func presetChip(
-        _ label: String,
+        _ label: String?,
+        symbol: String? = nil,
         subtitle: String?,
         tint: Color?,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             VStack(spacing: 0) {
-                Text(label)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 15, weight: .semibold))
+                } else if let label {
+                    Text(label)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                }
                 if let subtitle {
                     Text(subtitle)
                         .font(.system(size: 9, weight: .medium, design: .rounded))
@@ -194,7 +262,7 @@ public struct TimerCardView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(PressableCircleStyle())
-        .accessibilityLabel("Start \(label) timer")
+        .accessibilityLabel(label.map { "Start \($0) timer" } ?? "")
     }
 
     private var compact: some View {
@@ -464,6 +532,12 @@ public struct TimerActions {
     public var startBreak: () -> Void
     /// A one-off countdown of the given minutes — the quick-timer chips.
     public var startCustom: (Int) -> Void
+    /// Latches a drag in flight, so the card stays open while the pointer
+    /// wanders off it — the same latch the volume sliders use. Without it,
+    /// dialling a length is a race between the drag and the card closing under
+    /// the pointer.
+    public var setDragging: (Bool) -> Void
+
     /// The stopwatch face: start/stop, lap (while running), reset (while stopped).
     public var stopwatchToggle: () -> Void
     public var stopwatchLap: () -> Void
@@ -476,10 +550,12 @@ public struct TimerActions {
         startFocus: @escaping () -> Void = {},
         startBreak: @escaping () -> Void = {},
         startCustom: @escaping (Int) -> Void = { _ in },
+        setDragging: @escaping (Bool) -> Void = { _ in },
         stopwatchToggle: @escaping () -> Void = {},
         stopwatchLap: @escaping () -> Void = {},
         stopwatchReset: @escaping () -> Void = {}
     ) {
+        self.setDragging = setDragging
         self.stopwatchToggle = stopwatchToggle
         self.stopwatchLap = stopwatchLap
         self.stopwatchReset = stopwatchReset

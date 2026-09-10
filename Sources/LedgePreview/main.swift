@@ -559,6 +559,13 @@ struct GalleryView: View {
                                 .frame(width: 348)
                         }
                         card {
+                            TimerCardView(
+                                payload: PreviewFixtures.payload(of: PreviewFixtures.timerIdle),
+                                startsDialling: true
+                            )
+                            .frame(width: 348)
+                        }
+                        card {
                             TimerCardView(payload: PreviewFixtures.payload(of: PreviewFixtures.timer))
                                 .frame(width: 348)
                         }
@@ -760,18 +767,31 @@ enum PreviewFixtures {
         payload: .event(eventPayload)
     )
 
+    /// The day the preview is being looked at, so today's column has
+    /// something in it whenever the gallery is rendered.
+    static let todayDay = Calendar.current.component(.day, from: Date())
+
     static let eventPayload = EventPayload(
             title: "Design review",
             location: "Room 2",
             startsIn: 240,
+            endsIn: 240 + 45 * 60,
             accent: AccentColor(red: 0.36, green: 0.55, blue: 0.9),
             hasEvent: true,
             meetingURL: "https://zoom.us/j/123456",
 
             // Enough days to exercise the dot row and the tap-a-day detail,
             // which is otherwise only reachable with a real calendar grant.
-            monthEventDays: [4, 6, 11, 18, 25],
+            monthEventDays: [Self.todayDay, 4, 6, 11, 18, 25].sorted(),
             monthEvents: [
+                // Today, which is what the card opens on: two events *and* a
+                // meeting to join. That pair used to be unshowable — the Join
+                // capsule took the list's room and the column counted the
+                // events instead of naming them.
+                MonthDayEvents(day: Self.todayDay, entries: [
+                    MonthDayEntry(title: "Standup", time: "09:30"),
+                    MonthDayEntry(title: "Design review", time: "11:00"),
+                ]),
                 MonthDayEvents(day: 4, entries: [
                     MonthDayEntry(title: "Design review", time: "10:00"),
                     MonthDayEntry(title: "Standup", time: "14:30"),

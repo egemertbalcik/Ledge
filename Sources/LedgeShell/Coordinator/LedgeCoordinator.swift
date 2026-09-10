@@ -1550,6 +1550,11 @@ public final class LedgeCoordinator {
                 self?.timerProviderRef?.startCustom(minutes: minutes)
                 self?.activities.selectWhenAvailable(TimerProvider.activityID)
             },
+            // Dialling a length is a drag like any other: the card must not
+            // close under a pointer that has wandered off it mid-drag. Only
+            // the hover latch — the Levels card's quiet window is about
+            // hardware answering back, and nothing here touches the hardware.
+            setDragging: { [weak self] dragging in self?.setHUDDragging(dragging) },
             stopwatchToggle: { [weak self] in
                 self?.ensureTimerRunning()
                 self?.timerProviderRef?.stopwatchToggle()

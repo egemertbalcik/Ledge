@@ -190,8 +190,8 @@ struct CalendarCardHeightTests {
 @Suite("Calendar day list room")
 struct CalendarDayListTests {
 
-    private func room(_ rows: Int, join: Bool = false) -> CGFloat {
-        NotchLayout.calendarDayListHeight(weekRows: rows, hasJoinButton: join)
+    private func room(_ rows: Int) -> CGFloat {
+        NotchLayout.calendarDayListHeight(weekRows: rows)
     }
 
     @Test("A deeper month gives the list more room, one row's worth at a time")
@@ -200,16 +200,19 @@ struct CalendarDayListTests {
         #expect(room(6) - room(5) == NotchLayout.calendarRowHeight)
     }
 
-    @Test("The join capsule takes its room from the list")
-    func joinTakesRoom() {
-        #expect(room(6, join: true) < room(6))
-        #expect(room(6) - room(6, join: true) == 30)
+    @Test("The join capsule takes nothing from the list")
+    func joinTakesNothing() {
+        // It rides beside the date, which is taller than it is. When it had a
+        // band of its own, the deepest month with a call to join had less than
+        // one row left and the column counted the day's events instead of
+        // naming them.
+        #expect(room(6) >= 3 * 20)
+        #expect(room(4) >= NotchLayout.calendarEntryRowHeight)
     }
 
     @Test("Room is never negative, however cramped")
     func neverNegative() {
         for rows in 1...8 {
-            #expect(room(rows, join: true) >= 0)
             #expect(room(rows) >= 0)
         }
     }
@@ -219,13 +222,12 @@ struct CalendarDayListTests {
         #expect(room(6) >= 3 * 20, "three unwrapped rows and their spacing")
     }
 
-    @Test("The most cramped case is recognisable as too small for a row")
-    func crampedIsRecognised() {
-        // Four rows with today selected: the card is at its shortest and the
-        // join capsule is present. The column shows a count there rather than
-        // a clipped row.
-        #expect(room(4, join: true) < NotchLayout.calendarEntryRowHeight)
-        #expect(room(4) >= NotchLayout.calendarEntryRowHeight, "without the capsule, one row fits")
+    @Test("Even the shallowest month can name one event")
+    func shallowestNamesOne() {
+        // Four week rows is the shortest the card ever is. The count fallback
+        // still exists for a display too short to hold a row at all; it is no
+        // longer reachable by having a meeting to join.
+        #expect(room(4) >= NotchLayout.calendarEntryRowHeight)
     }
 }
 

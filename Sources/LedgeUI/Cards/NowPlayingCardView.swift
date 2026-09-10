@@ -266,21 +266,55 @@ public struct NowPlayingCardView: View {
         .onDisappear { closeOutputs() }
     }
 
+    /// Wraps content in the doorway to the owning app, or leaves it alone.
+    ///
+    /// A web page's card leads nowhere on purpose — the browser may be on
+    /// another Space showing a different tab, and "open" would be a promise
+    /// about which of forty tabs comes forward that nothing here can keep.
+    @ViewBuilder
+    private func openOwner<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if payload.ownerIsApp {
+            Button(action: actions.openOwningApp) { content() }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    payload.sourceName.isEmpty ? "Open the app" : "Open \(payload.sourceName)"
+                )
+        } else {
+            content()
+        }
+    }
+
     private var player: some View {
         VStack(spacing: 10) {
             HStack(alignment: .center, spacing: 12) {
-                NowPlayingArtwork(payload: payload, size: 44, radius: 10, flipToken: navToken, flipForward: navForward)
-                    .matchedGeometryEffect(id: "artwork", in: faces)
+                // Artwork and title together are the doorway to the player.
+                //
+                // A transparent Button behind the whole card was supposed to be
+                // that doorway, and could not be: an Image and a Text are
+                // hittable in their own right, so every click that landed on
+                // the cover or the track name — that is, every click anyone
+                // would actually aim — was swallowed by them and reached
+                // nothing. The catcher behind still takes the empty space; this
+                // takes the part the eye picks.
+                openOwner {
+                    HStack(alignment: .center, spacing: 12) {
+                        NowPlayingArtwork(
+                            payload: payload, size: 44, radius: 10,
+                            flipToken: navToken, flipForward: navForward
+                        )
+                        .matchedGeometryEffect(id: "artwork", in: faces)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    MarqueeText(payload.title, font: .system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white)
-                    Text(payload.artist)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            MarqueeText(payload.title, font: .system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white)
+                            Text(payload.artist)
+                                .font(.system(size: 13))
+                                .foregroundStyle(.white.opacity(0.55))
+                                .lineLimit(1)
+                        }
+                        .matchedGeometryEffect(id: "identity", in: faces)
+                    }
                 }
-                .matchedGeometryEffect(id: "identity", in: faces)
                 // A new track plays from the start, so the optimistic
                 // play/pause override belonged to the old one. The activity id
                 // is the *player*, not the track, so it does not reset on its

@@ -306,6 +306,7 @@ public final class CalendarProvider: ActivityProvider {
                 title: event?.title ?? "",
                 location: event?.location ?? "",
                 startsIn: event.map { $0.start.timeIntervalSince(now()) } ?? 0,
+                endsIn: event.map { $0.end.timeIntervalSince(now()) },
                 accent: event.map {
                     AccentColor(red: $0.accentRed, green: $0.accentGreen, blue: $0.accentBlue)
                 } ?? .neutral,
