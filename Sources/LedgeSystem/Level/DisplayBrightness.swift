@@ -12,16 +12,42 @@ public struct BrightnessDisplay: Equatable, Sendable, Identifiable {
     /// How this display's level is actually applied. See `Backend`.
     public var backend: DisplayBrightnessController.Backend
 
+    /// Whether dimming it does anything a person can see.
+    ///
+    /// A Sidecar iPad and an AirPlay receiver are composited at the far end,
+    /// so the Mac's gamma ramp never reaches the panel — and CoreGraphics
+    /// accepts the ramp and reads it back as applied, which is what made this
+    /// worth detecting rather than assuming. Measured on a Sidecar iPad: the
+    /// ramp set to 0.45, read back as 0.45, screen unchanged.
+    public var canDim: Bool
+
     public init(
         id: CGDirectDisplayID,
         name: String,
         isBuiltIn: Bool,
-        backend: DisplayBrightnessController.Backend
+        backend: DisplayBrightnessController.Backend,
+        canDim: Bool = true
     ) {
         self.id = id
         self.name = name
         self.isBuiltIn = isBuiltIn
         self.backend = backend
+        self.canDim = canDim
+    }
+}
+
+/// Whether a display is a real panel or something composited elsewhere.
+///
+/// EDID vendor identifiers are three packed letters in sixteen bits, so a real
+/// display's can never exceed `0xFFFF`. Measured on this Mac: the built-in
+/// panel answers 1552 (Apple), a Dell U2713H answers 4268 (`0x10AC`), and a
+/// Sidecar iPad answers 1,633,775,724 — which is not an EDID vendor at all.
+///
+/// Pure, so the rule can be tested against those numbers rather than against a
+/// display being plugged in.
+public enum DisplayReality {
+    public static func isVirtual(vendorNumber: UInt32) -> Bool {
+        vendorNumber > 0xFFFF
     }
 }
 
@@ -126,7 +152,11 @@ public final class DisplayBrightnessController {
                 id: id,
                 name: name,
                 isBuiltIn: isBuiltIn,
-                backend: isBuiltIn ? .backlight : .gamma
+                backend: isBuiltIn ? .backlight : .gamma,
+                // The built-in panel has a real backlight. Everything else is
+                // dimmed with a gamma ramp, which only reaches a panel the Mac
+                // is actually driving.
+                canDim: isBuiltIn || !DisplayReality.isVirtual(vendorNumber: CGDisplayVendorNumber(id))
             )
         }
         .sorted { $0.isBuiltIn && !$1.isBuiltIn }

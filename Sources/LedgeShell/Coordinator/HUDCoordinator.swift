@@ -277,7 +277,11 @@ public final class HUDCoordinator {
     /// and the plain slider act on.
     public func brightnessDisplays() -> [DisplayLevelOption] {
         let cursor = displayBrightness.displayUnderCursor()?.id
-        return displayBrightness.displays().map { display in
+        // Only displays a slider can actually move. A Sidecar iPad and an
+        // AirPlay receiver draw their own picture at the far end, so a row for
+        // one is a control that answers the drag and changes nothing — the
+        // same reason a mirrored secondary is left out of the list.
+        return displayBrightness.displays().filter(\.canDim).map { display in
             DisplayLevelOption(
                 id: display.id,
                 name: display.name,
@@ -387,6 +391,11 @@ public final class HUDCoordinator {
     /// what macOS itself does not do.
     private func handleBrightness(_ key: MediaKey) -> Bool {
         guard let display = displayBrightness.displayUnderCursor(),
+              // Swallowing the key for a display the ramp cannot reach would
+              // make the brightness keys dead while the pointer sat on the
+              // iPad. Passed through instead, so whatever macOS does with it
+              // still happens.
+              display.canDim,
               let current = displayBrightness.level(of: display)
         else { return false }
 
