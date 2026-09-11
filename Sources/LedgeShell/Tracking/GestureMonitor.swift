@@ -15,9 +15,16 @@ public final class GestureMonitor {
     /// `addLocalMonitorForEvents` returns an opaque `Any?`, not a typed token.
     private var monitor: Any?
     private var recognizer: SwipeRecognizer
+    private var wheel: WheelNavigator
 
     public var onSwipe: (Swipe) -> Void = { _ in }
     public var onMiddleClick: () -> Void = {}
+
+    /// Whether something under the pointer wants the wheel more than the notch
+    /// does — the media card's list of outputs, above all. While that is true
+    /// the wheel is handed straight back, so the list scrolls as any list
+    /// would and the cards stay where they are.
+    public var wheelBelongsToContent: () -> Bool = { false }
 
     /// Which windows these gestures apply to.
     ///
@@ -29,11 +36,15 @@ public final class GestureMonitor {
 
     public init(threshold: Double, isNatural: Bool) {
         recognizer = SwipeRecognizer(threshold: threshold, isNatural: isNatural)
+        wheel = WheelNavigator(isNatural: isNatural)
     }
 
     public func updateSettings(threshold: Double, isNatural: Bool) {
         recognizer.threshold = threshold
         recognizer.isNatural = isNatural
+        // The wheel follows the same scroll-direction setting; the swipe
+        // threshold is a trackpad distance and means nothing to it.
+        wheel.isNatural = isNatural
     }
 
     public func start() {
@@ -50,9 +61,14 @@ public final class GestureMonitor {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
         recognizer.reset()
+        wheel.reset()
     }
 
-    private func handle(_ event: NSEvent) -> NSEvent? {
+    /// Internal rather than private so the decisions below can be tested with
+    /// real `NSEvent`s: which device an event came from, what a line is worth,
+    /// and whether the event is swallowed or handed back. That is exactly
+    /// where a wheel reporting lines instead of points went unnoticed.
+    func handle(_ event: NSEvent) -> NSEvent? {
         guard shouldHandle(event.window) else { return event }
 
         switch event.type {
@@ -64,6 +80,37 @@ public final class GestureMonitor {
             return nil
 
         case .scrollWheel:
+            // A wheel has no touch phase and no momentum; a trackpad and a
+            // Magic Mouse always report one. That is the whole test, and it
+            // leaves every trackpad gesture exactly as it was.
+            let hasPhase = event.phase != [] || event.momentumPhase != []
+            if WheelNavigator.isWheel(hasPhase: hasPhase, isMomentum: event.momentumPhase != []) {
+                // Whatever is scrollable under the pointer comes first.
+                guard !wheelBelongsToContent() else { return event }
+                // A notched wheel reports *lines*, one per click, not points:
+                // taken at face value a click is worth 1 against a threshold
+                // measured in points, and a card would have cost ten clicks.
+                // High-resolution and smooth wheels set the precise flag and do
+                // report points.
+                let dy = event.hasPreciseScrollingDeltas
+                    ? event.scrollingDeltaY
+                    : event.scrollingDeltaY * WheelNavigator.linePoints
+                if let swipe = wheel.feed(ScrollSample(
+                    dx: event.scrollingDeltaX,
+                    dy: dy,
+                    timestamp: event.timestamp
+                )) {
+                    Self.log.debug("wheel \(String(describing: swipe), privacy: .public)")
+                    onSwipe(swipe)
+                    return nil
+                }
+                // Not enough movement yet. Handed back rather than swallowed:
+                // a wheel that cannot reach a card should still reach whatever
+                // is behind it, and swallowing every event would make the
+                // notch a hole that quietly eats scrolling.
+                return event
+            }
+
             let sample = ScrollSample(
                 dx: event.scrollingDeltaX,
                 dy: event.scrollingDeltaY,

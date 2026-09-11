@@ -1737,6 +1737,11 @@ public final class LedgeCoordinator {
         }
         gestures.onMiddleClick = { [weak self] in self?.activities.cycleForward() }
         gestures.shouldHandle = { window in window is LedgePanel }
+        // The route menu is a list, and a list under the pointer owns the
+        // wheel. Everywhere else on the card the wheel moves between cards.
+        gestures.wheelBelongsToContent = { [weak self] in
+            (self?.presentation.routePickerRows ?? 0) > 0
+        }
         gestures.start()
         observeInteractionPreferences()
         observeLiveEffectPreferences()
