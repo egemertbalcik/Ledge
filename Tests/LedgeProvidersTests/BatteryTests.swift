@@ -253,6 +253,122 @@ struct BatteryProviderTests {
         }
         #expect(activity.priority > ActivityKind.power.defaultPriority)
     }
+
+    // MARK: - The charger changing its mind under a live card
+
+    private func power(
+        _ percentage: Double, charging: Bool, plugged: Bool
+    ) -> PowerSnapshot {
+        PowerSnapshot(
+            percentage: percentage, isCharging: charging, isPluggedIn: plugged,
+            isLowPower: false, timeRemaining: nil
+        )
+    }
+
+    private func charging(_ event: ProviderEvent) -> Bool? {
+        guard case .publish(let activity) = event,
+              case .power(let payload) = activity.payload
+        else { return nil }
+        return payload.isCharging
+    }
+
+    /// A real Mac reports the plug before it reports charging. The card was
+    /// published from the first reading and never heard the second, so it spent
+    /// its whole life saying the battery was not charging while it was.
+    @Test("Charging starting a moment after the plug reaches the card")
+    func chargingAfterConnection() async {
+        var clock: TimeInterval = 100
+        let source = StubPowerSource(value: power(0.5, charging: false, plugged: false))
+        let provider = BatteryProvider(source: source, now: { clock })
+
+        let events = await collect(provider) {
+            source.set(power(0.5, charging: false, plugged: true))
+            clock += 1
+            source.set(power(0.5, charging: true, plugged: true))
+        }
+
+        #expect(events.count == 2, "the announcement, then the correction")
+        #expect(charging(events[0]) == false)
+        #expect(charging(events[1]) == true)
+    }
+
+    /// macOS holds at 80% on purpose. Charging stops, the plug stays in, and
+    /// the card went on showing the bolt until it timed out.
+    @Test("Charging stopping below full reaches the card")
+    func chargingPausedWhilePlugged() async {
+        var clock: TimeInterval = 100
+        let source = StubPowerSource(value: power(0.5, charging: false, plugged: false))
+        let provider = BatteryProvider(source: source, now: { clock })
+
+        let events = await collect(provider) {
+            source.set(power(0.8, charging: true, plugged: true))
+            clock += 2
+            source.set(power(0.8, charging: false, plugged: true))
+        }
+
+        #expect(events.count == 2)
+        #expect(charging(events[0]) == true)
+        #expect(charging(events[1]) == false, "held at 80%, and the card says so")
+    }
+
+    /// The refresh must not become a way to keep the island open: the card
+    /// keeps the deadline it was published with.
+    @Test("A refreshed card does not live longer for it")
+    func refreshKeepsTheDeadline() async {
+        var clock: TimeInterval = 100
+        let source = StubPowerSource(value: power(0.5, charging: false, plugged: false))
+        let provider = BatteryProvider(source: source, now: { clock })
+
+        let events = await collect(provider) {
+            source.set(power(0.5, charging: false, plugged: true))
+            clock += 2
+            source.set(power(0.5, charging: true, plugged: true))
+        }
+
+        guard case .publish(let first) = events[0], case .publish(let second) = events[1] else {
+            Issue.record("expected two publishes")
+            return
+        }
+        #expect(first.expiresAfter == BatteryProvider.lifetime)
+        #expect(second.expiresAfter == BatteryProvider.lifetime - 2, "two seconds already spent")
+        #expect(first.createdAt + first.expiresAfter! == second.createdAt + second.expiresAfter!)
+    }
+
+    /// With no card on screen there is nothing to correct, and a charger that
+    /// flickers must not start summoning cards of its own.
+    @Test("A charger flickering after the card has gone says nothing")
+    func flickerAfterExpiryIsSilent() async {
+        var clock: TimeInterval = 100
+        let source = StubPowerSource(value: power(0.5, charging: false, plugged: false))
+        let provider = BatteryProvider(source: source, now: { clock })
+
+        let events = await collect(provider) {
+            source.set(power(0.5, charging: true, plugged: true))
+            clock += BatteryProvider.lifetime + 1
+            source.set(power(0.5, charging: false, plugged: true))
+            source.set(power(0.5, charging: true, plugged: true))
+        }
+
+        #expect(events.count == 1, "only the plug itself was news")
+    }
+
+    /// Unplugging is its own announcement, and must not be mistaken for the
+    /// charger changing its mind.
+    @Test("Unplugging still announces rather than refreshing")
+    func unplugStillAnnounces() async {
+        var clock: TimeInterval = 100
+        let source = StubPowerSource(value: power(0.5, charging: true, plugged: true))
+        let provider = BatteryProvider(source: source, now: { clock })
+
+        let events = await collect(provider) {
+            clock += 1
+            source.set(power(0.5, charging: false, plugged: false))
+        }
+
+        #expect(events.count == 1)
+        guard case .publish(let activity) = events[0] else { return }
+        #expect(activity.expiresAfter == BatteryProvider.lifetime, "a fresh card, fully alive")
+    }
 }
 
 @Suite("Power source parsing")

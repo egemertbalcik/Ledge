@@ -53,6 +53,19 @@ public final class BatteryProvider: ActivityProvider {
     /// does not linger over the thing it interrupted.
     static let lifetime: TimeInterval = 6
 
+    /// Whether the charger changed its mind while the plug stayed put.
+    ///
+    /// Not a transition, deliberately: it is the same event the card is already
+    /// showing, seen a moment later. Two things happen a second apart on a real
+    /// Mac — the plug is reported before charging begins, and charging stops
+    /// below full when the system decides to hold at 80% — and neither is worth
+    /// a second card. What they are worth is the card on screen telling the
+    /// truth.
+    static func chargingChanged(from old: PowerSnapshot?, to new: PowerSnapshot) -> Bool {
+        guard let old else { return false }
+        return old.isPluggedIn == new.isPluggedIn && old.isCharging != new.isCharging
+    }
+
     static func transitions(
         from old: PowerSnapshot?,
         to new: PowerSnapshot,
@@ -146,6 +159,9 @@ public final class BatteryProvider: ActivityProvider {
         continuation = nil
         previous = nil
         warnings = Warnings()
+        liveHeadline = nil
+        liveTransitions = []
+        liveSince = nil
     }
 
     private func handle(_ snapshot: PowerSnapshot) {
@@ -155,11 +171,48 @@ public final class BatteryProvider: ActivityProvider {
             charging=\(snapshot.isCharging, privacy: .public)
             """)
         let transitions = Self.transitions(from: previous, to: snapshot, warnings: &warnings)
+        let chargingMoved = Self.chargingChanged(from: previous, to: snapshot)
         previous = snapshot
-        guard let headline = transitions.first else { return }
+
+        guard let headline = transitions.first else {
+            // Nothing to announce. But the plug's own story is often told in
+            // two readings — connected, then charging, a second later; or
+            // charging, then holding at 80% — and a card that said "not
+            // charging" a second ago was left saying it for its whole life
+            // while the bolt was on in the menu bar.
+            //
+            // So the card on screen is refreshed in place: same activity, same
+            // headline, new numbers. Not extended — it keeps the deadline it
+            // was published with, so a charger that flickers cannot hold the
+            // island open, and with no card up this does nothing at all.
+            guard chargingMoved,
+                  let liveHeadline, let liveSince,
+                  case let age = now() - liveSince, age < Self.lifetime
+            else { return }
+            Self.log.debug("battery: refreshing the live card, charging=\(snapshot.isCharging, privacy: .public)")
+            announce(liveHeadline, transitions: liveTransitions, snapshot: snapshot, lifetime: Self.lifetime - age)
+            return
+        }
 
         Self.log.debug("battery transition \(String(describing: headline), privacy: .public)")
+        liveHeadline = headline
+        liveTransitions = transitions
+        liveSince = now()
+        announce(headline, transitions: transitions, snapshot: snapshot, lifetime: Self.lifetime)
+    }
 
+    /// The card on screen, if one is: what it is saying, and since when.
+    private var liveHeadline: Transition?
+    private var liveTransitions: [Transition] = []
+    private var liveSince: TimeInterval?
+
+    private func announce(
+        _ headline: Transition,
+        transitions: [Transition],
+        snapshot: PowerSnapshot,
+        lifetime: TimeInterval
+    ) {
+        _ = headline
         continuation?.yield(.publish(Activity(
             id: ActivityID(kind: .power, source: "internal"),
             // A critical warning should outrank a routine plug-in, and both
@@ -168,7 +221,7 @@ public final class BatteryProvider: ActivityProvider {
                 ? ActivityKind.power.defaultPriority + 20
                 : nil,
             createdAt: now(),
-            expiresAfter: Self.lifetime,
+            expiresAfter: lifetime,
             payload: .power(PowerPayload(
                 percentage: snapshot.percentage,
                 isCharging: snapshot.isCharging,
