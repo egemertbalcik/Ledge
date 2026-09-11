@@ -24,3 +24,10 @@ xcuserdata/
 *.xcuserstate
 DerivedData/
 *.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Internal review notes. Kept outside the repository entirely;
+# see ~/Library/Developer/Ledge/audits.
+docs/audits/
+
+# Scratch work — concepts, mockups, anything mid-thought.
+work/
