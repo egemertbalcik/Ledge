@@ -22,8 +22,24 @@ let package = Package(
         // Pure domain. Foundation only — no AppKit, no SwiftUI, no IOKit.
         .target(name: "LedgeCore"),
 
+        // Owns CoreAudio / CoreMediaIO listener registrations in C, because
+        // Swift cannot hand those APIs the same block pointer twice and they
+        // match on pointer identity to unregister. See the header.
+        .target(
+            name: "LedgeAudioListen",
+            // Manual reference counting, deliberately. The whole point of this
+            // target is to own a block copy and hand out the identical pointer
+            // twice; ARC would manage those lifetimes invisibly and the thing
+            // being guaranteed would stop being visible in the source.
+            cSettings: [.unsafeFlags(["-fno-objc-arc"])],
+            linkerSettings: [
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMediaIO"),
+            ]
+        ),
+
         // Every private / permission-gated capability, behind protocols.
-        .target(name: "LedgeSystem", dependencies: ["LedgeCore"]),
+        .target(name: "LedgeSystem", dependencies: ["LedgeCore", "LedgeAudioListen"]),
 
         // Turns system signals into activities. Testable against stubs.
         .target(name: "LedgeProviders", dependencies: ["LedgeCore", "LedgeSystem"]),
