@@ -28,7 +28,7 @@ public final class AudioRouteSource: AudioRouteWatching {
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "audioroute")
 
     private var onChange: (@MainActor (String) -> Void)?
-    private var listener: AudioObjectPropertyListenerBlock?
+    private var listener: AudioListener?
     /// The device in use, so a property notification that reports the same one
     /// — CoreAudio fires on more than just a change of destination — says
     /// nothing.
@@ -41,35 +41,26 @@ public final class AudioRouteSource: AudioRouteWatching {
         self.onChange = onChange
         currentDevice = VolumeController.defaultOutputDevice()
 
-        var address = AudioObjectPropertyAddress(
+        let address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let block: AudioObjectPropertyListenerBlock = { _, _ in
+        listener = AudioListener(
+            object: AudioObjectID(kAudioObjectSystemObject),
+            address: address,
+            queue: .main
+        ) { [weak self] in
             Task { @MainActor [weak self] in self?.routeChanged() }
         }
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, .main, block
-        )
-        guard status == noErr else {
-            Self.log.notice("could not watch the output route (status \(status, privacy: .public))")
-            return
+        if listener == nil {
+            Self.log.notice("could not watch the output route")
         }
-        listener = block
     }
 
     public func stopWatching() {
-        if let listener {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &address, .main, listener
-            )
-        }
+        // Releasing the listener is what unregisters it; there is no address to
+        // reconstruct and no way to get it wrong.
         listener = nil
         onChange = nil
         currentDevice = nil

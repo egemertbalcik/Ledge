@@ -51,9 +51,14 @@ public final class SystemRecordingSource: RecordingSource {
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "privacy")
 
     private let queue = DispatchQueue(label: "com.egemert.ledge.privacy")
-    private var audioListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
-    private var processListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
-    private var cmioListeners: [(CMIOObjectID, CMIOObjectPropertyAddress, CMIOObjectPropertyListenerBlock)] = []
+    private var audioListeners: [AudioListener] = []
+    /// Keyed by process object, so a change in the process list can keep the
+    /// listeners it already has instead of replacing all of them. The audio
+    /// process list changes whenever any app starts or stops playing anything,
+    /// which is often; rebuilding the whole fleet each time was a registration
+    /// storm in its own right.
+    private var processListeners: [AudioObjectID: AudioListener] = [:]
+    private var cmioListeners: [AudioListener] = []
     private var poll: DispatchSourceTimer?
     private var onChange: (() -> Void)?
 
@@ -94,12 +99,10 @@ public final class SystemRecordingSource: RecordingSource {
             mElement: kAudioObjectPropertyElementMain
         )
         guard AudioObjectHasProperty(device, &address) else { return }
-        let block: AudioObjectPropertyListenerBlock = { _, _ in
+        let listener = AudioListener(object: device, address: address, queue: queue) { [weak self] in
             Task { @MainActor [weak self] in self?.onChange?() }
         }
-        if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
-            audioListeners.append((device, address, block))
-        }
+        if let listener { audioListeners.append(listener) }
     }
 
     nonisolated static func defaultInputDevice() -> AudioObjectID? {
@@ -260,21 +263,21 @@ public final class SystemRecordingSource: RecordingSource {
         // The process-object list changes as apps appear and leave the audio
         // system; each change re-arms the per-process listeners below so a
         // recorder launched later is still watched.
-        var listAddress = AudioObjectPropertyAddress(
+        let listAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let listBlock: AudioObjectPropertyListenerBlock = { _, _ in
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let listListener = AudioListener(
+            object: system, address: listAddress, queue: queue
+        ) { [weak self] in
             Task { @MainActor [weak self] in
                 self?.rearmProcessListeners()
                 self?.onChange?()
             }
         }
-        let system = AudioObjectID(kAudioObjectSystemObject)
-        if AudioObjectAddPropertyListenerBlock(system, &listAddress, queue, listBlock) == noErr {
-            audioListeners.append((system, listAddress, listBlock))
-        }
+        if let listListener { audioListeners.append(listListener) }
         armProcessListeners()
         armInputDeviceListener()
 
@@ -285,12 +288,12 @@ public final class SystemRecordingSource: RecordingSource {
                 mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
             )
             guard CMIOObjectHasProperty(device, &address) else { continue }
-            let block: CMIOObjectPropertyListenerBlock = { _, _ in
+            let listener = AudioListener(
+                cmioObject: device, address: address, queue: queue
+            ) { [weak self] in
                 Task { @MainActor [weak self] in self?.onChange?() }
             }
-            if CMIOObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
-                cmioListeners.append((device, address, block))
-            }
+            if let listener { cmioListeners.append(listener) }
         }
 
         // A camera or microphone plugged in after this point has no listener, so
@@ -322,52 +325,49 @@ public final class SystemRecordingSource: RecordingSource {
     /// One `IsRunningInput` listener per current audio process, so a capture
     /// starting while the device is already running (music to the same
     /// headset) still fires an event instead of waiting for the safety poll.
+    /// Adds a listener for any audio process that does not have one yet.
     private func armProcessListeners() {
-        for object in Self.processObjects() {
+        for object in Self.processObjects() where processListeners[object] == nil {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioProcessPropertyIsRunningInput,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
             guard AudioObjectHasProperty(object, &address) else { continue }
-            let block: AudioObjectPropertyListenerBlock = { _, _ in
+            let listener = AudioListener(
+                object: object, address: address, queue: queue
+            ) { [weak self] in
                 Task { @MainActor [weak self] in self?.onChange?() }
             }
-            if AudioObjectAddPropertyListenerBlock(object, &address, queue, block) == noErr {
-                processListeners.append((object, address, block))
-            }
+            if let listener { processListeners[object] = listener }
         }
     }
 
+    /// Follows the process list: drops what has gone, adds what is new, and
+    /// leaves the rest alone.
+    ///
+    /// The list changes whenever any app touches audio, so this runs often. It
+    /// used to unregister every process listener and register them all again
+    /// each time — which, with removal silently failing, is precisely how a
+    /// listener list grows into the hundreds of thousands. Even with removal
+    /// working, replacing a fleet to learn that one member joined is work
+    /// nobody asked for.
     private func rearmProcessListeners() {
         // A list-change Task queued before stopWatching() must not re-register
         // a fleet of listeners on a stopped watcher.
         guard onChange != nil else { return }
-        for (object, address, block) in processListeners {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
+        let live = Set(Self.processObjects())
+        for object in processListeners.keys where !live.contains(object) {
+            processListeners.removeValue(forKey: object)
         }
-        processListeners.removeAll()
         armProcessListeners()
     }
 
     public func stopWatching() {
-        for (device, address, block) in audioListeners {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)
-        }
+        // Each registration is owned by its listener object, so dropping the
+        // collections is what takes them all off.
         audioListeners.removeAll()
-
-        for (object, address, block) in processListeners {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
-        }
         processListeners.removeAll()
-
-        for (device, address, block) in cmioListeners {
-            var address = address
-            CMIOObjectRemovePropertyListenerBlock(device, &address, queue, block)
-        }
         cmioListeners.removeAll()
 
         poll?.cancel()
