@@ -18,7 +18,28 @@ public final class VolumeController {
     public var onChange: (HUDReadout) -> Void = { _ in }
 
     private var listeningDevice: AudioObjectID?
-    private var listenerBlocks: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+
+    /// The listener on the *system* object that reports the default output
+    /// changing. Installed once for as long as watching is on, and deliberately
+    /// not rebuilt when the device changes: it is the thing that tells us the
+    /// device changed, and tearing it down to answer its own notification is
+    /// what melted the app.
+    private var defaultDeviceListener: AudioListener?
+
+    /// Listeners on whichever device is current. These are the only ones a
+    /// device change replaces.
+    private var deviceListeners: [AudioListener] = []
+
+    /// One pending reconcile at a time. Notifications arrive in bursts —
+    /// several per plug — and each one asking for its own rebuild is how a
+    /// burst becomes a backlog the main thread never finishes.
+    private var reconcile: Task<Void, Never>?
+
+    /// How many registrations are currently held. A test seam, and the number
+    /// that must not grow: this is what ran to 1.5 million in a shipped build.
+    var installedListenerCount: Int {
+        deviceListeners.count + (defaultDeviceListener == nil ? 0 : 1)
+    }
 
     /// Diagnostics only, behind LEDGE_TRACE_LEVELS.
     @MainActor static var notified = 0
@@ -155,7 +176,11 @@ public final class VolumeController {
             : Self.coalesceWindow
         coalesce = Task { @MainActor [weak self] in
             try? await Task.sleep(for: wait)
-            guard let self else { return }
+            // `try?` swallows the cancellation, so it has to be asked about
+            // separately: without this, a readout scheduled just before
+            // `stopWatching` still arrived afterwards and spoke for a watcher
+            // that had been told to stop.
+            guard let self, !Task.isCancelled else { return }
             self.coalesce = nil
             guard let readout = self.readout() else { return }
             guard readout != self.lastDelivered else { return }
@@ -165,7 +190,7 @@ public final class VolumeController {
                 Self.log.debug("""
                     volume notify=\(Self.notified, privacy: .public) \
                     delivered=\(Self.delivered, privacy: .public) \
-                    listeners=\(self.listenerBlocks.count, privacy: .public)
+                    listeners=\(self.deviceListeners.count, privacy: .public)
                     """)
             }
             self.onChange(readout)
@@ -351,20 +376,41 @@ public final class VolumeController {
     // MARK: - Watching
 
     public func startWatching() {
-        stopWatching()
+        // Idempotent: calling this twice must not install a second set. The
+        // device listeners are rebuilt by `rebind`, which is also what a
+        // default-device change calls.
+        if defaultDeviceListener == nil { installDefaultDeviceListener() }
+        rebind(force: true)
+    }
 
-        // The default-device listener is installed *before* the per-device
-        // guard: it is the recovery path. Returning early without it — launch
-        // with no output device, or the only device unplugged (whose change
-        // notification re-enters here) — left watching dead for the session,
-        // with nothing to notice the device coming back.
-        installDefaultDeviceListener()
+    /// Points the per-device listeners at whatever the default output is now.
+    ///
+    /// Does nothing at all when the device has not actually changed, which is
+    /// the common case: CoreAudio fires this property for more than a change of
+    /// destination, and rebuilding listeners for a device we are already on is
+    /// pure cost.
+    ///
+    /// - Parameter force: rebind even if the device looks unchanged, for the
+    ///   initial arm where there is nothing bound yet.
+    private func rebind(force: Bool = false) {
+        let device = Self.defaultOutputDevice()
 
-        guard let device = Self.defaultOutputDevice() else {
+        guard force || device != listeningDevice else {
+            // Same device. The level may still have moved, so read it — that
+            // path coalesces and drops an unchanged reading, so it is cheap.
+            noteChange()
+            return
+        }
+
+        deviceListeners.removeAll()   // deinit takes each registration off
+        listeningDevice = device
+
+        guard let device else {
+            // No output at all. The default-device listener stays installed,
+            // which is what notices one coming back.
             Self.log.notice("no default output device to watch")
             return
         }
-        listeningDevice = device
 
         // Watch mute and every element that exists: a device answering only per
         // channel would otherwise change without ever notifying.
@@ -385,18 +431,15 @@ public final class VolumeController {
 
         for var address in addresses {
             guard AudioObjectHasProperty(device, &address) else { continue }
-            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-                Task { @MainActor [weak self] in
-                    self?.noteChange()
-                }
+            let listener = AudioListener(
+                object: device, address: address, queue: queue
+            ) { [weak self] in
+                Task { @MainActor [weak self] in self?.noteChange() }
             }
-            let status = AudioObjectAddPropertyListenerBlock(device, &address, queue, block)
-            if status == noErr {
-                listenerBlocks.append((device, address, block))
-            }
+            if let listener { deviceListeners.append(listener) }
         }
 
-        Self.log.debug("watching \(self.listenerBlocks.count) volume properties")
+        Self.log.debug("watching \(self.deviceListeners.count) volume properties")
 
         // Read the device we have just bound to.
         //
@@ -413,41 +456,56 @@ public final class VolumeController {
     }
 
     /// The default device itself changes when headphones are plugged in, at
-    /// which point every per-device listener is attached to the wrong object —
-    /// this one re-runs the whole arm.
+    /// which point every per-device listener is attached to the wrong object.
+    ///
+    /// Its only job is to ask for a reconcile. It must never call
+    /// `startWatching()`: that used to tear down this very listener in order to
+    /// answer its own notification, and with the removal silently failing every
+    /// pass left another registration behind. Nor does it do the work inline —
+    /// one pending reconcile absorbs a burst.
     private func installDefaultDeviceListener() {
-        var deviceAddress = AudioObjectPropertyAddress(
+        let deviceAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let deviceBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                self?.startWatching()
-            }
+        defaultDeviceListener = AudioListener(
+            object: AudioObjectID(kAudioObjectSystemObject),
+            address: deviceAddress,
+            queue: queue
+        ) { [weak self] in
+            Task { @MainActor [weak self] in self?.scheduleRebind() }
         }
-        if AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &deviceAddress, queue, deviceBlock
-        ) == noErr {
-            listenerBlocks.append((AudioObjectID(kAudioObjectSystemObject), deviceAddress, deviceBlock))
+    }
+
+    /// Collapses a burst of default-device notifications into one rebind.
+    private func scheduleRebind() {
+        guard reconcile == nil else { return }
+        reconcile = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.coalesceWindow)
+            guard let self, !Task.isCancelled else { return }
+            self.reconcile = nil
+            // Watching may have been stopped while this was waiting.
+            guard self.defaultDeviceListener != nil else { return }
+            self.rebind()
         }
     }
 
     public func stopWatching() {
         coalesce?.cancel()
         coalesce = nil
+        reconcile?.cancel()
+        reconcile = nil
         lastDelivered = nil
-        for (object, address, block) in listenerBlocks {
-            var address = address
-            AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
-        }
-        listenerBlocks.removeAll()
+        deviceListeners.removeAll()
+        defaultDeviceListener = nil
         listeningDevice = nil
     }
 
     deinit {
-        // Listener blocks hold a weak self, so leaving them attached would leak
-        // the registration rather than the object. Cleared explicitly by
-        // `stopWatching`; nothing to do here that is safe from `deinit`.
+        // Nothing to do: each registration is owned by an `AudioListener`, and
+        // releasing this object releases those, which takes them off. That is
+        // the point of holding them as objects rather than as entries in a list
+        // some other method has to remember to walk.
     }
 }
