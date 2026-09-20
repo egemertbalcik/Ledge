@@ -31,7 +31,11 @@ public struct RecordingState: Equatable, Sendable {
 @MainActor
 public protocol RecordingSource: AnyObject {
     func current() -> RecordingState
-    func startWatching(_ onChange: @escaping () -> Void)
+    /// `@Sendable` because the watcher notices changes on its own queue.
+    /// It is nonetheless **always called on the main actor** — the watcher
+    /// hands it across through a mailbox that delivers there — so a caller may
+    /// assume that isolation.
+    func startWatching(_ onChange: @escaping @Sendable () -> Void)
     func stopWatching()
 }
 
@@ -48,21 +52,60 @@ public protocol RecordingSource: AnyObject {
 @MainActor
 public final class SystemRecordingSource: RecordingSource {
 
-    private static let log = Logger(subsystem: "com.egemert.ledge", category: "privacy")
+    private nonisolated static let log = Logger(subsystem: "com.egemert.ledge", category: "privacy")
 
+    /// Registration, device enumeration and reconciliation all happen here.
+    /// The queue handed to CoreAudio governs where callbacks arrive, not where
+    /// an Add or Remove runs, so this work would otherwise sit on the main
+    /// actor in front of the interface.
     private let queue = DispatchQueue(label: "com.egemert.ledge.privacy")
-    private var audioListeners: [AudioListener] = []
+
+    private nonisolated(unsafe) var audioListeners: [AudioListener] = []
     /// Keyed by process object, so a change in the process list can keep the
     /// listeners it already has instead of replacing all of them. The audio
     /// process list changes whenever any app starts or stops playing anything,
     /// which is often; rebuilding the whole fleet each time was a registration
     /// storm in its own right.
-    private var processListeners: [AudioObjectID: AudioListener] = [:]
-    private var cmioListeners: [AudioListener] = []
+    private nonisolated(unsafe) var processListeners: [AudioObjectID: AudioListener] = [:]
+    private nonisolated(unsafe) var cmioListeners: [AudioListener] = []
     private var poll: DispatchSourceTimer?
-    private var onChange: (() -> Void)?
 
-    public init() {}
+    /// How often the safety poll re-checks the device trees. A minute in the
+    /// app; tests shorten it so the timer path can actually be exercised —
+    /// waiting a real minute is why the isolation trap above went unnoticed.
+    private let pollInterval: TimeInterval
+    /// Only ever touched on `queue`. The safety poll used to read it from a
+    /// main-queue timer while a start or stop wrote it here, which
+    /// `nonisolated(unsafe)` and `MainActor.assumeIsolated` do nothing to
+    /// synchronise — the timer now runs on `queue` like everything else.
+    private nonisolated(unsafe) var onChange: (() -> Void)?
+
+    /// Bumped on every start and stop. The HAL can deliver a callback it had
+    /// already queued after a stop, so the session a callback was registered
+    /// with is what disqualifies it — cancellation cannot reach CoreAudio's
+    /// own queue.
+    private nonisolated(unsafe) var generation = 0
+    /// One pending reconcile of the process list, and one pending notification,
+    /// rather than a task per callback. The audio process list changes whenever
+    /// any app starts or stops a sound.
+    private nonisolated(unsafe) var reconcilePending = false
+    private nonisolated(unsafe) var notifyPending = false
+
+    /// One outstanding main-actor delivery, with the session re-checked there.
+    private struct Tick: Sendable, Equatable {}
+    private let mailbox = MainMailbox<Tick>(isEqual: { _, _ in false })
+
+    /// Which lifecycle command is the latest, so a stop cannot be overtaken by
+    /// a start already queued behind it.
+    private let lifecycle = OSAllocatedUnfairLock(initialState: 0)
+
+    public convenience init() {
+        self.init(pollInterval: 60)
+    }
+
+    init(pollInterval: TimeInterval) {
+        self.pollInterval = pollInterval
+    }
 
     // MARK: - Reading
 
@@ -91,7 +134,7 @@ public final class SystemRecordingSource: RecordingSource {
     /// So it is used as a doorbell rather than an answer. It fires, and the
     /// per-process sweep decides. Cheap when nothing is happening, immediate
     /// when something is.
-    private func armInputDeviceListener() {
+    private nonisolated func armInputDeviceListener(session: Int) {
         guard let device = Self.defaultInputDevice() else { return }
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
@@ -100,7 +143,7 @@ public final class SystemRecordingSource: RecordingSource {
         )
         guard AudioObjectHasProperty(device, &address) else { return }
         let listener = AudioListener(object: device, address: address, queue: queue) { [weak self] in
-            Task { @MainActor [weak self] in self?.onChange?() }
+            self?.notifyChanged(session: session)
         }
         if let listener { audioListeners.append(listener) }
     }
@@ -256,44 +299,53 @@ public final class SystemRecordingSource: RecordingSource {
 
     // MARK: - Watching
 
-    public func startWatching(_ onChange: @escaping () -> Void) {
+    public func startWatching(_ onChange: @escaping @Sendable () -> Void) {
         stopWatching()
-        self.onChange = onChange
+        let command = lifecycle.withLock { c -> Int in c &+= 1; return c }
+        let session = mailbox.open { _ in MainActor.assumeIsolated { onChange() } }
+        queue.async { [self] in
+            guard lifecycle.withLock({ $0 }) == command else { return }
+            self.onChange = onChange
+            generation = session
 
-        // The process-object list changes as apps appear and leave the audio
-        // system; each change re-arms the per-process listeners below so a
-        // recorder launched later is still watched.
-        let listAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let system = AudioObjectID(kAudioObjectSystemObject)
-        let listListener = AudioListener(
-            object: system, address: listAddress, queue: queue
-        ) { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.rearmProcessListeners()
-                self?.onChange?()
-            }
-        }
-        if let listListener { audioListeners.append(listListener) }
-        armProcessListeners()
-        armInputDeviceListener()
-
-        for device in Self.videoDevices() {
-            var address = CMIOObjectPropertyAddress(
-                mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
-                mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-                mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+            // The process-object list changes as apps appear and leave the
+            // audio system; each change reconciles the per-process listeners
+            // below so a recorder launched later is still watched.
+            let listAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyProcessObjectList,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
             )
-            guard CMIOObjectHasProperty(device, &address) else { continue }
-            let listener = AudioListener(
-                cmioObject: device, address: address, queue: queue
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            let listListener = AudioListener(
+                object: system, address: listAddress, queue: queue
             ) { [weak self] in
-                Task { @MainActor [weak self] in self?.onChange?() }
+                self?.noteProcessListChanged(session: session)
             }
-            if let listener { cmioListeners.append(listener) }
+            if let listListener { audioListeners.append(listListener) }
+
+            armProcessListeners(Self.processObjects())
+            armInputDeviceListener(session: session)
+
+            for device in Self.videoDevices() {
+                var address = CMIOObjectPropertyAddress(
+                    mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
+                    mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+                    mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+                )
+                guard CMIOObjectHasProperty(device, &address) else { continue }
+                let listener = AudioListener(
+                    cmioObject: device, address: address, queue: queue
+                ) { [weak self] in
+                    self?.notifyChanged(session: session)
+                }
+                if let listener { cmioListeners.append(listener) }
+            }
+
+            Self.log.debug("""
+                privacy: watching \(self.audioListeners.count, privacy: .public) mic + \
+                \(self.cmioListeners.count, privacy: .public) camera properties
+                """)
         }
 
         // A camera or microphone plugged in after this point has no listener, so
@@ -308,26 +360,75 @@ public final class SystemRecordingSource: RecordingSource {
         // report a camera or microphone starting; this only has to catch a
         // device tree that changed shape without telling anyone, and being a
         // minute late to notice a newly plugged-in webcam costs nothing.
-        let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(30))
-        timer.setEventHandler { [weak self] in
-            MainActor.assumeIsolated { self?.onChange?() }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(
+            deadline: .now() + pollInterval,
+            repeating: pollInterval,
+            leeway: .milliseconds(Int(max(0.05, pollInterval / 2) * 1000))
+        )
+        // `@Sendable` is load-bearing, not decoration.
+        //
+        // `setEventHandler` takes a closure that is *not* Sendable, so one
+        // written inline here inherits this method's MainActor isolation. That
+        // was true and harmless while this timer ran on the main queue. Moving
+        // it to `queue` made the inherited isolation a lie, and Swift checks:
+        // the first tick tripped a runtime isolation assertion and took the
+        // whole app down with SIGTRAP. Sixty seconds after watching started,
+        // so it looked like a crash out of nowhere.
+        //
+        // Declaring the closure `@Sendable` is what stops it inheriting the
+        // isolation it cannot honour.
+        let tick: @Sendable () -> Void = { [weak self] in
+            // On `queue`, so the callback state it reads is the state this
+            // object owns rather than a copy raced from another thread.
+            self?.notifyChanged(session: session)
         }
+        timer.setEventHandler(handler: tick)
         timer.resume()
         poll = timer
+    }
 
-        Self.log.debug("""
-            privacy: watching \(self.audioListeners.count, privacy: .public) mic + \
-            \(self.cmioListeners.count, privacy: .public) camera properties
-            """)
+    /// The process list changed. Sets a flag and asks for one pass; it does not
+    /// create work per callback.
+    private nonisolated func noteProcessListChanged(session: Int) {
+        // Already on `queue`: this is the queue the listener was registered with.
+        guard session == generation, onChange != nil else { return }
+        guard !reconcilePending else { return }
+        reconcilePending = true
+        queue.asyncAfter(deadline: .now() + 0.05) { [self] in
+            reconcilePending = false
+            guard session == generation, onChange != nil else { return }
+            reconcileProcessListeners()
+            notifyChanged(session: session)
+        }
+    }
+
+    /// Tells the caller something happened, at most once per coalescing window
+    /// and at most one delivery outstanding on the main actor.
+    private nonisolated func notifyChanged(session: Int) {
+        guard session == generation, onChange != nil else { return }
+        guard !notifyPending else { return }
+        notifyPending = true
+        queue.asyncAfter(deadline: .now() + 0.05) { [self] in
+            notifyPending = false
+            guard session == generation, onChange != nil else { return }
+            // The session is checked again at the far end: a stop cannot reach
+            // a hop already enqueued on the main queue.
+            mailbox.post(Tick(), generation: session)
+        }
     }
 
     /// One `IsRunningInput` listener per current audio process, so a capture
     /// starting while the device is already running (music to the same
     /// headset) still fires an event instead of waiting for the safety poll.
-    /// Adds a listener for any audio process that does not have one yet.
-    private func armProcessListeners() {
-        for object in Self.processObjects() where processListeners[object] == nil {
+    /// Adds a listener for any audio process in `objects` that has none yet.
+    ///
+    /// Takes the snapshot as an argument rather than enumerating: a reconcile
+    /// needs exactly one enumeration, and asking twice could see two different
+    /// lists and act on the wrong one.
+    private nonisolated func armProcessListeners(_ objects: [AudioObjectID]) {
+        let session = generation
+        for object in objects where processListeners[object] == nil {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioProcessPropertyIsRunningInput,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -337,7 +438,7 @@ public final class SystemRecordingSource: RecordingSource {
             let listener = AudioListener(
                 object: object, address: address, queue: queue
             ) { [weak self] in
-                Task { @MainActor [weak self] in self?.onChange?() }
+                self?.notifyChanged(session: session)
             }
             if let listener { processListeners[object] = listener }
         }
@@ -352,27 +453,35 @@ public final class SystemRecordingSource: RecordingSource {
     /// listener list grows into the hundreds of thousands. Even with removal
     /// working, replacing a fleet to learn that one member joined is work
     /// nobody asked for.
-    private func rearmProcessListeners() {
-        // A list-change Task queued before stopWatching() must not re-register
-        // a fleet of listeners on a stopped watcher.
+    private nonisolated func reconcileProcessListeners() {
         guard onChange != nil else { return }
-        let live = Set(Self.processObjects())
+        // One enumeration for the whole pass.
+        let snapshot = Self.processObjects()
+        let live = Set(snapshot)
         for object in processListeners.keys where !live.contains(object) {
             processListeners.removeValue(forKey: object)
         }
-        armProcessListeners()
+        armProcessListeners(snapshot)
     }
 
     public func stopWatching() {
-        // Each registration is owned by its listener object, so dropping the
-        // collections is what takes them all off.
-        audioListeners.removeAll()
-        processListeners.removeAll()
-        cmioListeners.removeAll()
-
+        _ = lifecycle.withLock { c -> Int in c &+= 1; return c }
         poll?.cancel()
         poll = nil
-        onChange = nil
+        // Disqualifies anything already on its way to main.
+        mailbox.close()
+        queue.async { [self] in
+            // Anything the HAL had already queued is now from a dead session.
+            generation &+= 1
+            // Each registration is owned by its listener object, so dropping
+            // the collections is what takes them all off.
+            audioListeners.removeAll()
+            processListeners.removeAll()
+            cmioListeners.removeAll()
+            reconcilePending = false
+            notifyPending = false
+            onChange = nil
+        }
     }
 
     deinit {

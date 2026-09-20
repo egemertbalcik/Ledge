@@ -43,7 +43,10 @@ public final class PrivacyProvider: ActivityProvider {
             continuation.onTermination = { _ in
                 Task { @MainActor [weak self] in self?.stop() }
             }
-            self.source.startWatching { [weak self] in self?.changed() }
+            // The source delivers on the main actor, through its mailbox.
+            self.source.startWatching { [weak self] in
+                MainActor.assumeIsolated { self?.changed() }
+            }
             // Something already recording at launch is still worth showing —
             // unlike a Focus mode, an active camera is not a settled fact the
             // user chose and forgot.
