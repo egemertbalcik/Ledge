@@ -390,9 +390,15 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
 
     // MARK: - system_profiler
 
-    private nonisolated static func profiledDevices() async -> [String: BluetoothDeviceSnapshot] {
+    /// One at a time, shared between simultaneous callers. A wake reconnects
+    /// every paired device at once, and each notification asks for this.
+    private nonisolated static let profilerGate = ProfilerGate<[String: BluetoothDeviceSnapshot]> {
         guard let data = await runSystemProfiler() else { return [:] }
         return Dictionary(parse(data).map { ($0.address, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    private nonisolated static func profiledDevices() async -> [String: BluetoothDeviceSnapshot] {
+        await profilerGate.value()
     }
 
     /// Runs `system_profiler` and returns its stdout, or nil on any failure.
@@ -400,83 +406,28 @@ public final class IOBluetoothDeviceSource: NSObject, BluetoothDeviceSource {
     /// Failure is not exceptional: the tool can be slow, killed, or emit
     /// something we cannot use. The card renders without battery levels, so
     /// every path here degrades to nil rather than propagating.
+    ///
+    /// The lifetime belongs to `ChildProcess`: continuous pipe draining, a
+    /// deadline, and SIGKILL after SIGTERM. This used to terminate once and
+    /// then block in `readDataToEndOfFile`, so a copy stuck in IPC could
+    /// outlive its timeout — and since the single-flight gate waits on this,
+    /// one stuck child would have held every caller behind it.
     private nonisolated static func runSystemProfiler() async -> Data? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-                // No `-detailLevel`: `mini` drops `device_address`, which is the
-                // one field this cannot work without.
-                process.arguments = ["SPBluetoothDataType", "-json"]
-
-                let stdout = Pipe()
-                process.standardOutput = stdout
-                // Discarded rather than piped. A piped stderr that nobody drains
-                // will deadlock the child once it fills, and there is nothing
-                // here that a warning line would change.
-                process.standardError = FileHandle.nullDevice
-
-                do {
-                    try process.run()
-                } catch {
-                    log.debug("system_profiler failed to launch: \(error.localizedDescription, privacy: .public)")
-                    continuation.resume(returning: nil)
-                    return
-                }
-
-                // Kill it if it overruns. Cancelled on normal exit below, so the
-                // timer never fires for a healthy query.
-                let deadline = DispatchWorkItem {
-                    guard process.isRunning else { return }
-                    log.notice("system_profiler timed out after \(queryTimeout, privacy: .public)s — terminating")
-                    process.terminate()
-                }
-                DispatchQueue.global(qos: .utility)
-                    .asyncAfter(deadline: .now() + queryTimeout, execute: deadline)
-
-                // Read to EOF first: the output comfortably exceeds a pipe
-                // buffer on a Mac with several paired devices, and reading after
-                // waitUntilExit would deadlock against it. On a timeout,
-                // terminate() closes the pipe and this returns.
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                deadline.cancel()
-
-                guard process.terminationStatus == 0 else {
-                    log.debug("system_profiler exited \(process.terminationStatus, privacy: .public)")
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: data)
-            }
+        let outcome = await ChildProcess.run(
+            executable: "/usr/sbin/system_profiler",
+            // No `-detailLevel`: `mini` drops `device_address`, which is the
+            // one field this cannot work without.
+            arguments: ["SPBluetoothDataType", "-json"],
+            timeout: queryTimeout
+        )
+        guard outcome.succeeded else {
+            log.debug("system_profiler did not answer (status \(outcome.status, privacy: .public))")
+            return nil
         }
+        return outcome.standardOutput
     }
 
-    // MARK: - Parsing
 
-    /// Every device `system_profiler` reported, connected or not.
-    ///
-    /// Written against this shape, recorded on macOS 26.4 and trimmed — see
-    /// `sampleJSON` for the full recording:
-    ///
-    ///     { "SPBluetoothDataType": [ {
-    ///         "controller_properties": { ... },
-    ///         "device_connected": [
-    ///           { "AirPods Pro": {
-    ///               "device_address": "AA:BB:CC:11:22:33",
-    ///               "device_batteryLevelCase": "%100",
-    ///               "device_minorType": "Headphones" } } ],
-    ///         "device_not_connected": [ ... ] } ] }
-    ///
-    /// Nothing about that is guaranteed. Each device is a single-entry
-    /// dictionary keyed by its *user-assigned name*, so no key at that level is
-    /// knowable ahead of time; battery values are locale-formatted strings, and
-    /// on this machine the percent sign is a prefix (`"%100"`, en_TR) where a US
-    /// machine prints `"100%"`; and older releases flattened everything into one
-    /// `device_title` array with a `device_isconnected` field instead of
-    /// splitting by state. So this reads defensively throughout: every cast is
-    /// optional, an unrecognised shape yields fewer devices rather than an
-    /// error, and a device that survives with no battery keys is still returned.
     public nonisolated static func parse(_ json: Data) -> [BluetoothDeviceSnapshot] {
         guard let root = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
               let sections = root["SPBluetoothDataType"] as? [Any]

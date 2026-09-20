@@ -1,5 +1,6 @@
 import CoreBluetooth
 import Foundation
+import LedgeCore
 import os
 
 /// Scans BLE advertisements for AirPods proximity messages and reports the
@@ -42,7 +43,14 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
 
     /// How long a window is held open after something nearby is heard, so an
     /// interaction already under way is not chopped up by the duty cycle.
-    static let attentiveHold: TimeInterval = 6
+    static let attentiveHold: TimeInterval = ProximityScanWindow.hold
+
+    /// Holds the attentive window open by *change* rather than by traffic, and
+    /// caps how long it may stay open at all.
+    private var window = ProximityScanWindow()
+    /// The last reading seen from each device, so a repeat can be told from
+    /// news. AirPods re-advertise the same state many times a second.
+    private var lastSeen: [UUID: AirPodsProximity] = [:]
 
     private var windowTimer: DispatchSourceTimer?
     private var windowEnd: DispatchWorkItem?
@@ -77,6 +85,9 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
     }
 
     public func stop() {
+        // Forget the attentive run, or a scanner started again would
+        // inherit the previous window and its spent ceiling.
+        window.closed()
         windowTimer?.cancel()
         windowTimer = nil
         windowEnd?.cancel()
@@ -136,7 +147,9 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
         windowEnd?.cancel()
         let end = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, self.isScanning else { return }
+                guard let self else { return }
+                self.window.closed()
+                guard self.isScanning else { return }
                 self.central?.stopScan()
                 self.isScanning = false
                 self.isAttentive = false
@@ -144,6 +157,17 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
         }
         windowEnd = end
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: end)
+    }
+
+    /// Ends the current window now.
+    private func closeWindow() {
+        windowEnd?.cancel()
+        windowEnd = nil
+        window.closed()
+        guard isScanning else { return }
+        central?.stopScan()
+        isScanning = false
+        isAttentive = false
     }
 
     // MARK: - CBCentralManagerDelegate (main queue)
@@ -183,9 +207,25 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
         proximity.peripheralID = peripheral.identifier
 
         MainActor.assumeIsolated {
-            // Something of ours is right here and talking: hold the window open
-            // so the card's battery figures and lid state keep up.
-            openWindow(for: Self.attentiveHold, attentive: true)
+            // Something of ours is right here. Whether that is worth holding
+            // the radio open depends on whether it is *saying* anything new:
+            // extending on every advertisement meant the window never closed
+            // while AirPods were in range, which is most of the time.
+            let id = proximity.peripheralID
+            let changed = id.map { lastSeen[$0] != proximity } ?? true
+            if let id { lastSeen[id] = proximity }
+
+            switch window.advertisement(changed: changed, now: Date().timeIntervalSinceReferenceDate) {
+            case .hold:
+                openWindow(for: Self.attentiveHold, attentive: true)
+            case .leave:
+                break
+            case .release:
+                // Long enough. Back to the duty cycle, which will look again
+                // shortly; a fault that changes forever must not own the radio.
+                closeWindow()
+            }
+
             onUpdate(proximity)
         }
     }
