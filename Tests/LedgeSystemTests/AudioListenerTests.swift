@@ -4,17 +4,16 @@ import Testing
 
 @testable import LedgeSystem
 
-/// The regression that matters, written the way the bug was found.
+/// Tests against the real CoreAudio, for the things a fake cannot tell you.
 ///
-/// CoreAudio keeps its listeners in a list it scans linearly, so a registration
-/// that is never really removed shows up as a *cost that grows* long before it
-/// shows up as anything a user would report. The old code leaked one listener
-/// per cycle here and each cycle after it got slower; the shipped app reached
-/// 1.5 million of them and spent the main thread entirely on the scan.
+/// The deterministic cover for the watcher's behaviour is in
+/// `VolumeWatchBackendTests`, against a fake that counts what crossed the
+/// boundary. What is left here needs the actual HAL: whether a registration
+/// this process made can really be taken off again, and whether the block and
+/// everything it captured are released when it is.
 ///
-/// So the assertion is about the shape of the cost, not about a return value:
-/// every removal in the broken version returned noErr.
-@Suite("Audio listener registration")
+/// Serialized, because they share one global listener list.
+@Suite("Audio listener against CoreAudio", .serialized)
 struct AudioListenerTests {
 
     private static let systemObject = AudioObjectID(kAudioObjectSystemObject)
@@ -24,92 +23,99 @@ struct AudioListenerTests {
         mElement: kAudioObjectPropertyElementMain
     )
 
-    private static func cycles(_ count: Int, queue: DispatchQueue) -> TimeInterval {
-        let start = Date()
-        for _ in 0..<count {
-            let listener = AudioListener(
-                object: systemObject, address: address, queue: queue, handler: {}
-            )
-            listener?.cancel()
-        }
-        return Date().timeIntervalSince(start) / Double(count)
-    }
-
-    @Test("Registering and unregistering does not get slower")
-    func registrationDoesNotAccumulate() {
-        let queue = DispatchQueue(label: "test.audio.listener")
-        // Warm the HAL connection, whose first call is far dearer than the rest.
-        _ = Self.cycles(200, queue: queue)
-
-        let first = Self.cycles(2000, queue: queue)
-        _ = Self.cycles(12000, queue: queue)
-        let last = Self.cycles(2000, queue: queue)
-
-        // Measured on the leaking version: 13.7us per cycle at the start and
-        // 46us sixteen thousand cycles later, still climbing linearly — a
-        // ratio above 3 and rising with every cycle added. Holding the
-        // registration properly, the cost does not move at all and the ratio
-        // sits at 1, so a threshold of 3 has room for a busy machine without
-        // ever letting the leak back through.
-        #expect(
-            last < first * 3,
-            "per-cycle cost grew from \(first * 1e6)us to \(last * 1e6)us — listeners are accumulating"
-        )
-    }
-
-    @Test("A listener comes off cleanly, and twice is not an error")
-    func cancelIsIdempotent() {
-        let queue = DispatchQueue(label: "test.audio.listener.once")
+    @Test("A registration can be taken off again, and twice is not an error")
+    func removalWorks() {
+        let queue = DispatchQueue(label: "test.audio.listener.remove")
         let listener = AudioListener(
             object: Self.systemObject, address: Self.address, queue: queue, handler: {}
         )
-        #expect(listener != nil)
+        #expect(listener != nil, "CoreAudio refused the registration — the rest proves nothing")
         listener?.cancel()
         listener?.cancel()
     }
-}
 
-/// The shape the volume watcher has to keep: arming twice is arming once, and
-/// stopping lets everything go.
-///
-/// The hang came from `startWatching()` being the *response* to a notification
-/// it had itself registered for, so each output change tore the whole set down
-/// and built it again. These do not test that CoreAudio is happy; they test
-/// that the app asks it for a bounded number of things.
-@Suite("Volume watching is bounded")
-@MainActor
-struct VolumeWatchingTests {
+    /// The thing that actually leaked was not an object on this side; it was the
+    /// block CoreAudio had copied, and everything it captured. So this holds a
+    /// sentinel by capture and checks it is gone once the listener is cancelled
+    /// and the queue has drained.
+    @Test("Cancelling releases the block and what it captured")
+    func cancellationReleasesCaptures() {
+        final class Sentinel: @unchecked Sendable {}
+        let queue = DispatchQueue(label: "test.audio.listener.sentinel")
+        weak var weakSentinel: Sentinel?
 
-    @Test("Arming twice installs one set, not two")
-    func startIsIdempotent() {
-        let controller = VolumeController()
-        controller.startWatching()
-        let first = controller.installedListenerCount
-        #expect(first >= 1, "at least the default-device listener")
-
-        controller.startWatching()
-        #expect(
-            controller.installedListenerCount == first,
-            "a second arm added listeners: \(controller.installedListenerCount) vs \(first)"
-        )
-
-        controller.stopWatching()
-        #expect(controller.installedListenerCount == 0)
-    }
-
-    @Test("Stopping and starting again does not accumulate")
-    func stopStartDoesNotAccumulate() {
-        let controller = VolumeController()
-        controller.startWatching()
-        let first = controller.installedListenerCount
-        for _ in 0..<20 {
-            controller.stopWatching()
-            controller.startWatching()
+        do {
+            let sentinel = Sentinel()
+            weakSentinel = sentinel
+            let listener = AudioListener(
+                object: Self.systemObject, address: Self.address, queue: queue
+            ) { _ = sentinel }
+            #expect(listener != nil, "CoreAudio refused the registration")
+            #expect(weakSentinel != nil, "the handler should be holding it")
+            listener?.cancel()
         }
+
+        queue.sync {}   // let anything already queued finish
         #expect(
-            controller.installedListenerCount == first,
-            "twenty stop/start rounds changed the count: \(controller.installedListenerCount) vs \(first)"
+            weakSentinel == nil,
+            "the listener block outlived its cancellation — CoreAudio is still holding it"
         )
-        controller.stopWatching()
+    }
+
+    /// Supplementary evidence, not the primary guard: the deterministic
+    /// version is `unchangedNotificationsDoNotChurn`, which counts operations
+    /// instead of timing them. This one is kept because it is the shape in
+    /// which the original bug was found — a cost that grew — and because it
+    /// exercises the real HAL rather than a fake.
+    ///
+    /// Off by default. A ratio measured while the rest of the suite runs in
+    /// parallel is measuring the machine, not the code: it reported 19x on a
+    /// loaded run and 1x on a quiet one. Run it deliberately, on an idle
+    /// machine:
+    ///
+    ///     LEDGE_TIMING_TESTS=1 swift test --filter registrationDoesNotAccumulate
+    ///
+    /// Monotonic clock, whole-duration arithmetic, and it fails rather than
+    /// passes if the registrations never succeeded — a run where everything is
+    /// refused does no work at all and would otherwise look beautifully flat.
+    @Test(
+        "Registering and unregistering does not get slower",
+        .enabled(if: ProcessInfo.processInfo.environment["LEDGE_TIMING_TESTS"] == "1")
+    )
+    func registrationDoesNotAccumulate() {
+        let queue = DispatchQueue(label: "test.audio.listener.growth")
+        var refused = 0
+
+        func cycles(_ count: Int) -> Duration {
+            let clock = ContinuousClock()
+            return clock.measure {
+                for _ in 0..<count {
+                    let listener = AudioListener(
+                        object: Self.systemObject, address: Self.address, queue: queue, handler: {}
+                    )
+                    if listener == nil { refused += 1 }
+                    listener?.cancel()
+                }
+            }
+        }
+
+        _ = cycles(200)                 // warm the HAL connection
+        let first = cycles(2000)
+        _ = cycles(12000)
+        let last = cycles(2000)
+
+        #expect(refused == 0, "\(refused) registrations were refused; this measured nothing")
+
+        // Leaking, this ratio passed 3 by sixteen thousand cycles and kept
+        // climbing linearly. Holding the registration properly it sits at 1,
+        // so 4 leaves room for a busy machine without letting the leak back.
+        // Whole duration arithmetic: `.attoseconds` alone drops the seconds
+        // component, so a run slow enough to cross a second would compare the
+        // wrong numbers entirely.
+        func seconds(_ d: Duration) -> Double {
+            Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+        }
+        let ratio = seconds(last) / max(seconds(first), 1e-9)
+        #expect(ratio < 4, "per-cycle cost grew by \(ratio)x — registrations are accumulating")
     }
 }

@@ -43,10 +43,28 @@ LedgeAudioListen *_Nullable ledge_audio_listen_add(
     void (^_Nonnull handler)(void),
     OSStatus *_Nullable status);
 
-/// Removes the registration and frees the token, which must not be used again.
-/// Returns the OSStatus CoreAudio gave; noErr here is trustworthy, because the
-/// pointer it was given is the pointer it registered.
+/// Attempts removal.
+///
+/// On success the token is freed and must not be used again. **On failure the
+/// token is left intact**, so the caller keeps the object, the full address,
+/// the queue and the block — everything needed to try again. Freeing it on a
+/// failed removal would discard the only identity by which the registration
+/// could ever be taken off, which is how the leak this file exists for became
+/// unrecoverable rather than merely unnoticed.
+///
+/// A noErr here means CoreAudio matched the pointer it was given against the
+/// pointer it registered. That is a much stronger statement than it was from
+/// Swift, where the two were never the same and noErr meant nothing — but it
+/// is still CoreAudio's word, not proof that no callback is in flight.
 OSStatus ledge_audio_listen_remove(LedgeAudioListen *_Nullable listen);
+
+/// Gives up on a token and frees it without attempting removal.
+///
+/// For the case where the object is known to be gone — a device unplugged, a
+/// process exited — and for the end of a bounded retry policy. The caller is
+/// asserting that no further removal can succeed; anything still queued is
+/// caught by the handler's own weak capture.
+void ledge_audio_listen_abandon(LedgeAudioListen *_Nullable listen);
 
 /// The same, for CoreMediaIO — cameras, which have their own object tree and
 /// their own copy of this API with the identical flaw.
@@ -58,5 +76,7 @@ LedgeCMIOListen *_Nullable ledge_cmio_listen_add(
     OSStatus *_Nullable status);
 
 OSStatus ledge_cmio_listen_remove(LedgeCMIOListen *_Nullable listen);
+
+void ledge_cmio_listen_abandon(LedgeCMIOListen *_Nullable listen);
 
 #endif

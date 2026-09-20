@@ -25,40 +25,40 @@ LedgeAudioListen *ledge_audio_listen_add(
     void (^handler)(void),
     OSStatus *status)
 {
-    // The handler is copied so it outlives the caller's frame; the listener
-    // block wrapping it is copied separately and is what CoreAudio matches on.
+    // Storage first. Registering and *then* discovering there is nowhere to
+    // record the token leaves a listener installed that nothing can name.
+    LedgeAudioListen *listen = calloc(1, sizeof(LedgeAudioListen));
+    if (!listen) {
+        if (status) { *status = kAudio_MemFullError; }
+        return NULL;
+    }
+
+    // The handler is copied so it outlives the caller's frame. Copying the
+    // wrapper block copies what it captures, so the wrapper owns it from here.
     void (^ownedHandler)(void) = Block_copy(handler);
     AudioObjectPropertyListenerBlock block = Block_copy(
         ^(UInt32 count, const AudioObjectPropertyAddress *addresses) {
             (void)count;
+            // HAL owns `addresses` for the duration of this call only; it is
+            // deliberately not passed on or kept.
             (void)addresses;
             ownedHandler();
         });
+    Block_release(ownedHandler);
 
     OSStatus result = AudioObjectAddPropertyListenerBlock(object, &address, queue, block);
     if (status) { *status = result; }
     if (result != noErr) {
         Block_release(block);
-        Block_release(ownedHandler);
+        free(listen);
         return NULL;
     }
 
-    LedgeAudioListen *listen = calloc(1, sizeof(LedgeAudioListen));
-    if (!listen) {
-        AudioObjectRemovePropertyListenerBlock(object, &address, queue, block);
-        Block_release(block);
-        Block_release(ownedHandler);
-        if (status) { *status = kAudio_MemFullError; }
-        return NULL;
-    }
     listen->object = object;
     listen->address = address;
     listen->queue = queue;
     dispatch_retain(listen->queue);
     listen->block = block;
-    // ownedHandler is retained by `block`; releasing our own reference here
-    // would be correct only if the wrapper had copied it, which it has.
-    Block_release(ownedHandler);
     return listen;
 }
 
@@ -67,10 +67,20 @@ OSStatus ledge_audio_listen_remove(LedgeAudioListen *listen)
     if (!listen) { return noErr; }
     OSStatus result = AudioObjectRemovePropertyListenerBlock(
         listen->object, &listen->address, listen->queue, listen->block);
+    if (result != noErr) {
+        // Keep everything. The caller decides whether to retry or abandon.
+        return result;
+    }
+    ledge_audio_listen_abandon(listen);
+    return noErr;
+}
+
+void ledge_audio_listen_abandon(LedgeAudioListen *listen)
+{
+    if (!listen) { return; }
     Block_release(listen->block);
     dispatch_release(listen->queue);
     free(listen);
-    return result;
 }
 
 LedgeCMIOListen *ledge_cmio_listen_add(
@@ -80,6 +90,12 @@ LedgeCMIOListen *ledge_cmio_listen_add(
     void (^handler)(void),
     OSStatus *status)
 {
+    LedgeCMIOListen *listen = calloc(1, sizeof(LedgeCMIOListen));
+    if (!listen) {
+        if (status) { *status = kAudio_MemFullError; }
+        return NULL;
+    }
+
     void (^ownedHandler)(void) = Block_copy(handler);
     CMIOObjectPropertyListenerBlock block = Block_copy(
         ^(UInt32 count, const CMIOObjectPropertyAddress *addresses) {
@@ -87,29 +103,21 @@ LedgeCMIOListen *ledge_cmio_listen_add(
             (void)addresses;
             ownedHandler();
         });
+    Block_release(ownedHandler);
 
     OSStatus result = CMIOObjectAddPropertyListenerBlock(object, &address, queue, block);
     if (status) { *status = result; }
     if (result != noErr) {
         Block_release(block);
-        Block_release(ownedHandler);
+        free(listen);
         return NULL;
     }
 
-    LedgeCMIOListen *listen = calloc(1, sizeof(LedgeCMIOListen));
-    if (!listen) {
-        CMIOObjectRemovePropertyListenerBlock(object, &address, queue, block);
-        Block_release(block);
-        Block_release(ownedHandler);
-        if (status) { *status = kAudio_MemFullError; }
-        return NULL;
-    }
     listen->object = object;
     listen->address = address;
     listen->queue = queue;
     dispatch_retain(listen->queue);
     listen->block = block;
-    Block_release(ownedHandler);
     return listen;
 }
 
@@ -118,8 +126,15 @@ OSStatus ledge_cmio_listen_remove(LedgeCMIOListen *listen)
     if (!listen) { return noErr; }
     OSStatus result = CMIOObjectRemovePropertyListenerBlock(
         listen->object, &listen->address, listen->queue, listen->block);
+    if (result != noErr) { return result; }
+    ledge_cmio_listen_abandon(listen);
+    return noErr;
+}
+
+void ledge_cmio_listen_abandon(LedgeCMIOListen *listen)
+{
+    if (!listen) { return; }
     Block_release(listen->block);
     dispatch_release(listen->queue);
     free(listen);
-    return result;
 }
