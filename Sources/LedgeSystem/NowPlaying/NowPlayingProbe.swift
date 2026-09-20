@@ -57,12 +57,17 @@ public enum NowPlayingProbe {
 
     /// Runs the helper once in `get` mode and checks that it both greets us and
     /// answers.
+    ///
+    /// The lifetime belongs to `ChildProcess`: a helper that ignores SIGTERM
+    /// gets SIGKILL after a grace, and the output is drained continuously
+    /// rather than through a `readDataToEndOfFile` that a stuck child would
+    /// leave blocked on a background queue for as long as it lived.
     private static func run(_ dylib: URL, host: AdapterHost) async -> Bool {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: host.executable)
-            process.arguments = host.arguments
-            process.environment = [
+        let outcome = await ChildProcess.run(
+            executable: host.executable,
+            arguments: host.arguments,
+            timeout: timeout,
+            environment: [
                 "LEDGE_ADAPTER_DYLIB": dylib.path,
                 "LEDGE_ADAPTER_MODE": "get",
                 // The probe never needs the picture, and skipping it avoids
@@ -70,72 +75,34 @@ public enum NowPlayingProbe {
                 "LEDGE_ADAPTER_ARTWORK": "0",
                 "PATH": "/usr/bin:/bin",
             ]
+        )
 
-            let out = Pipe()
-            process.standardOutput = out
-            // Discarded, not piped: an undrained pipe blocks the child once
-            // its buffer fills, turning a chatty helper into a probe timeout.
-            process.standardError = FileHandle.nullDevice
-
-            let finished = OSAllocatedUnfairLock(initialState: false)
-            // `@Sendable`: called from the timeout work item and from the
-            // reader queue. It only touches the lock and the continuation, both
-            // of which are `Sendable`.
-            @Sendable func complete(_ value: Bool) {
-                let alreadyDone = finished.withLock { done -> Bool in
-                    if done { return true }
-                    done = true
-                    return false
-                }
-                guard !alreadyDone else { return }
-                continuation.resume(returning: value)
-            }
-
-            do {
-                try process.run()
-            } catch {
-                log.notice("adapter probe: launch failed — \(error.localizedDescription, privacy: .public)")
-                complete(false)
-                return
-            }
-
-            // A helper that never answers must not hold startup open.
-            // `nonisolated(unsafe)` only to carry the work item into the reader
-            // queue so it can be cancelled. `DispatchWorkItem.cancel()` is
-            // documented as safe to call from any thread; the type simply is not
-            // marked `Sendable`.
-            nonisolated(unsafe) let deadline = DispatchWorkItem {
-                if process.isRunning { process.terminate() }
-                log.notice("adapter probe: timed out")
-                complete(false)
-            }
-            DispatchQueue.global(qos: .userInitiated)
-                .asyncAfter(deadline: .now() + timeout, execute: deadline)
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                let data = out.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                deadline.cancel()
-
-                var sawHello = false
-                var sawAnswer = false
-                var buffer = LineBuffer()
-                for line in buffer.append(data) {
-                    guard let payload = try? JSONDecoder().decode(AdapterPayload.self, from: line)
-                    else { continue }
-                    if payload.ok == false { break }
-                    if payload.kind == .hello { sawHello = true }
-                    if payload.kind == .now { sawAnswer = true }
-                }
-
-                let works = sawHello && sawAnswer && process.terminationStatus == 0
-                log.notice("""
-                    adapter probe: hello=\(sawHello, privacy: .public) \
-                    answer=\(sawAnswer, privacy: .public) \
-                    status=\(process.terminationStatus, privacy: .public)
-                    """)
-                complete(works)
-            }
+        guard !outcome.failedToLaunch else {
+            log.notice("adapter probe: launch failed")
+            return false
         }
+        guard !outcome.timedOut else {
+            log.notice("adapter probe: timed out")
+            return false
+        }
+
+        var sawHello = false
+        var sawAnswer = false
+        var buffer = LineBuffer()
+        for line in buffer.append(outcome.standardOutput) {
+            guard let payload = try? JSONDecoder().decode(AdapterPayload.self, from: line)
+            else { continue }
+            if payload.ok == false { break }
+            if payload.kind == .hello { sawHello = true }
+            if payload.kind == .now { sawAnswer = true }
+        }
+
+        let works = sawHello && sawAnswer && outcome.status == 0
+        log.notice("""
+            adapter probe: hello=\(sawHello, privacy: .public) \
+            answer=\(sawAnswer, privacy: .public) \
+            status=\(outcome.status, privacy: .public)
+            """)
+        return works
     }
 }

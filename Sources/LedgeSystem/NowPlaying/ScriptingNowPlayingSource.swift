@@ -3,6 +3,8 @@ import Foundation
 import LedgeCore
 import os
 
+
+
 /// Reads now-playing state from the players that expose an AppleScript
 /// dictionary — currently Music and Spotify.
 ///
@@ -236,78 +238,35 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// Failures are expected and normal here: the user may have declined
     /// Automation permission, or the player may have quit mid-query. Neither is
     /// worth more than a debug line.
-    private static func runOsascript(_ source: String) async -> ScriptResult {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                process.arguments = ["-e", source]
+    /// Internal rather than private so the cancellation path can be tested
+    /// end to end against a real `osascript`.
+    ///
+    /// Cancellation, the timeout and the escalation to SIGKILL all belong to
+    /// `ChildProcess` now — this had its own copy of each, and the copy only
+    /// ever sent SIGTERM, so a script stuck in IPC could outlive its deadline.
+    static func runOsascript(_ source: String) async -> ScriptResult {
+        let outcome = await ChildProcess.run(
+            executable: "/usr/bin/osascript",
+            arguments: ["-e", source],
+            timeout: queryTimeout
+        )
 
-                let stdout = Pipe()
-                let stderr = Pipe()
-                process.standardOutput = stdout
-                process.standardError = stderr
+        if outcome.cancelled || outcome.failedToLaunch { return .failed }
 
-                // Drained continuously rather than read at the end. An undrained
-                // pipe deadlocks the child once it fills — but discarding stderr
-                // entirely costs the only diagnostic there is when a script
-                // fails, which has already hidden one silent syntax error.
-                let errorBuffer = ErrorBuffer()
-                stderr.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    if !chunk.isEmpty { errorBuffer.append(chunk) }
-                }
-
-                do {
-                    try process.run()
-                } catch {
-                    log.debug("osascript failed to launch: \(error.localizedDescription, privacy: .public)")
-                    continuation.resume(returning: .failed)
-                    return
-                }
-
-                // Kill it if it overruns. Cancelled on normal exit below, so the
-                // timer never fires for a healthy query.
-                let deadline = DispatchWorkItem {
-                    guard process.isRunning else { return }
-                    log.notice("osascript timed out after \(queryTimeout, privacy: .public)s — terminating")
-                    process.terminate()
-                }
-                DispatchQueue.global(qos: .utility)
-                    .asyncAfter(deadline: .now() + queryTimeout, execute: deadline)
-
-                // Read to EOF first: a script producing more than the pipe
-                // buffer would otherwise deadlock against waitUntilExit. On a
-                // timeout, terminate() closes the pipe and this returns.
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                deadline.cancel()
-                stderr.fileHandleForReading.readabilityHandler = nil
-
-                guard process.terminationStatus == 0 else {
-                    let detail = errorBuffer.text
-                    // A denial is the caller's to log — once, when it latches
-                    // — not an error to repeat on every poll.
-                    if indicatesAutomationDenial(detail) {
-                        continuation.resume(returning: .denied(detail))
-                        return
-                    }
-                    log.error("""
-                        osascript exited \(process.terminationStatus, privacy: .public): \
-                        \(detail, privacy: .public)
-                        """)
-                    continuation.resume(returning: .failed)
-                    return
-                }
-
-                continuation.resume(
-                    returning: .output(
-                        String(decoding: data, as: UTF8.self)
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                )
-            }
+        guard outcome.status == 0, !outcome.timedOut else {
+            let detail = outcome.errorText
+            // A denial is the caller's to log — once, when it latches — not an
+            // error to repeat on every poll.
+            if indicatesAutomationDenial(detail) { return .denied(detail) }
+            if outcome.timedOut { return .failed }
+            log.error("""
+                osascript exited \(outcome.status, privacy: .public): \
+                \(detail, privacy: .public)
+                """)
+            return .failed
         }
+
+        return .output(outcome.outputText)
     }
 
     static func parse(_ output: String, player: Player) -> NowPlayingSnapshot? {
@@ -438,34 +397,71 @@ public final class NowPlayingCommander: NowPlayingCommanding {
 
     public init() {}
 
+    /// What happened to a command offered to the scripting path.
+    ///
+    /// Three states rather than a Bool, because "it did not go" has two very
+    /// different meanings and they must not share an answer. A player with no
+    /// scripting dictionary is `unsupported`, and MediaRemote is the right
+    /// fallback. A player whose command queue is saturated is `busy` — and
+    /// falling back there would hand the command to whatever the system
+    /// considers now-playing, which is the precise failure the scripting path
+    /// exists to prevent: mashing pause on a Spotify card until its queue
+    /// filled would start pausing a browser tab instead.
+    enum ScriptingDispatch: Equatable {
+        case queued
+        case unsupported
+        case busy
+    }
+
     @discardableResult
     public func send(_ command: NowPlayingCommand, to bundleID: String) -> Bool {
-        Self.lastCommandAt = Date().timeIntervalSinceReferenceDate
-
         // Scripting first, because it is the only path that targets the player
         // actually shown on the card. MediaRemote acts on whatever the system
         // considers now-playing, which can be a different app entirely — press
         // play on a Spotify card while a browser tab holds the now-playing slot
         // and MediaRemote toggles the browser.
-        if sendViaScripting(command, to: bundleID) {
+        switch sendViaScripting(command, to: bundleID) {
+        case .queued:
+            noteDispatch()
             return true
-        }
 
-        // No scripting dictionary for this player (a browser, say). Fall back to
-        // MediaRemote and report honestly that we cannot confirm it landed.
-        // Seek used to stop here, because MediaRemote had no usable symbol for
-        // it. `MRMediaRemoteSetElapsedTime` does the job, so a browser tab can
-        // now be scrubbed too — reported as unconfirmed, since the symbol
-        // returns nothing.
-        MediaRemoteBridge.send(command)
-        return false
+        case .busy:
+            // Dropped on purpose. The player is not keeping up, and the one
+            // thing worse than a missed press is a press that lands on someone
+            // else's player. Nothing was dispatched, so the freshness stamp
+            // must not move either.
+            Self.log.notice("command dropped: \(bundleID, privacy: .public) has a full queue")
+            return false
+
+        case .unsupported:
+            // No scripting dictionary for this player (a browser, say). Fall
+            // back to MediaRemote and report honestly that we cannot confirm
+            // it landed. Seek used to stop here, because MediaRemote had no
+            // usable symbol for it. `MRMediaRemoteSetElapsedTime` does the job,
+            // so a browser tab can now be scrubbed too — reported as
+            // unconfirmed, since the symbol returns nothing.
+            noteDispatch()
+            MediaRemoteBridge.send(command)
+            return false
+        }
     }
 
-    private func sendViaScripting(_ command: NowPlayingCommand, to bundleID: String) -> Bool {
+    /// Marks that a command actually went somewhere, so the composite source
+    /// knows its cached answer is about to be wrong. A command that was never
+    /// dispatched has invalidated nothing, and moving the stamp for one would
+    /// make the source discard a perfectly good reading.
+    private func noteDispatch() {
+        Self.lastCommandAt = Date().timeIntervalSinceReferenceDate
+    }
+
+    func sendViaScripting(
+        _ command: NowPlayingCommand,
+        to bundleID: String
+    ) -> ScriptingDispatch {
         guard let player = ScriptingNowPlayingSource.players.first(where: { $0.bundleID == bundleID })
         else {
             Self.log.debug("no scripting fallback for \(bundleID, privacy: .public)")
-            return false
+            return .unsupported
         }
 
         let body: String
@@ -485,30 +481,36 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         end tell
         """
 
-        // Fire and forget: the poll will pick up the result, and blocking the
-        // main actor on a subprocess to confirm a button press would be worse
-        // than assuming it worked.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", source]
-        // Discarded, not piped. An undrained pipe deadlocks the child once it
-        // fills, and nothing here reads the output.
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        // `terminationHandler` rather than `waitUntilExit`: mashing next-track
-        // would otherwise park one blocked global-queue thread per press.
-        process.terminationHandler = { finished in
-            guard finished.terminationStatus != 0 else { return }
-            Self.log.debug("transport command exited \(finished.terminationStatus, privacy: .public)")
+        // Queued rather than fired and forgotten. Every press used to launch
+        // its own process with no timeout and no bound, so a player that had
+        // stopped answering collected one child per press. The queue keeps the
+        // order — pause-then-next is not next-then-pause — and refuses once a
+        // backlog says the player is not listening.
+        let queued = Self.commands.submit {
+            let outcome = await ChildProcess.run(
+                executable: "/usr/bin/osascript",
+                arguments: ["-e", source],
+                timeout: Self.commandTimeout,
+                captureOutput: false
+            )
+            if !outcome.succeeded {
+                Self.log.debug("""
+                    transport command exited \(outcome.status, privacy: .public)\
+                    \(outcome.timedOut ? " (timed out)" : "", privacy: .public)
+                    """)
+            }
         }
-
-        do {
-            try process.run()
-        } catch {
-            Self.log.debug("transport command failed: \(error.localizedDescription, privacy: .public)")
-            return false
-        }
-        return true
+        return queued ? .queued : .busy
     }
+
+    /// One at a time, in order, with a bound.
+    ///
+    /// A `var` so a test can substitute a runner that refuses everything, which
+    /// is how "the player's queue is full" is reproduced without racing a real
+    /// consumer to keep it that way.
+    static var commands = SerialCommandRunner()
+
+    /// A transport command is a single AppleScript verb against a running app.
+    /// Longer than this and the player is not answering.
+    private static let commandTimeout: TimeInterval = 5
 }
