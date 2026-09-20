@@ -75,7 +75,7 @@ struct ArtworkLoaderTests {
     }
 
     /// A one-pixel PNG, so `dominantColor` has something real to read.
-    nonisolated(unsafe) private static let pixel: Data = {
+    nonisolated private static let pixel: Data = {
         let base64 = """
             iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
             """

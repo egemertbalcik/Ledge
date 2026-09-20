@@ -1,5 +1,6 @@
 import LedgeCore
 import SwiftUI
+import os
 
 /// The Clock card: iOS's Clock in one place. A segmented header picks the
 /// face — Timer or Stopwatch — and each face speaks its own iOS dialect: the
@@ -64,9 +65,15 @@ public struct TimerCardView: View {
     /// closing it, so somebody who opens the rule, dials 40, thinks better of
     /// it and closes finds 40 rather than the default again.
     @State private var isRulerOpen: Bool
-    @State private var isDraggingRuler = false
-    /// Releases the card a moment after the last change. See `holdCard()`.
-    @State private var holdRelease: Task<Void, Never>?
+    /// Whether this card may hold the notch open at all.
+    ///
+    /// The rule tells the card when a drag ends, and it says so on the way out
+    /// too — tearing down a half-finished drag is the same act as finishing
+    /// one. Taken at face value that started a fresh grace *after* the card had
+    /// been switched away from, and the notch then stayed open over whatever
+    /// card came next. Which of the two disappearances SwiftUI delivers first
+    /// is not ordered, so this makes both orders safe.
+    @State private var hold = CardHold()
     @State private var isHoveringDuration = false
     @FocusState private var isFocusingDuration: Bool
     @State private var hasSeededDuration = false
@@ -182,7 +189,7 @@ public struct TimerCardView: View {
             .onChange(of: shownFace) { _, _ in
                 guard isRulerOpen || isAdjusting else { return }
                 isRulerOpen = false
-                isDraggingRuler = false
+                hold.release()
                 scrubAnchor = nil
                 releaseCard()
             }
@@ -225,6 +232,7 @@ public struct TimerCardView: View {
         // appearance: a length chosen and not yet started is still theirs when
         // the card comes back.
         .onAppear {
+            hold.appeared()
             guard !hasSeededDuration else { return }
             hasSeededDuration = true
             minutes = readyMinutes
@@ -237,9 +245,11 @@ public struct TimerCardView: View {
         }
         .onDisappear {
             isRulerOpen = false
-            isDraggingRuler = false
             scrubAnchor = nil
-            releaseCard()
+            // Marks the card gone *before* releasing, so a teardown from the
+            // rule arriving afterwards is refused rather than re-latching.
+            hold.disappeared()
+            releaseCard(caller: "idle onDisappear")
         }
     }
 
@@ -262,10 +272,11 @@ public struct TimerCardView: View {
                 tint: tint,
                 // The drag ending must not hand the card back while the rule is
                 // still open: the pointer lifts between two drags of one
-                // adjustment, and the card used to close underneath.
+                // adjustment, and the card used to close underneath. The dial
+                // guarantees this callback is balanced: `false` follows a real
+                // `true`, never a collapsed view merely disappearing.
                 setDragging: { dragging in
-                    isDraggingRuler = dragging
-                    holdCard()
+                    setRulerDragging(dragging)
                 },
                 haptic: actions.haptic
             )
@@ -396,40 +407,79 @@ public struct TimerCardView: View {
 
     private static let chevronSize: CGFloat = 22
 
-    /// How long the card stays after the last change to the length.
-    ///
-    /// Not for the adjustment itself — that holds the card on its own, for as
-    /// long as it takes. This is the pause afterwards: the hand has stopped,
-    /// the number is what it should be, and the next thing anybody does is
-    /// press Start. Without it the card went the instant the pointer left the
-    /// rule, taking the button with it.
-    private static let holdGrace: Duration = .seconds(2.5)
-
     /// Whether an adjustment is in flight right now. The pointer lifts between
     /// two drags of one adjustment, so this is not the same question as
     /// whether the card may go.
-    private var isAdjusting: Bool { isDraggingRuler || scrubAnchor != nil }
+    private var isAdjusting: Bool { hold.isAdjusting || scrubAnchor != nil }
 
-    /// Keeps the card while something is happening to the length, and for a
-    /// short while after it stops.
+    /// Accepts only balanced drag edges from the ruler.
+    ///
+    /// `DurationDialView` already promises that contract, but the timer is the
+    /// component that turns an edge into a shell-wide hover latch. Enforcing it
+    /// here too prevents any child teardown from turning a stray `false` into a
+    /// fresh 2.5-second hold over the next card.
+    private func setRulerDragging(_ dragging: Bool) {
+        // Only a real edge counts. A teardown reports `false` without this card
+        // ever having seen `true`, and that is cleanup, not a gesture ending.
+        guard hold.adjustmentChanged(to: dragging) else { return }
+        if dragging {
+            holdCard(caller: "ruler drag began")
+        } else {
+            releaseCard(caller: "ruler drag ended")
+        }
+    }
+
+    /// Keeps the card only while something is happening to the length.
     ///
     /// The open rule is deliberately *not* a reason to hold: a rule somebody
     /// opened and then left alone is not a conversation, and a card that can
     /// never be dismissed while it is showing is a trap.
-    private func holdCard() {
-        actions.setDragging(true)
-        holdRelease?.cancel()
-        holdRelease = Task { @MainActor in
-            try? await Task.sleep(for: Self.holdGrace)
-            guard !Task.isCancelled, !isAdjusting else { return }
-            actions.setDragging(false)
-        }
+    private static let holdLog = Logger(subsystem: "com.egemert.ledge", category: "hold")
+
+    /// Says who is holding the notch and why, behind
+    /// `defaults write com.egemert.ledge developer.trace.hold -bool true`.
+    private func traceHold(_ what: String, caller: String) {
+        guard DebugSwitches.tracing("hold") else { return }
+        Self.holdLog.notice(
+            """
+            timer: \(what, privacy: .public) via \(caller, privacy: .public) \
+            held=\(self.hold.isHeld, privacy: .public) \
+            ruler=\(self.isRulerOpen, privacy: .public) \
+            adjusting=\(self.isAdjusting, privacy: .public)
+            """
+        )
     }
 
-    /// Drops the hold and whatever was waiting to drop it.
-    private func releaseCard() {
-        holdRelease?.cancel()
-        holdRelease = nil
+    /// Holds the notch for the length of a gesture, and not a moment longer.
+    ///
+    /// There used to be a grace here — two and a half seconds after the last
+    /// change, so the card survived the pointer lifting between two drags of
+    /// one adjustment. It had to go, because it could not tell two situations
+    /// apart:
+    ///
+    /// - While the pointer is **inside** the notch, hover already holds the
+    ///   card open. The grace adds nothing and nobody can see it.
+    /// - While the pointer is **outside**, the grace is the only thing holding
+    ///   the notch — and it holds it over whatever card comes next, seconds
+    ///   after the user has walked away.
+    ///
+    /// The only situation in which it was observable was the one in which it
+    /// was wrong. So a hold now begins when a gesture begins and ends when the
+    /// gesture ends. Nothing is scheduled, so nothing can outlive what it was
+    /// scheduled for.
+    private func holdCard(caller: String = #function) {
+        traceHold("holdCard", caller: caller)
+        guard hold.hold() else {
+            traceHold("holdCard REFUSED (card is gone)", caller: caller)
+            return
+        }
+        actions.setDragging(true)
+    }
+
+    /// Drops the hold, immediately.
+    private func releaseCard(caller: String = #function) {
+        traceHold("releaseCard", caller: caller)
+        hold.release()
         actions.setDragging(false)
     }
 
@@ -438,11 +488,10 @@ public struct TimerCardView: View {
     private func setRuler(open: Bool) {
         guard open != isRulerOpen else { return }
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.24)) { isRulerOpen = open }
-        if !open { isDraggingRuler = false }
-        // Opening is the start of an adjustment, so it earns the same grace as
-        // a change does — otherwise the card could go between the rule
-        // appearing and the hand reaching it.
-        holdCard()
+        if !open { releaseCard(caller: "rule closed") }
+        // Deliberately no hold. Opening the rule happens under the pointer, and
+        // a pointer on the card is already what keeps the card open — a latch
+        // here would add nothing except something able to outlive the gesture.
     }
 
     private var numberSize: CGFloat { isCompactWidth ? 22 : 34 }
@@ -465,8 +514,9 @@ public struct TimerCardView: View {
                     scrubAnchor = minutes
                     // Latches the shell's hover, so the card cannot close under
                     // a pointer that has wandered off it mid-drag. The same
-                    // latch the volume sliders use.
-                    holdCard()
+                    // latch the volume sliders use — and released the moment
+                    // the hand lifts, in `endScrub`.
+                    holdCard(caller: "scrub began")
                 }
                 let landed = DurationScrub.minutes(
                     anchor: scrubAnchor ?? minutes,
@@ -493,16 +543,18 @@ public struct TimerCardView: View {
 
     private func endScrub() {
         scrubAnchor = nil
-        // Not released outright: the pointer lifts between two drags of one
-        // adjustment, and the press that follows is usually Start.
-        holdCard()
+        // The gesture is over, so the hold is over. If the pointer is still on
+        // the card, hover keeps it open by itself; if it has left, the card
+        // should go, and that is the whole point.
+        releaseCard(caller: "scrub ended")
     }
 
     private func nudge(by delta: Int) {
         let landed = DurationDial.clamp(minutes + delta)
         guard landed != minutes else { return }
         setMinutes(landed)
-        holdCard()
+        // No hold: a key press is not a gesture with an end, so a latch taken
+        // here would have nothing to take it off again.
     }
 
     /// Starting is the same act however it was asked for, so it is one place:

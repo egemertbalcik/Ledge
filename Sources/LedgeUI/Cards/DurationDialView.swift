@@ -38,6 +38,15 @@ struct DurationDialView: View {
     /// release. Only the tail matters, so the list is trimmed as it goes.
     @State private var samples: [(translation: CGFloat, time: TimeInterval)] = []
     @State private var glide: Task<Void, Never>?
+    /// Whether this view has actually latched the shell for a drag.
+    ///
+    /// The dial remains in the hierarchy at zero height while the ruler is
+    /// closed. Its `onDisappear` therefore also runs when somebody merely
+    /// switches away from the timer card. Emitting `setDragging(false)` for
+    /// that non-interaction made the timer interpret teardown as the end of a
+    /// drag and take a fresh post-drag hold. Keep the callback balanced: a
+    /// release is sent only after this instance sent the matching acquire.
+    @State private var hasDragLatch = false
 
     private var position: CGFloat {
         guard let anchor else { return CGFloat(minutes) }
@@ -162,7 +171,10 @@ struct DurationDialView: View {
                     glide = nil
                     anchor = minutes
                     samples = []
-                    setDragging(true)
+                    if !hasDragLatch {
+                        hasDragLatch = true
+                        setDragging(true)
+                    }
                 }
                 translation = value.translation.width
                 note(translation)
@@ -269,6 +281,8 @@ struct DurationDialView: View {
         anchor = nil
         translation = 0
         samples = []
+        guard hasDragLatch else { return }
+        hasDragLatch = false
         setDragging(false)
     }
 }
