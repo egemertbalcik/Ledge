@@ -106,7 +106,7 @@ struct DeviceAlertProviderTests {
         // Something a stopped provider could not present.
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-            deviceName: "AirPods", component: .left, level: 0.1,
+            deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0
         )])
         await settle()
@@ -167,7 +167,7 @@ struct DeviceAlertProviderTests {
             await store.requeueAlerts([BatteryAlert(
                 ruleID: rule, kind: .low, deviceID: .bluetooth("aa:bb"),
                 deviceName: "AirPods", component: .left,
-                level: 0.2 - Double(step) / 1000,
+                level: 0.2 - Double(step) / 1000, threshold: 0.2,
                 delivery: .notch, firedAt: t0
             )])
         }
@@ -178,7 +178,7 @@ struct DeviceAlertProviderTests {
         for _ in 0..<200 {
             await store.requeueAlerts([BatteryAlert(
                 ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-                deviceName: "AirPods", component: .left, level: 0.1,
+                deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
                 delivery: .notch, firedAt: t0
             )])
         }
@@ -196,7 +196,7 @@ struct DeviceAlertProviderTests {
 
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-            deviceName: "AirPods", component: .left, level: 0.1,
+            deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0
         )])
         #expect(await store.queuedAlertCount() == 1)
@@ -205,7 +205,7 @@ struct DeviceAlertProviderTests {
         clock.withLock { $0 = t0.addingTimeInterval(3600) }
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("cc:dd"),
-            deviceName: "Mouse", component: .main, level: 0.1,
+            deviceName: "Mouse", component: .main, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0.addingTimeInterval(3600)
         )])
         #expect(
@@ -311,7 +311,7 @@ struct DeviceAlertProviderRejectionTests {
         // flight while the provider is going away.
         let alert = BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-            deviceName: "AirPods", component: .left, level: 0.1,
+            deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0
         )
         await store.requeueAlerts([alert])
@@ -345,7 +345,7 @@ struct DeviceAlertProviderRejectionTests {
 
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-            deviceName: "AirPods", component: .left, level: 0.1,
+            deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0
         )])
 

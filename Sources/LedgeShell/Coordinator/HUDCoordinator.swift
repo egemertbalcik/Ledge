@@ -244,7 +244,6 @@ public final class HUDCoordinator {
         switch kind {
         case .volume:
             guard let device = VolumeController.defaultOutputDevice() else { return }
-            VolumeController.noteSelfWrite()
             // One operation: scalar and mute together, in the order that makes
             // no sound, and the readout comes from what the hardware says
             // afterwards rather than from what was asked for.
@@ -252,7 +251,7 @@ public final class HUDCoordinator {
                   result.didSomething
             else { return }
             show(HUDReadout(
-                kind: .volume, level: result.level, isMuted: result.showsMuted,
+                kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
                 deviceName: VolumeController.defaultOutputName()
             ))
         case .brightness:
@@ -349,7 +348,9 @@ public final class HUDCoordinator {
 
     private func handleVolume(_ key: MediaKey) -> Bool {
         guard let device = VolumeController.defaultOutputDevice(),
-              let current = VolumeController.level(of: device)
+              // The *logical* level: stepping from a clamped zero's 0.062
+              // would skip the first step on the way back up.
+              let current = VolumeController.shownLevel(of: device)
         else { return false }
 
         if key == .mute {
@@ -364,11 +365,10 @@ public final class HUDCoordinator {
             // genuinely silent, and pressing mute down there has nothing left
             // to silence — but it still has something to say, and the result
             // reports that as a change even when no write went out.
-            VolumeController.noteSelfWrite()
-            let result = VolumeController.apply(muted: !VolumeController.userMuted, on: device)
+            let result = VolumeController.apply(muted: !VolumeController.userMuted(device), on: device)
             guard result.didSomething else { return false }
             show(HUDReadout(
-                kind: .volume, level: result.level, isMuted: result.showsMuted,
+                kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
                 deviceName: VolumeController.defaultOutputName()
             ))
             return true
@@ -384,7 +384,6 @@ public final class HUDCoordinator {
         // and a NaN target would be written into CoreAudio verbatim.
         let step = preferences.hudVolumeStep.isFinite ? preferences.hudVolumeStep : 0.0625
         let target = min(max(current + Double(key.delta) * step, 0), 1)
-        VolumeController.noteSelfWrite()
         guard let result = VolumeController.apply(level: target, on: device) else { return false }
 
         // Swallow (and show) whenever we could act — the level moved, or the
@@ -394,7 +393,7 @@ public final class HUDCoordinator {
         guard result.didSomething else { return false }
 
         show(HUDReadout(
-            kind: .volume, level: result.level, isMuted: result.showsMuted,
+            kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
             deviceName: VolumeController.defaultOutputName()
         ))
         return true

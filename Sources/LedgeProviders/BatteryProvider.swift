@@ -141,6 +141,11 @@ public final class BatteryProvider: ActivityProvider {
     public func start() -> AsyncStream<ProviderEvent> {
         AsyncStream { continuation in
             self.continuation = continuation
+            // This Mac's battery reports only when something changes, so its
+            // freshness is this provider's liveness rather than elapsed time —
+            // a charged battery on the charger says nothing for hours and is
+            // not stale for it. See `DeviceRecord.isFresh(now:sourceIsLive:)`.
+            self.observations?.sourceBecame(live: true, for: .thisMac)
             continuation.onTermination = { _ in
                 Task { @MainActor [weak self] in self?.stop() }
             }
@@ -164,6 +169,9 @@ public final class BatteryProvider: ActivityProvider {
     }
 
     public func stop() {
+        // Switched off or torn down: the stored record must stop claiming a
+        // live reading.
+        observations?.sourceBecame(live: false, for: .thisMac)
         source.stopWatching()
         continuation?.finish()
         continuation = nil

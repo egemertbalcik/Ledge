@@ -94,10 +94,39 @@ public final class LedgeCoordinator {
     /// Rule edits sit in the Settings model's own write mailbox, and the
     /// catalogue's writes are debounced — so quitting straight after changing
     /// a rule lost it. Both are asked to finish here, and the caller waits.
+    /// The shutdown barrier: four steps, in this order, each finished before
+    /// the next is trusted.
+    ///
+    /// Flushing while the producers were still running lost whatever landed
+    /// after the write — and an alert latch lost that way says the same thing
+    /// again after the next launch, which is the one thing the latch exists to
+    /// prevent. So:
+    ///
+    /// 1. stop the providers, so nothing new is observed;
+    /// 2. close the mailbox and wait for the delivery in flight;
+    /// 3. drain the Settings edits, which are the user's own;
+    /// 4. write the catalogue.
+    ///
+    /// Idempotent: a second quit request while the first is still running
+    /// waits for it rather than starting again.
     public func flushPendingWork() async {
-        await settingsModel.drainPendingWrites()
-        await deviceCatalogue.flush()
+        if let existing = quiesceWork {
+            await existing.value
+            return
+        }
+        let work = Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.activities.stop()
+            await self.deviceObservations.close()
+            await self.settingsModel.drainPendingWrites()
+            await self.deviceCatalogue.flush()
+        }
+        quiesceWork = work
+        await work.value
     }
+
+    /// The shutdown in progress, so a second request joins it.
+    private var quiesceWork: Task<Void, Never>?
 
     /// Builds the Devices pane's model once, handing it closures that reach
     /// the catalogue actor. The pane never touches the store directly, so no
@@ -1098,7 +1127,19 @@ public final class LedgeCoordinator {
             guard let self else { return }
             let choice = await NowPlayingSourceSelector.choose(
                 forceStub: DebugSwitches.isOn("LEDGE_STUB_MEDIA"),
-                mayQueryPlayers: { [weak self] in self?.permissions.mayAskAboutPlayers ?? false }
+                mayQueryPlayers: { [weak self] in self?.permissions.mayAskAboutPlayers ?? false },
+                // The same website rules the provider reads, so the source
+                // layer does not hold the notch for a page the provider will
+                // refuse to publish.
+                allowsMedia: { [weak self] snapshot in
+                    guard let self else { return false }
+                    return self.preferences.webMedia.allowsCard(
+                        ownerIsApp: BrowserCatalogue.shared.isOpenableApp(
+                            bundleID: snapshot.appBundleID
+                        ),
+                        origin: snapshot.origin
+                    )
+                }
             )
             Self.log.notice("now playing source: \(choice.reason, privacy: .public)")
             self.resolvedNowPlayingSource = choice.source
@@ -1513,8 +1554,8 @@ public final class LedgeCoordinator {
                 // hear something, and dragging it to the bottom is a request
                 // to hear nothing. Half the operation is a control that lies
                 // about what it did.
-                VolumeController.noteSelfWrite()
-                _ = VolumeController.apply(level: level, on: id)
+                guard let result = VolumeController.apply(level: level, on: id) else { return nil }
+                return LevelFeedback(level: result.shownLevel, isMuted: result.showsMuted)
             },
             openOwningApp: { [weak self] in self?.bringMediaAppForward() }
         )
@@ -1529,9 +1570,10 @@ public final class LedgeCoordinator {
             outputs: { [weak self] in self?.currentOutputs() ?? [] },
             displays: { [weak self] in self?.hud.brightnessDisplays() ?? [] },
             setOutputVolume: { id, level in
-                // The same one operation the HUD bar and the keys use.
-                VolumeController.noteSelfWrite()
-                _ = VolumeController.apply(level: level, on: id)
+                // The same one operation the HUD bar and the keys use, and the
+                // same answer handed back: the card draws what the device did.
+                guard let result = VolumeController.apply(level: level, on: id) else { return nil }
+                return LevelFeedback(level: result.shownLevel, isMuted: result.showsMuted)
             },
             setDisplayBrightness: { [weak self] id, level in
                 self?.hud.adjustBrightness(of: id, to: level)
@@ -1576,7 +1618,9 @@ public final class LedgeCoordinator {
     private func currentOutputs() -> [AudioOutputOption] {
         let current = VolumeController.defaultOutputDevice()
         return VolumeController.outputDevices().map {
-            let level = VolumeController.outputLevel(of: $0.id)
+            // Logical, not physical: an output turned all the way down shows
+            // an empty bar even on hardware that clamps zero.
+            let level = VolumeController.shownLevel(of: $0.id)
             return AudioOutputOption(
                 id: $0.id,
                 name: $0.name,
@@ -1843,15 +1887,17 @@ public final class LedgeCoordinator {
         }
     }
 
-    /// The media switches decide what the player that is *already* playing is
-    /// allowed to do, so they have to be answered now: a card switched off has
-    /// to go away while the same track keeps playing, and one switched on has
-    /// to appear without waiting for the next track. The provider re-decides
-    /// from the snapshot it already holds — no second read of the player.
+    /// The media settings decide what the player that is *already* playing is
+    /// allowed to do, so they have to be answered now: a website whose rule
+    /// was removed has to go away while the same track keeps playing, and one
+    /// just allowed has to appear without waiting for the next track. The
+    /// provider re-decides from the snapshot it already holds — no second read
+    /// of the player, and no relaunch.
     private func observeMediaPreferences() {
         withObservationTracking {
-            _ = preferences.showWebMediaCards
-            _ = preferences.showWebMediaInCompact
+            // The stored form, which is what changes when a rule is added,
+            // edited or removed.
+            _ = preferences.websiteRules
             _ = preferences.showVideoInCompact
         } onChange: { [weak self] in
             Task { @MainActor in
@@ -1963,8 +2009,6 @@ public final class LedgeCoordinator {
         focusBaseline = nil
         dormancy.clear()
         presentation.screensAreDark = false
-        // Nothing queued may arrive after this.
-        deviceObservations.invalidate()
         satelliteDismiss?.cancel()
         satelliteDismiss = nil
         parkedSatellite = nil
@@ -1976,6 +2020,11 @@ public final class LedgeCoordinator {
         hoverTracker = nil
         gestures.stop()
         activities.stop()
+        // *After* the providers, not before: emptying the queue while a
+        // provider could still submit left the new work behind it. This is the
+        // mid-session reset, which discards on purpose — the quit path goes
+        // through `flushPendingWork`, which delivers instead.
+        deviceObservations.invalidate()
         hud.stop()
         effects.cancelAll()
 

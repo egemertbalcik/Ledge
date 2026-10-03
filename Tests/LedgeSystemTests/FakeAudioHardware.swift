@@ -31,6 +31,10 @@ final class FakeAudioHardware: AudioHardware, @unchecked Sendable {
         var defaultDevice: AudioObjectID? = 100
         /// Devices that answer `hasProperty` for the volume properties.
         var devicesWithProperties: Set<AudioObjectID> = [100, 200]
+        /// Which property elements each device exposes, when a test says.
+        var elements: [AudioObjectID: Set<UInt32>] = [:]
+        /// What each device reports as its channel count.
+        var channels: [AudioObjectID: [UInt32]?] = [:]
         var levels: [AudioObjectID: Double] = [100: 0.5, 200: 0.7]
 
         var addCount = 0
@@ -153,7 +157,29 @@ final class FakeAudioHardware: AudioHardware, @unchecked Sendable {
 
     func hasProperty(_ object: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {
         noteThread()
-        return state.withLock { $0.devicesWithProperties.contains(object) }
+        return state.withLock { s in
+            guard s.devicesWithProperties.contains(object) else { return false }
+            // Which elements this device exposes, so a test can model a
+            // channel-only device or one with channels above the second.
+            if let elements = s.elements[object] {
+                return elements.contains(address.mElement)
+            }
+            return true
+        }
+    }
+
+    /// Limits a device to these property elements. Absent means "every
+    /// element", which is what every existing test assumes.
+    func setElements(_ elements: Set<UInt32>, for device: AudioObjectID) {
+        state.withLock { $0.elements[device] = elements }
+    }
+
+    func setChannels(_ channels: [UInt32]?, for device: AudioObjectID) {
+        state.withLock { $0.channels[device] = channels }
+    }
+
+    func outputChannels(_ device: AudioObjectID) -> [UInt32]? {
+        state.withLock { $0.channels[device] ?? [1, 2] }
     }
 
     func readout(for device: AudioObjectID) -> HUDReadout? {

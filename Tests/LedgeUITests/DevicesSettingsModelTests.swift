@@ -80,18 +80,44 @@ struct DevicesSettingsModelTests {
         #expect(model.rows.isEmpty)
     }
 
-    @Test("Pinned devices sort first, then the most recently seen")
+    /// Pinned first, then the devices that are here, then by name. Not by
+    /// when each was last heard from: the pane re-reads every five seconds,
+    /// and a timestamp that moves reorders rows under the pointer.
+    @Test("Pinned first, then present, then by name")
     func sortOrder() async throws {
         var catalogue = DeviceCatalogue()
         catalogue.devices = [
-            Self.record("Old", id: .bluetooth("aa"), lastSeen: -3600),
-            Self.record("Recent", id: .bluetooth("bb"), lastSeen: -60),
+            Self.record("Zebra", id: .bluetooth("aa"), lastSeen: -3600),
+            Self.record("Alpha", id: .bluetooth("bb"), lastSeen: -60),
+            Self.record("Gone", id: .bluetooth("dd"), presence: .disconnected, lastSeen: -30),
             Self.record("Pinned", id: .bluetooth("cc"), lastSeen: -7200, pinned: true),
         ]
         let model = Self.model(catalogue)
         model.load()
         try await settle(model)
-        #expect(model.rows.map(\.name) == ["Pinned", "Recent", "Old"])
+        #expect(model.rows.map(\.name) == ["Pinned", "Alpha", "Zebra", "Gone"])
+    }
+
+    /// The property that matters: the same devices, heard from again, produce
+    /// the same order. The old sort put whichever had just spoken at the top.
+    @Test("A refresh does not reorder the list")
+    func orderIsStableAcrossRefreshes() async throws {
+        var catalogue = DeviceCatalogue()
+        catalogue.devices = [
+            Self.record("Alpha", id: .bluetooth("aa"), lastSeen: -3600),
+            Self.record("Zebra", id: .bluetooth("bb"), lastSeen: -60),
+        ]
+        let model = Self.model(catalogue)
+        model.load()
+        try await settle(model)
+        let first = model.rows.map(\.name)
+
+        // Zebra reports again, as it would every few seconds.
+        catalogue.devices[1].lastSeen = Self.t0
+        let refreshed = Self.model(catalogue)
+        refreshed.load()
+        try await settle(refreshed)
+        #expect(refreshed.rows.map(\.name) == first, "the list reordered under the pointer")
     }
 
     @Test("Hidden devices do not appear")
@@ -396,6 +422,175 @@ struct DeviceRuleWriteTests {
         let granted = await answer
         #expect(!granted, "answering the prompt turned notifications back on after the user disabled them")
     }
+
+    /// The system prompt is modal to nothing: the threshold, the battery and
+    /// the enabled switch can all be edited while it is up. Writing back a
+    /// rule captured before the prompt threw every one of those away.
+    @Test("Edits made while the permission prompt is up survive the answer")
+    func editsSurviveThePermissionPrompt() async {
+        let id = DeviceIdentity.bluetooth("aa:bb")
+        let gate = PromptGate()
+        let rule = BatteryAlertRule(kind: .low, component: .left, threshold: 0.2, delivery: .notch)
+        var record = DeviceRecord(
+            id: id, name: "AirPods", presence: .connected,
+            readings: [BatteryReading(component: .left, level: 0.5, observedAt: paneT0)],
+            firstSeen: paneT0, lastSeen: paneT0
+        )
+        record.alerts = DeviceAlertConfiguration(rules: [rule], isCustomised: true)
+        let stored = record
+
+        let model = DevicesSettingsModel(
+            actions: .init(
+                load: { DeviceCatalogue(devices: [stored]) },
+                requestNotificationAuthorization: {
+                    await gate.wait()
+                    return true
+                }
+            ),
+            now: { paneT0 }
+        )
+        model.select(id)
+        // The selection is a read, not an assignment: wait for it rather than
+        // guessing how long it takes.
+        while model.selected == nil { await Task.yield() }
+
+        // The box is ticked: the prompt goes up and stays up.
+        let asking = Task { @MainActor in
+            guard await model.requestNotificationAuthorization() else { return }
+            model.enableNotificationDelivery(ruleID: rule.id, for: id)
+        }
+
+        // Meanwhile the user drags the threshold and picks another battery.
+        var edited = rule
+        edited.setThreshold(0.35)
+        edited.component = .right
+        model.setAlerts(
+            DeviceAlertConfiguration(rules: [edited], isCustomised: true), for: id
+        )
+
+        await gate.open()
+        await asking.value
+
+        let final = try! #require(model.selected?.alerts.rules.first)
+        #expect(final.threshold == 0.35, "the threshold edit was overwritten by the prompt's answer")
+        #expect(final.component == .right, "the battery choice was overwritten")
+        #expect(final.delivery.contains(.notification), "and permission was not applied")
+        #expect(final.delivery.contains(.notch), "nor the destination it already had")
+    }
+
+    /// The ownership race: an older waiter must never retire a newer request.
+    /// A and B join request 1; A resumes; request 2 starts; B resumes — and if
+    /// B clears the registration, a fourth caller starts a third system prompt
+    /// behind the second, which macOS silently denies.
+    @Test("An old waiter does not clear a newer permission request")
+    func oldWaiterDoesNotClearNewerRequest() async {
+        let firstGate = PromptGate()
+        let secondGate = PromptGate()
+        let asks = AskCount()
+        let model = DevicesSettingsModel(
+            actions: .init(
+                load: { DeviceCatalogue() },
+                requestNotificationAuthorization: {
+                    let count = await asks.increment()
+                    await (count == 1 ? firstGate : secondGate).wait()
+                    return true
+                }
+            ),
+            now: { paneT0 }
+        )
+
+        // A and B both join request 1.
+        async let a = model.requestNotificationAuthorization()
+        async let b = model.requestNotificationAuthorization()
+        await settleTasks()
+        await firstGate.open()
+        _ = await a                      // A resumes and retires request 1.
+        await settleTasks()
+
+        // Request 2 starts while B is still suspended.
+        async let second = model.requestNotificationAuthorization()
+        await settleTasks()
+        _ = await b                      // B resumes — it must clear nothing.
+        await settleTasks()
+        #expect(
+            model.hasAuthorizationRequestInFlight,
+            "an old waiter retired the newer request"
+        )
+
+        // A fourth caller joins request 2 rather than starting a third.
+        async let fourth = model.requestNotificationAuthorization()
+        await settleTasks()
+        await secondGate.open()
+        _ = await second
+        _ = await fourth
+        let total = await asks.value
+        #expect(total == 2, "the system was asked \(total) times for two requests")
+    }
+
+    /// Three places can ask for permission — two rules and the preview button.
+    /// Queued prompts are shown one at a time by the system and the rest are
+    /// silently denied, which reads as permission being refused.
+    @Test("Concurrent askers share one permission request")
+    func concurrentAskersShareOneRequest() async {
+        let gate = PromptGate()
+        let asks = AskCount()
+        let model = DevicesSettingsModel(
+            actions: .init(
+                load: { DeviceCatalogue() },
+                requestNotificationAuthorization: {
+                    await asks.increment()
+                    await gate.wait()
+                    return true
+                }
+            ),
+            now: { paneT0 }
+        )
+
+        async let first = model.requestNotificationAuthorization()
+        async let second = model.requestNotificationAuthorization()
+        async let third = model.requestNotificationAuthorization()
+        // Let all three reach the request before it answers.
+        for _ in 0..<20 { await Task.yield() }
+        await gate.open()
+
+        let answers = await [first, second, third]
+        #expect(answers.allSatisfy { $0 }, "a shared request answered some askers no")
+        let timesAsked = await asks.value
+        #expect(timesAsked == 1, "the system was asked \(timesAsked) times")
+    }
+}
+
+/// Holds an async answer open until the test lets it go.
+private actor PromptGate {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let resume = waiting
+        waiting.removeAll()
+        for continuation in resume { continuation.resume() }
+    }
+}
+
+private actor AskCount {
+    private(set) var value = 0
+
+    @discardableResult
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+}
+
+/// Lets anything already scheduled run, without spinning the runtime.
+private func settleTasks() async {
+    try? await Task.sleep(for: .milliseconds(20))
 }
 
 /// Selection, refresh and quit-time draining.

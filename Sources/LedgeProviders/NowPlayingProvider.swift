@@ -82,12 +82,39 @@ public final class NowPlayingProvider: ActivityProvider {
     /// The player and the track — the same thing across republishes, unlike
     /// the activity, which is rebuilt each time.
     private static func pauseKey(_ snapshot: NowPlayingSnapshot) -> String {
-        "\(snapshot.appBundleID)|\(snapshot.trackKey)"
+        // The *verified* website is part of the identity: a tab navigating
+        // elsewhere is a different thing, and must not inherit the pause clock
+        // of the page that was there before it.
+        //
+        // An unverified asset host is not, because it changes on its own: an
+        // adaptive stream moves between edge servers mid-track, and keying on
+        // that restarted the fifteen-minute pause clock each time.
+        "\(snapshot.appBundleID)|\(snapshot.verifiedWebsite?.value ?? "-")|\(snapshot.trackKey)"
     }
 
     /// The track the card last showed, so a skip made while paused reads as
     /// somebody at the keyboard rather than more idle time.
     private var lastTrackKey: String?
+
+    /// The last native snapshot we published while it was playing, and when.
+    ///
+    /// Held so a web page the user has hidden cannot evict the music. The
+    /// system has one now-playing slot; a browser taking it does not mean
+    /// Spotify stopped, and with web media hidden the page is not published —
+    /// so without this the card simply disappeared and the user was left with
+    /// nothing while the music played on.
+    private var heldNative: (snapshot: NowPlayingSnapshot, at: TimeInterval)?
+
+    /// How long a native player keeps its card while the system is naming a
+    /// page instead.
+    ///
+    /// Bounded on purpose: once the page holds the slot there is nothing left
+    /// to confirm the player with, so this is uncertainty rather than
+    /// knowledge. A minute is long enough to cover a browser handing its slot
+    /// around between tabs, and short enough that a player genuinely stopped
+    /// does not leave a card sitting there. A track whose length is known
+    /// expires earlier, when it would have ended.
+    static let nativeHoldWithoutSighting: TimeInterval = 60
 
     /// What the source last reported, whether or not it earned a card.
     ///
@@ -111,11 +138,11 @@ public final class NowPlayingProvider: ActivityProvider {
     /// without a system to ask.
     private let ownerIsApp: @MainActor (String) -> Bool
 
-    /// Whether a web page's media may have a card, the ears, or neither.
-    /// Read fresh on every poll for the same reason as `showsVideo`: turning
-    /// either switch takes effect on the next tick, with no relaunch and no
-    /// waiting for the track to change.
-    private let webMedia: () -> WebMediaPolicy
+    /// Which websites may appear, and how far. Read fresh on every poll for
+    /// the same reason as `showsVideo`: a rule added, changed or removed takes
+    /// effect on the next tick, with no relaunch and no waiting for the track
+    /// to change.
+    private let webMedia: () -> WebsitePolicy
 
     /// Whether the notch should carry this at all.
     ///
@@ -158,14 +185,16 @@ public final class NowPlayingProvider: ActivityProvider {
     static func showsInCompact(
         _ snapshot: NowPlayingSnapshot,
         showsVideo: Bool,
-        webMedia: WebMediaPolicy = .hidden,
+        webMedia: WebsitePolicy = .hidden,
         ownerIsApp: Bool? = nil
     ) -> Bool {
-        // A web page's media can have a card and still be kept out of the
+        // A website's media can have a card and still be kept out of the
         // ears: the compact view is the part that sits there uninvited, where
-        // a card only appears when someone goes looking for it.
+        // a card only appears when someone goes looking for it. Which of the
+        // two a site gets is the user's rule for it.
         let isApp = ownerIsApp ?? MediaOwner.isOpenableApp(bundleID: snapshot.appBundleID)
-        guard webMedia.allowsCompact(ownerIsApp: isApp) else { return false }
+        guard webMedia.allowsCompact(ownerIsApp: isApp, origin: snapshot.origin)
+        else { return false }
         // Said yes to browser media in the ears: that is the answer. The
         // length floor below still applies, and refuses nothing a card was
         // granted to — `shouldShow` holds video to the same two minutes.
@@ -188,7 +217,7 @@ public final class NowPlayingProvider: ActivityProvider {
         idleInterval: TimeInterval = 4.0,
         playbackWatcher: PlaybackChangeWatcher? = PlaybackChangeWatcher(),
         showsVideo: @escaping () -> Bool = { true },
-        webMedia: @escaping () -> WebMediaPolicy = { .hidden },
+        webMedia: @escaping () -> WebsitePolicy = { .hidden },
         ownerIsApp: @escaping @MainActor (String) -> Bool = {
             MediaOwner.isOpenableApp(bundleID: $0)
         },
@@ -297,6 +326,33 @@ public final class NowPlayingProvider: ActivityProvider {
         pauses.cardWentAway()
         lastTrackKey = nil
         lastSnapshot = nil
+        heldNative = nil
+    }
+
+    /// The native card to keep while a hidden page holds the system's slot,
+    /// with its position moved forward — or nil once holding it stops being
+    /// honest.
+    ///
+    /// Expires at whichever comes first: the track running out, or
+    /// `nativeHoldWithoutSighting` without any confirmation that the player is
+    /// still going. Both are documented uncertainty rather than a guess that
+    /// never ends.
+    private func heldNativeCard(at now: TimeInterval) -> NowPlayingSnapshot? {
+        guard let held = heldNative else { return nil }
+        let elapsed = max(0, now - held.at)
+        guard elapsed < Self.nativeHoldWithoutSighting else {
+            heldNative = nil
+            return nil
+        }
+        var moved = held.snapshot
+        moved.elapsed = held.snapshot.elapsed + elapsed
+        if moved.duration > 0, moved.elapsed >= moved.duration - 1 {
+            // The track would have finished. Nothing here can say what is
+            // playing now, so the card goes rather than lying.
+            heldNative = nil
+            return nil
+        }
+        return moved
     }
 
     private func poll() async {
@@ -317,16 +373,34 @@ public final class NowPlayingProvider: ActivityProvider {
         }
     }
 
-    private func publish(_ snapshot: NowPlayingSnapshot?) {
-        lastSnapshot = snapshot
+    private func publish(_ reported: NowPlayingSnapshot?) {
+        lastSnapshot = reported
         // A web page with cards switched off is refused here rather than
         // hidden in the view, so nothing downstream has to know the
         // difference: no activity means no card, no page dot, no selection,
         // nothing to hand to the ears and no island opening for it. Published
         // again, without a relaunch, the first time the switch is back on.
         let policy = webMedia()
+        var snapshot = reported
+        var refusedAsWebContent = false
+        /// Whether what we are about to publish came from the source this poll,
+        /// rather than being the native card we are holding on its behalf.
+        var isReported = true
+        if let reported, !policy.allowsCard(
+            ownerIsApp: ownerIsApp(reported.appBundleID), origin: reported.origin
+        ) {
+            // Hidden, so it gets no card — but it does not get to take the
+            // music's card away either. The player that was playing keeps it
+            // while that is still credible; see `heldNative`.
+            if let held = heldNativeCard(at: now()) {
+                snapshot = held
+                isReported = false
+            } else {
+                snapshot = nil
+                refusedAsWebContent = true
+            }
+        }
         let isApp = snapshot.map { ownerIsApp($0.appBundleID) } ?? false
-        let refusedAsWebContent = snapshot.map { _ in !policy.allowsCard(ownerIsApp: isApp) } ?? false
         if DebugSwitches.tracing("media"), snapshot == nil {
             Self.log.notice("media: source reported nothing")
         }
@@ -367,7 +441,7 @@ public final class NowPlayingProvider: ActivityProvider {
             // for.
             let startedPausing = pauses.pausedSince(
                 key,
-                continuing: lastTrackKey == snapshot.trackKey,
+                continuing: lastTrackKey == key,
                 now: now()
             )
             if now() - startedPausing >= Self.pausedCardLifetime {
@@ -388,6 +462,18 @@ public final class NowPlayingProvider: ActivityProvider {
             Self.log.notice("media: \(snapshot.appBundleID, privacy: .public) playing=\(snapshot.isPlaying, privacy: .public) elapsed=\(snapshot.elapsed, format: .fixed(precision: 1), privacy: .public) title=\(snapshot.title, privacy: .public)")
         }
 
+        if isApp, isReported {
+            // The source is naming a player: this is knowledge, and it
+            // replaces whatever was being held.
+            //
+            // Only a *reported* snapshot may do this. Storing the substituted
+            // one made every hidden-page poll look like a fresh sighting, so
+            // the sixty seconds restarted a second at a time and a live stream
+            // could have been held for ever — the one thing the bound exists
+            // to prevent.
+            heldNative = snapshot.isPlaying ? (snapshot, now()) : nil
+        }
+
         let id = ActivityID(kind: .nowPlaying, source: snapshot.appBundleID)
 
         // A different player took over — retract the old card rather than
@@ -395,14 +481,14 @@ public final class NowPlayingProvider: ActivityProvider {
         if let publishedID, publishedID != id {
             continuation?.yield(.retract(publishedID))
         }
-        if lastTrackKey != snapshot.trackKey {
+        if lastTrackKey != Self.pauseKey(snapshot) {
             // Skipping while paused is somebody at the keyboard — a *new*
             // track, freshly paused, which starts its own clock. But the card
             // coming back after something else held the slot is the same
             // track as before, and `lastTrackKey` was cleared when it went;
             // dating that as a new pause is what let an old track live for
             // ever, one interruption at a time.
-            lastTrackKey = snapshot.trackKey
+            lastTrackKey = Self.pauseKey(snapshot)
         }
         publishedID = id
 

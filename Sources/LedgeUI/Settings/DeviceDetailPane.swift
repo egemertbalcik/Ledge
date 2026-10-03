@@ -40,7 +40,9 @@ struct DeviceDetailPane: View {
     /// trusting that flag made the pane present a two-day-old level as the
     /// current one in the primary style with no "Last known" beside it.
     private func isCurrent(_ reading: BatteryReading) -> Bool {
-        record.isCurrent(reading, now: Date())
+        record.isCurrent(
+            reading, now: Date(), sourceIsLive: model.sourceIsLive(record.id)
+        )
     }
 
     private var header: some View {
@@ -124,13 +126,23 @@ struct DeviceDetailPane: View {
 
             let samples = BatteryHistory.samples(model.history, in: window, now: Date())
             if BatteryHistory.hasEnoughHistory(model.history, in: window, now: Date()) {
-                Chart(samples, id: \.self) { sample in
-                    LineMark(
-                        x: .value("When", sample.at),
-                        y: .value("Level", sample.level * 100)
-                    )
-                    .foregroundStyle(by: .value("Battery", sample.component.label))
-                    .interpolationMethod(.monotone)
+                // A line per unbroken run rather than one per component: a
+                // disconnection is then a gap on the chart instead of a
+                // confident diagonal through the hours the device was away.
+                // The colour still follows the component, so left and right
+                // keep their own line however many runs each has.
+                Chart {
+                    ForEach(BatteryHistory.segments(samples)) { segment in
+                        ForEach(segment.samples, id: \.self) { sample in
+                            LineMark(
+                                x: .value("When", sample.at),
+                                y: .value("Level", sample.level * 100),
+                                series: .value("Run", segment.id)
+                            )
+                            .foregroundStyle(by: .value("Battery", segment.component.label))
+                            .interpolationMethod(.monotone)
+                        }
+                    }
                 }
                 .chartYScale(domain: 0...100)
                 .chartYAxis {

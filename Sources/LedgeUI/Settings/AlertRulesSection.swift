@@ -61,7 +61,15 @@ struct AlertRulesSection: View {
                             model.preview(rule, deviceName: record.name)
                         }
                     },
-                    requestAuthorization: { await model.requestNotificationAuthorization() },
+                    enableNotificationDelivery: {
+                        // By id, applied to the configuration as it is when
+                        // the answer arrives: the prompt is modal to nothing,
+                        // and edits made while it was up must survive.
+                        Task {
+                            guard await model.requestNotificationAuthorization() else { return }
+                            model.enableNotificationDelivery(ruleID: rule.id, for: record.id)
+                        }
+                    },
                     disableNotifications: { model.notificationDeliveryWasDisabled() }
                 )
                 Divider()
@@ -151,23 +159,37 @@ private struct RuleRow: View {
     let onChange: (BatteryAlertRule) -> Void
     let onDelete: () -> Void
     let onPreview: () -> Void
-    let requestAuthorization: () async -> Bool
+    let enableNotificationDelivery: () -> Void
     let disableNotifications: () -> Void
+
+    /// Which of this row's controls are usable. One decision, in `LedgeCore`,
+    /// so the view and its test cannot disagree about what stays repairable.
+    private var controls: RuleControls {
+        RuleControls(rule: rule, componentReportsCharging: canCharge)
+    }
+
+    private var canFire: Bool { controls.canFire }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Toggle(isOn: Binding(
-                    get: { rule.isEnabled },
+                    get: { rule.isEnabled && canFire },
                     set: { var copy = rule; copy.isEnabled = $0; onChange(copy) }
                 )) {
                     Text(rule.kind == .low ? "Low battery" : "Charged")
                 }
                 .toggleStyle(.switch)
+                // A rule that cannot fire cannot be switched on: the control
+                // would claim an alert the hardware can never give. Delete and
+                // the battery picker stay live, which is how the row is
+                // repaired rather than abandoned.
+                .disabled(!controls.canEnable)
 
                 Spacer()
 
                 Button("Preview", action: onPreview)
+                    .disabled(!controls.canPreview)
                     .help("Shows what this looks like, using made-up numbers. It does not change when the real alert fires.")
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "minus.circle")
@@ -186,6 +208,7 @@ private struct RuleRow: View {
                     in: rule.kind == .low ? 0.05...0.5 : 0.5...1.0
                 )
                 .frame(maxWidth: 200)
+                .disabled(!controls.canEditThreshold)
                 .accessibilityLabel("\(rule.kind == .low ? "Low" : "Charged") threshold")
                 Text("\(Int((rule.threshold * 100).rounded()))%")
                     .monospacedDigit()
@@ -210,16 +233,21 @@ private struct RuleRow: View {
                 Toggle("Notch", isOn: binding(for: .notch)).toggleStyle(.checkbox)
                 Toggle("Notification", isOn: notificationBinding).toggleStyle(.checkbox)
             }
+            .disabled(!controls.canChooseDelivery)
 
-            if rule.kind == .charged, !canCharge {
-                Text("This battery does not report a charging state, so this alert cannot fire.")
+            if !canFire {
+                Text("This battery does not report a charging state, so this alert cannot fire. Choose another battery, or remove the alert.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if rule.delivery.isEmpty {
+                Text("With neither of these ticked the alert is off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
-        .disabled(rule.kind == .charged && !canCharge)
     }
 
     private func binding(for option: AlertDelivery) -> Binding<Bool> {
@@ -239,18 +267,13 @@ private struct RuleRow: View {
         Binding(
             get: { rule.delivery.contains(.notification) },
             set: { on in
-                var copy = rule
                 if on {
-                    Task {
-                        let granted = await requestAuthorization()
-                        var updated = copy
-                        if granted { updated.delivery.insert(.notification) }
-                        onChange(updated)
-                    }
+                    enableNotificationDelivery()
                 } else {
                     // Disowns any request still on screen, so answering it
                     // later cannot switch this back on.
                     disableNotifications()
+                    var copy = rule
                     copy.delivery.remove(.notification)
                     onChange(copy)
                 }

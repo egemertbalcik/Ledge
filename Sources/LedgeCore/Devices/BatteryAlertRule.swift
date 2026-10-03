@@ -37,6 +37,15 @@ public struct BatteryAlertRule: Hashable, Sendable, Codable, Identifiable {
     /// able to arm a rule at 4000%.
     public private(set) var threshold: Double
 
+    /// Whether this rule has anywhere to deliver to.
+    ///
+    /// Both destinations unticked is a reachable state in Settings, and it
+    /// means the rule is off — not that it fires into nothing. Spending the
+    /// latch on an alert nobody can see is worse than not firing: the alert
+    /// would then be suppressed as "already said" when a destination is
+    /// switched back on.
+    public var canDeliver: Bool { !delivery.isEmpty }
+
     public init(
         id: UUID = UUID(),
         kind: AlertKind,
@@ -119,7 +128,12 @@ public struct DeviceAlertConfiguration: Hashable, Sendable, Codable {
         guard isCustomised else {
             return id.ownsItsOwnAlerting ? [] : [BatteryAlertRule.defaultLow()]
         }
-        return rules.filter(\.isEnabled)
+        // A rule with nowhere to deliver is a rule that is off. The interface
+        // lets both destinations be unticked, and the engine used to fire
+        // anyway: nothing appeared, and the fired latch was spent, so turning
+        // a destination back on left the user waiting for an alert that had
+        // already silently happened.
+        return rules.filter { $0.isEnabled && $0.canDeliver }
     }
 
     /// Charged alerts are never on unless the user turned one on.

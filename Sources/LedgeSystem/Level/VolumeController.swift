@@ -46,24 +46,39 @@ public final class VolumeController {
     /// also what catches a device clamping the value we asked for.
     private nonisolated static let selfWriteQuiet: TimeInterval = 0.15
 
-    /// When the last write of our own settles.
+    /// When each output's last write of our own settles.
+    ///
+    /// Per device. One window for the whole Mac meant a write to an AirPlay
+    /// speaker suppressed a simultaneous change on the built-in output — the
+    /// echo of one device's ramp silenced the news from another's.
     ///
     /// Written from the main actor and read from the watch's own queue, so it
     /// is behind a lock rather than an isolation domain.
-    private nonisolated static let selfWrite = OSAllocatedUnfairLock<TimeInterval>(initialState: 0)
+    private nonisolated static let selfWrites =
+        OSAllocatedUnfairLock<[AudioObjectID: TimeInterval]>(initialState: [:])
 
-    /// Called by the paths that set the level themselves.
+    /// Called by the paths that set the level themselves, *after* the write,
+    /// so an operation the hardware refused opens no window at all: there is
+    /// no ramp to ignore, and ignoring the echo would hide the fact that
+    /// nothing happened.
     public nonisolated static func noteSelfWrite(
+        on device: AudioObjectID,
         now: TimeInterval = Date().timeIntervalSinceReferenceDate
     ) {
-        selfWrite.withLock { $0 = now + selfWriteQuiet }
+        selfWrites.withLock { writes in
+            writes[device] = now + selfWriteQuiet
+            // Bounded: windows are 150ms, so anything in the past is finished
+            // and the map has no reason to remember it.
+            writes = writes.filter { $0.value > now }
+        }
     }
 
-    /// How long the current self-write still has to settle, or zero.
+    /// How long this output's current self-write still has to settle, or zero.
     nonisolated static func selfWriteRemaining(
+        on device: AudioObjectID,
         now: TimeInterval = Date().timeIntervalSinceReferenceDate
     ) -> TimeInterval {
-        max(0, selfWrite.withLock { $0 } - now)
+        max(0, (selfWrites.withLock { $0[device] } ?? 0) - now)
     }
 
     public init(hardware: (any AudioHardware)? = nil) {
@@ -126,18 +141,14 @@ public final class VolumeController {
         return Double(value)
     }
 
+    /// Whether the output is muted, by the same element ladder a write uses.
+    ///
+    /// The master answers for the whole device when it has one; otherwise
+    /// every readable channel must say so. A channel-only device used to read
+    /// as unmuted however thoroughly it had been muted, which made the mute
+    /// key one-way.
     public nonisolated static func isMuted(_ device: AudioObjectID) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectHasProperty(device, &address) else { return false }
-
-        var muted: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(device, &address, 0, nil, &size, &muted)
-        return status == noErr && muted != 0
+        SystemVolumeHardware().isOutputMuted(device)
     }
 
     public func readout() -> HUDReadout? {
@@ -146,7 +157,7 @@ public final class VolumeController {
         else { return nil }
         return HUDReadout(
             kind: .volume,
-            level: level,
+            level: Self.shownLevel(device, raw: level),
             isMuted: Self.showsMuted(device, level: level),
             deviceName: Self.deviceName(device)
         )
@@ -159,31 +170,50 @@ public final class VolumeController {
     /// silence, and the order the two go out in is audible.
     public nonisolated static let writer = VolumeWriter(hardware: SystemVolumeHardware())
 
-    /// Whether the user has asked for mute.
+    /// Why each output is muted — the user, silence at zero, or both.
     ///
     /// Held here because CoreAudio cannot answer it: the device has one mute
-    /// property, and Ledge sets it for two different reasons — the mute key,
-    /// and silence at a level of zero, where the scalar alone leaves the
-    /// output playing at −63.5 dB. Only the first of those is red on screen.
-    /// See `VolumeMuteState`.
-    ///
-    /// A latch rather than a stored preference: it describes what is happening
-    /// now, and a Mac that starts up muted by the system is not a Mac whose
-    /// user just pressed mute.
-    private nonisolated static let userMutedLatch = OSAllocatedUnfairLock(initialState: false)
+    /// property and Ledge sets it for two reasons, which compose. Per output,
+    /// because one latch for the whole Mac meant turning an AirPlay speaker
+    /// down to nothing changed what the built-in speakers claimed about
+    /// themselves. See `MuteReasons`, which holds every rule.
+    private nonisolated static let intents = OSAllocatedUnfairLock(initialState: MuteIntentLedger())
 
-    public nonisolated static var userMuted: Bool {
-        userMutedLatch.withLock { $0 }
+    /// Why this output is silent, as far as Ledge is concerned.
+    public nonisolated static func muteReasons(_ device: AudioObjectID) -> MuteReasons {
+        intents.withLock { $0.reasons(for: device) }
     }
 
-    /// Adopts an outside mute as the user's own.
+    /// Whether the user's own mute is in force for this output.
+    public nonisolated static func userMuted(_ device: AudioObjectID) -> Bool {
+        muteReasons(device).userMuted
+    }
+
+    /// Adopts a mute that arrived from outside Ledge — Control Centre, a
+    /// headset button, another app. Ignored while one of *this output's* own
+    /// writes is still settling, since the echo of that says nothing about
+    /// intent.
+    public nonisolated static func noteObservedMute(
+        _ muted: Bool,
+        level: Double,
+        device: AudioObjectID
+    ) {
+        let settling = selfWriteRemaining(on: device) > 0
+        intents.withLock {
+            $0.observed(muted: muted, level: level, for: device, isSelfWrite: settling)
+        }
+    }
+
+    /// Forgets outputs that have gone away — and keeps everything when the
+    /// system could not say what exists.
     ///
-    /// Control Centre, a headset button, another app: any of those can mute
-    /// the output while Ledge is only watching, and above a level of zero a
-    /// muted output means somebody muted it. Below zero it means nothing —
-    /// the silence could as easily be ours.
-    public nonisolated static func noteObservedMute(_ muted: Bool, level: Double) {
-        userMutedLatch.withLock { $0 = muted && level > 0 }
+    /// Reconciled against every output CoreAudio knows about, not the picker's
+    /// list: that one hides virtual and aggregate devices, and a conference
+    /// app's output being current would have had its reasons forgotten by a
+    /// refresh of the route list. A *failed* enumeration prunes nothing — see
+    /// `DeviceInventory`.
+    nonisolated static func reconcileIntents(with inventory: DeviceInventory) {
+        intents.withLock { $0.reconcile(with: inventory) }
     }
 
     /// Applies a level, keeping the device's mute consistent with it, and
@@ -193,9 +223,12 @@ public final class VolumeController {
         level: Double,
         on device: AudioObjectID
     ) -> VolumeWriteResult? {
-        let wanted = userMuted && level <= 0
-        let result = writer.apply(level: level, to: device, userMuted: userMuted)
-        userMutedLatch.withLock { $0 = wanted }
+        let before = muteReasons(device)
+        guard let result = writer.apply(level: level, to: device, reasons: before)
+        else { return nil }
+        intents.withLock { $0.set(result.reasons, for: device) }
+        // Only a write that was actually taken has an echo worth ignoring.
+        if result.scalarAccepted || result.muteAccepted { noteSelfWrite(on: device) }
         return result
     }
 
@@ -204,15 +237,60 @@ public final class VolumeController {
         muted: Bool,
         on device: AudioObjectID
     ) -> VolumeWriteResult {
-        let was = userMuted
-        let result = writer.apply(userMuted: muted, to: device, wasUserMuted: was)
-        userMutedLatch.withLock { $0 = muted }
+        let result = writer.apply(
+            userMuted: muted, to: device, reasons: muteReasons(device)
+        )
+        intents.withLock { $0.set(result.reasons, for: device) }
+        if result.muteAccepted { noteSelfWrite(on: device) }
         return result
+    }
+
+    /// The level to show for this output, and to step from.
+    ///
+    /// Zero whenever the output is silent because zero was asked for: a device
+    /// that clamps a zero scalar to its lowest step reads back an audible
+    /// number, and showing that number meant a bar at 6% on an output that had
+    /// been turned all the way down — and a first volume-up that stepped from
+    /// 0.062 instead of from zero.
+    public nonisolated static func shownLevel(_ device: AudioObjectID, raw: Double) -> Double {
+        muteReasons(device).zeroSilence ? 0 : raw
+    }
+
+    /// The level to show for this output, read fresh.
+    public nonisolated static func shownLevel(of device: AudioObjectID) -> Double? {
+        guard let raw = level(of: device) else { return nil }
+        return shownLevel(device, raw: raw)
     }
 
     /// Whether a readout for this device should show the muted state.
     public nonisolated static func showsMuted(_ device: AudioObjectID, level: Double) -> Bool {
-        isMuted(device) && VolumeMuteState(userMuted: userMuted, level: level).showsMuted
+        intents.withLock { $0.showsMuted(for: device) } && isMuted(device)
+    }
+
+    /// Every audio object the system reports, or nil when the enumeration
+    /// failed.
+    ///
+    /// Nil and empty are different answers. A Mac with no audio devices is a
+    /// fact; a HAL that would not answer is not, and treating the two alike
+    /// threw away the mute reasons of every live output on a transient
+    /// failure — so an output turned all the way down came back showing its
+    /// clamped minimum, with the next step starting from there.
+    nonisolated static func allDeviceIDs() -> [AudioObjectID]? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size
+        ) == noErr else { return nil }
+        guard size > 0 else { return [] }
+        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids
+        ) == noErr else { return nil }
+        return ids
     }
 
     /// One selectable audio output.
@@ -223,25 +301,37 @@ public final class VolumeController {
 
     /// Every device capable of output, for the routing picker.
     public nonisolated static func outputDevices() -> [OutputDevice] {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var size: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size
-        ) == noErr, size > 0 else { return [] }
+        // One enumeration, two answers: the picker's filtered list, and the
+        // complete set of output-capable ids the mute ledger is kept against.
+        // Asking twice was waste and a second chance to fail.
+        guard let ids = allDeviceIDs() else {
+            // The system would not say what exists. The picker shows nothing
+            // — and, the point, nothing established is forgotten: a transient
+            // failure used to drop every mute reason, so an output turned all
+            // the way down came back at its clamped minimum.
+            reconcileIntents(with: .unavailable)
+            return []
+        }
 
-        var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids
-        ) == noErr else { return [] }
+        // Classified exactly once per device, and both decisions read that one
+        // classification. Querying twice let the picker and the retention set
+        // disagree about the same device on two different reads.
+        var capabilities: [AudioObjectID: OutputCapability] = [:]
+        for id in ids { capabilities[id] = outputCapability(id) }
 
-        return ids.compactMap { id in
-            guard hasOutputStreams(id), isRealHardware(id), let name = deviceName(id) else { return nil }
+        let outputs = ids.compactMap { id -> OutputDevice? in
+            guard capabilities[id] == .output,
+                  isRealHardware(id),
+                  let name = deviceName(id)
+            else { return nil }
             return OutputDevice(id: id, name: name)
         }
+        // Everything except a confirmed non-output: the picker hides virtual
+        // and aggregate devices, and a conference app's output being the
+        // current route would have had its reasons forgotten by a refresh of
+        // the route list — and a device whose query failed proves nothing.
+        reconcileIntents(with: .retaining(capabilities))
+        return outputs
     }
 
     /// Whether the device is an actual audio route rather than a software one.
@@ -298,14 +388,21 @@ public final class VolumeController {
         ) == noErr
     }
 
-    private nonisolated static func hasOutputStreams(_ device: AudioObjectID) -> Bool {
+    /// Whether this device can play sound — or whether the question could not
+    /// be answered, which is a third answer and not a "no".
+    ///
+    /// A failed property query used to read as "no outputs", so one transient
+    /// failure during a route-list refresh erased that device's mute reasons.
+    nonisolated static func outputCapability(_ device: AudioObjectID) -> OutputCapability {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        return AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr && size > 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr
+        else { return .unknown }
+        return size > 0 ? .output : .notOutput
     }
 
     nonisolated static func deviceName(_ device: AudioObjectID) -> String? {

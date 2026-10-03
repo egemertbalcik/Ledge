@@ -425,13 +425,14 @@ struct DeviceCatalogueStoreHardeningTests {
         _ level: Double,
         id: DeviceIdentity = .bluetooth("aa:bb"),
         presence: DevicePresence = .connected,
-        at seconds: TimeInterval = 0
+        at seconds: TimeInterval = 0,
+        cause: ObservationCause = .connectionEvent
     ) -> DeviceObservation {
         let when = t0.addingTimeInterval(seconds)
         return DeviceObservation(
             deviceID: id, name: "AirPods",
             readings: [BatteryReading(component: .left, level: level, observedAt: when)],
-            presence: presence, observedAt: when
+            presence: presence, observedAt: when, cause: cause
         )
     }
 
@@ -524,6 +525,58 @@ struct DeviceCatalogueStoreHardeningTests {
         )
     }
 
+    /// Launching with low AirPods already in your ears is not news: the list
+    /// of what was already connected is an inventory, and an inventory is a
+    /// baseline. Alerting on it meant the same alert every single launch.
+    @Test("A low device already connected at launch stays quiet")
+    func startupInventoryIsQuiet() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(
+            0.12, presence: .connected, at: 0, cause: .startupInventory
+        ))
+        #expect(
+            await store.queuedAlertCount() == 0,
+            "the startup inventory alerted as though the device had just been attached"
+        )
+    }
+
+    /// And the baseline it established is a real one: the device reconnecting
+    /// later, for real, still alerts.
+    @Test("A real reconnection after a quiet baseline still alerts")
+    func reconnectionAfterBaselineAlerts() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(
+            0.12, presence: .connected, at: 0, cause: .startupInventory
+        ))
+        await store.record(Self.observation(
+            0.12, presence: .disconnected, at: 60, cause: .connectionEvent
+        ))
+        await store.record(Self.observation(
+            0.12, presence: .connected, at: 120, cause: .connectionEvent
+        ))
+        #expect(await store.queuedAlertCount() == 1)
+    }
+
+    @Test("The ten-minute refresh of a low device stays quiet")
+    func periodicRefreshIsQuiet() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(
+            0.12, presence: .connected, at: 0, cause: .periodicRefresh
+        ))
+        #expect(await store.queuedAlertCount() == 0)
+    }
+
+    /// A case opening nearby says the earbuds are in range, not that they were
+    /// put in. Advertisements establish levels, never attachment.
+    @Test("A proximity advertisement never reads as an attachment")
+    func advertisementIsQuiet() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(
+            0.12, presence: .connected, at: 0, cause: .advertisement
+        ))
+        #expect(await store.queuedAlertCount() == 0)
+    }
+
     @Test("A passive sighting of a low device stays quiet")
     func passiveSightingIsQuiet() async {
         let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
@@ -569,7 +622,7 @@ struct DeviceCatalogueStoreHardeningTests {
         await store.unsubscribeFromAlerts(token)
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:bb"),
-            deviceName: "AirPods", component: .left, level: 0.15,
+            deviceName: "AirPods", component: .left, level: 0.15, threshold: 0.15,
             delivery: .notch, firedAt: Self.t0
         )])
         #expect(
@@ -974,7 +1027,7 @@ struct DeviceCatalogueRoundThreeTests {
         for address in ["aa:aa", "bb:bb"] {
             await store.requeueAlerts([BatteryAlert(
                 ruleID: shared, kind: .low, deviceID: .bluetooth(address),
-                deviceName: "Keyboard \(address)", component: .main, level: 0.1,
+                deviceName: "Keyboard \(address)", component: .main, level: 0.1, threshold: 0.1,
                 delivery: .notch, firedAt: Self.t0
             )])
         }
@@ -989,7 +1042,7 @@ struct DeviceCatalogueRoundThreeTests {
         for level in [0.19, 0.15, 0.10] {
             await store.requeueAlerts([BatteryAlert(
                 ruleID: rule, kind: .low, deviceID: .bluetooth("aa:aa"),
-                deviceName: "Keyboard", component: .main, level: level,
+                deviceName: "Keyboard", component: .main, level: level, threshold: level,
                 delivery: .notch, firedAt: Self.t0
             )])
         }
@@ -1003,7 +1056,7 @@ struct DeviceCatalogueRoundThreeTests {
         for kind in [AlertKind.low, .charged] {
             await store.requeueAlerts([BatteryAlert(
                 ruleID: rule, kind: kind, deviceID: .bluetooth("aa:aa"),
-                deviceName: "Mouse", component: .main, level: 0.1,
+                deviceName: "Mouse", component: .main, level: 0.1, threshold: 0.1,
                 delivery: .notch, firedAt: Self.t0
             )])
         }
@@ -1019,7 +1072,7 @@ struct DeviceCatalogueRoundThreeTests {
 
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:aa"),
-            deviceName: "Mouse", component: .main, level: 0.1,
+            deviceName: "Mouse", component: .main, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: Self.t0
         )])
         #expect(await store.queuedAlertCount() == 1)
@@ -1043,7 +1096,7 @@ struct DeviceCatalogueRoundThreeTests {
 
         let alert = BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:aa"),
-            deviceName: "Mouse", component: .main, level: 0.1,
+            deviceName: "Mouse", component: .main, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: Self.t0
         )
         // The still-registered consumer rejects it.
@@ -1062,7 +1115,7 @@ struct DeviceCatalogueRoundThreeTests {
 
         await store.requeueAlerts([BatteryAlert(
             ruleID: UUID(), kind: .low, deviceID: .bluetooth("aa:aa"),
-            deviceName: "Mouse", component: .main, level: 0.1,
+            deviceName: "Mouse", component: .main, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: Self.t0
         )], from: old)
 
@@ -1116,6 +1169,282 @@ struct DeviceCatalogueRoundThreeTests {
         #expect(
             !record.isCurrent(record.readings[0], now: now),
             "the reading's own age was ignored in favour of the record's"
+        )
+    }
+}
+
+/// History has to be able to say "the device was not here". A disconnect
+/// carries no levels, so it used to add nothing at all — and the chart then
+/// drew a straight line through the hours the AirPods sat in their case.
+@Suite("History across disconnections")
+struct HistoryBoundaryTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+    private static let id = DeviceIdentity.bluetooth("aa:bb")
+
+    private static func tempURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-history-\(UUID().uuidString).json")
+    }
+
+    private static func reading(
+        _ level: Double,
+        at seconds: TimeInterval
+    ) -> DeviceObservation {
+        DeviceObservation(
+            deviceID: id, name: "AirPods",
+            readings: [BatteryReading(
+                component: .left, level: level, observedAt: t0.addingTimeInterval(seconds)
+            )],
+            presence: .connected, observedAt: t0.addingTimeInterval(seconds),
+            cause: .connectionEvent
+        )
+    }
+
+    /// What a disconnect notification produces: no levels at all, because the
+    /// device is gone by the time it arrives.
+    private static func gone(at seconds: TimeInterval) -> DeviceObservation {
+        DeviceObservation(
+            deviceID: id, name: "AirPods", readings: [],
+            presence: .disconnected, observedAt: t0.addingTimeInterval(seconds),
+            cause: .connectionEvent
+        )
+    }
+
+    @Test("A disconnection is written down")
+    func disconnectionIsRecorded() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.reading(0.9, at: 0))
+        await store.record(Self.gone(at: 60))
+
+        let samples = await store.history(for: Self.id)
+        #expect(samples.count == 2, "the departure left no mark")
+        #expect(samples.last?.isConnected == false)
+        #expect(samples.last?.level == 0.9, "carrying the last level known")
+    }
+
+    @Test("And the chart breaks across it")
+    func chartBreaksAcrossIt() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.reading(0.9, at: 0))
+        await store.record(Self.gone(at: 60))
+        await store.record(Self.reading(0.4, at: 7 * 3600))
+
+        let samples = await store.history(for: Self.id)
+        #expect(BatteryHistory.segments(samples).count == 2)
+    }
+
+    @Test("Two departures in a row leave one boundary")
+    func repeatedDisconnectionsAreOneBoundary() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.reading(0.9, at: 0))
+        await store.record(Self.gone(at: 60))
+        await store.record(Self.gone(at: 120))
+        let samples = await store.history(for: Self.id)
+        #expect(samples.count == 2)
+    }
+
+    /// A proximity advertisement says the device is in range. It says nothing
+    /// about attachment, and recording that as a disconnection drew a gap
+    /// through a device that never left.
+    @Test("An unknown presence is not a disconnection")
+    func unknownPresenceIsNotAGap() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.reading(0.9, at: 0))
+        await store.record(DeviceObservation(
+            deviceID: Self.id, name: "AirPods",
+            readings: [BatteryReading(
+                component: .left, level: 0.6, observedAt: Self.t0.addingTimeInterval(120)
+            )],
+            presence: .unknown, observedAt: Self.t0.addingTimeInterval(120),
+            cause: .advertisement
+        ))
+        let samples = await store.history(for: Self.id)
+        let allConnected = samples.allSatisfy { $0.isConnected }
+        #expect(allConnected, "an advertisement was read as a departure")
+        #expect(BatteryHistory.segments(samples).count == 1)
+    }
+}
+
+/// Housekeeping that would otherwise accumulate for the life of a record.
+@Suite("Catalogue maintenance")
+struct CatalogueMaintenanceTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+    private static let id = DeviceIdentity.bluetooth("aa:bb")
+
+    private static func tempURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-maint-\(UUID().uuidString).json")
+    }
+
+    private static func observation(
+        _ level: Double,
+        at seconds: TimeInterval
+    ) -> DeviceObservation {
+        DeviceObservation(
+            deviceID: id, name: "AirPods",
+            readings: [BatteryReading(
+                component: .left, level: level, observedAt: t0.addingTimeInterval(seconds)
+            )],
+            presence: .connected, observedAt: t0.addingTimeInterval(seconds),
+            cause: .connectionEvent
+        )
+    }
+
+    /// A deleted rule's latch has nothing left to suppress, and used to sit in
+    /// the persisted state for ever.
+    @Test("Deleting a rule drops its latch")
+    func deletedRuleLatchIsPruned() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        let rule = BatteryAlertRule(kind: .low, component: .left, threshold: 0.2)
+        // The record has to exist before its rules can be set — rules belong
+        // to a device, not to a promise of one.
+        await store.record(Self.observation(0.30, at: 0))
+        await store.setAlerts(
+            DeviceAlertConfiguration(rules: [rule], isCustomised: true), for: Self.id
+        )
+        await store.record(Self.observation(0.15, at: 60))
+
+        let fired = await store.snapshot().devices.first?.alertState[.left]?.firedRuleIDs
+        #expect(fired?.contains(rule.id) == true, "the rule never fired, so there is nothing to prune")
+
+        // The user removes the rule.
+        await store.setAlerts(
+            DeviceAlertConfiguration(rules: [], isCustomised: true), for: Self.id
+        )
+        let after = await store.snapshot().devices.first?.alertState[.left]?.firedRuleIDs
+        #expect(after?.contains(rule.id) == false, "a deleted rule's latch outlived it")
+    }
+
+    /// The default rule is not in any rule list and still alerts, so its latch
+    /// must survive pruning or the default alert would repeat.
+    @Test("The default rule's latch is kept")
+    func defaultLatchSurvives() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(0.30, at: 0))
+        await store.record(Self.observation(0.15, at: 60))
+        let fired = await store.snapshot().devices.first?.alertState[.left]?.firedRuleIDs
+        #expect(fired?.contains(BatteryAlertRule.defaultLowID) == true)
+
+        await store.setAlerts(
+            DeviceAlertConfiguration(rules: [], isCustomised: true), for: Self.id
+        )
+        let after = await store.snapshot().devices.first?.alertState[.left]?.firedRuleIDs
+        #expect(
+            after?.contains(BatteryAlertRule.defaultLowID) == true,
+            "the default alert would say it again"
+        )
+    }
+}
+
+/// A decision dropped as a duplicate was never delivered, so its latch must
+/// not stand — and "dropped" is per rule *and* component: one rule covering
+/// both ears can survive for one ear and be suppressed for the other.
+@Suite("Latches after deduplication")
+struct DeduplicationLatchTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+    private static let paired = DeviceIdentity.bluetooth("aa:bb")
+    private static let proximity = DeviceIdentity(source: .proximityName, value: "airpods-model-1")
+
+    private static func tempURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("ledge-dedup-\(UUID().uuidString).json")
+    }
+
+    private static func observation(
+        _ id: DeviceIdentity,
+        components: [BatteryComponent],
+        level: Double,
+        at seconds: TimeInterval
+    ) -> DeviceObservation {
+        let when = t0.addingTimeInterval(seconds)
+        return DeviceObservation(
+            deviceID: id, name: "AirPods",
+            readings: components.map {
+                BatteryReading(component: $0, level: level, observedAt: when)
+            },
+            presence: .connected, observedAt: when, cause: .connectionEvent
+        )
+    }
+
+    /// One physical set of AirPods, two records. The proximity one announces
+    /// the right ear; the paired one then crosses on both ears, and its
+    /// right-ear alert is the duplicate.
+    ///
+    /// The suppressed decision keeps its latch. The user *saw* that alert —
+    /// through the other record — so releasing the latch meant the second
+    /// record said the same thing again on a later reconnect, once the
+    /// five-minute duplicate window had passed.
+    @Test("A suppressed duplicate stays latched")
+    func suppressedDuplicateStaysLatched() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.40, at: 0))
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.15, at: 30))
+
+        await store.record(
+            Self.observation(Self.paired, components: [.left, .right], level: 0.40, at: 40)
+        )
+        await store.record(
+            Self.observation(Self.paired, components: [.left, .right], level: 0.15, at: 60)
+        )
+
+        let devices = await store.snapshot().devices
+        let record = devices.first { $0.id == Self.paired }
+        let left = record?.alertState[.left]?.firedRuleIDs ?? []
+        let right = record?.alertState[.right]?.firedRuleIDs ?? []
+        #expect(!left.isEmpty, "the ear that was announced should stay latched")
+        #expect(
+            !right.isEmpty,
+            "the suppressed ear lost its latch, so it will say the same thing again later"
+        )
+    }
+
+    /// And it stays quiet afterwards: well past the duplicate window, the
+    /// device disconnects and comes back still low, and nothing is said.
+    @Test("No second alert after the duplicate window, on a reconnect")
+    func noSecondAlertAfterTheWindow() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.40, at: 0))
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.15, at: 30))
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.40, at: 40))
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.15, at: 60))
+        await store.drainQueuedAlertsForTesting()
+
+        // Ten minutes later — twice the duplicate window — it goes away and
+        // comes back, still low.
+        let gone = DeviceObservation(
+            deviceID: Self.paired, name: "AirPods", readings: [],
+            presence: .disconnected, observedAt: Self.t0.addingTimeInterval(600),
+            cause: .connectionEvent
+        )
+        await store.record(gone)
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.15, at: 660))
+        #expect(
+            await store.queuedAlertCount() == 0,
+            "the same low battery was announced again on a reconnect"
+        )
+    }
+
+    /// A genuine new crossing still alerts: recover above the hysteresis, then
+    /// fall back through the threshold.
+    @Test("A real new crossing after recovery still alerts")
+    func realCrossingAfterRecoveryAlerts() async {
+        let store = DeviceCatalogueStore(url: Self.tempURL(), now: { Self.t0 })
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.40, at: 0))
+        await store.record(Self.observation(Self.proximity, components: [.right], level: 0.15, at: 30))
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.40, at: 40))
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.15, at: 60))
+        await store.drainQueuedAlertsForTesting()
+
+        // Charged well above the threshold and its hysteresis, then low again.
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.95, at: 700))
+        await store.record(Self.observation(Self.paired, components: [.right], level: 0.10, at: 1_000))
+        #expect(
+            await store.queuedAlertCount() == 1,
+            "a genuine new crossing was suppressed by the old latch"
         )
     }
 }

@@ -16,9 +16,14 @@ public enum DeviceObservations {
     /// the charging state is `unknown` — and stays unknown rather than being
     /// guessed, which is what keeps charged alerts honestly unavailable for
     /// these devices.
+    /// - Parameter cause: why this snapshot exists. A connect callback is the
+    ///   only thing that may give a device attachment semantics; the startup
+    ///   inventory and the periodic refresh establish a baseline quietly. See
+    ///   `ObservationCause`.
     public static func fromBluetooth(
         _ device: BluetoothDeviceSnapshot,
-        at observedAt: Date
+        at observedAt: Date,
+        cause: ObservationCause
     ) -> DeviceObservation {
         DeviceObservation(
             deviceID: .bluetooth(device.address),
@@ -35,7 +40,8 @@ public enum DeviceObservations {
             presence: device.isConnected ? .connected : .disconnected,
             observedAt: observedAt,
             symbolName: device.symbolName,
-            isApple: device.isApple
+            isApple: device.isApple,
+            cause: cause
         )
     }
 
@@ -51,7 +57,9 @@ public enum DeviceObservations {
         DeviceObservation(
             deviceID: .bluetooth(address), name: name, readings: [],
             presence: .disconnected, observedAt: observedAt,
-            symbolName: symbolName, isApple: isApple
+            symbolName: symbolName, isApple: isApple,
+            // A disconnect notification is a connection event like any other.
+            cause: .connectionEvent
         )
     }
 
@@ -97,7 +105,10 @@ public enum DeviceObservations {
             isApple: true,
             // The model identifier does not change, so a renamed device keeps
             // its record and its history.
-            canonicalHint: "airpods-model-\(proximity.model)"
+            canonicalHint: "airpods-model-\(proximity.model)",
+            // In range, which is not an attachment: a case opening nearby must
+            // not alert as though the earbuds had just been put in.
+            cause: .advertisement
         )
     }
 

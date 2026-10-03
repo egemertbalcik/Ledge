@@ -92,7 +92,7 @@ public final class BluetoothProvider: ActivityProvider {
                 // device connected before Ledge started produced no connect
                 // event, so the catalogue would not have heard of it until the
                 // ten-minute refresh came round.
-                for device in already { self.report(device) }
+                for device in already { self.report(device, cause: .startupInventory) }
                 for device in already
                 where self.published[device.address] == nil {
                     self.published[device.address] = ActivityID(kind: .device, source: device.address)
@@ -142,7 +142,7 @@ public final class BluetoothProvider: ActivityProvider {
             lastKnownName[device.address] = device.name
             lastKnownSymbol[device.address] = device.symbolName
             if device.isApple { lastKnownApple.insert(device.address) }
-            report(device)
+            report(device, cause: .periodicRefresh)
             Self.log.debug("suppressed flap for \(device.name, privacy: .private(mask: .hash))")
             return
         }
@@ -160,7 +160,7 @@ public final class BluetoothProvider: ActivityProvider {
             connected \(device.name, privacy: .private(mask: .hash)) \
             levels=\(device.batteryLevels.count, privacy: .public)
             """)
-        report(device)
+        report(device, cause: .connectionEvent)
 
         continuation?.yield(.publish(Activity(
             id: id,
@@ -256,7 +256,7 @@ public final class BluetoothProvider: ActivityProvider {
                     // Same race as the startup read: a slow profiler query can
                     // return after the provider stopped.
                     guard !Task.isCancelled, self.session == session else { return }
-                    for device in devices { self.report(device) }
+                    for device in devices { self.report(device, cause: .periodicRefresh) }
                 }
                 self.reads.insert(read)
             }
@@ -276,10 +276,14 @@ public final class BluetoothProvider: ActivityProvider {
     ///
     /// The ten-minute refresh below is *kept*: it is how levels are obtained
     /// at all, not part of the alerting. Only the duplicate decision went.
-    private func report(_ device: BluetoothDeviceSnapshot) {
+    /// - Parameter cause: what prompted this sighting. Only a connect
+    ///   callback may read as the device attaching; the startup inventory and
+    ///   the ten-minute refresh are a baseline, and a low device in that
+    ///   baseline must not alert as though it had just been plugged in.
+    private func report(_ device: BluetoothDeviceSnapshot, cause: ObservationCause) {
         guard let observations else { return }
         let observation = DeviceObservations.fromBluetooth(
-            device, at: Date(timeIntervalSinceReferenceDate: now())
+            device, at: Date(timeIntervalSinceReferenceDate: now()), cause: cause
         )
         // Synchronous: no task per advertisement, per connect or per reading.
         observations.submit(observation)

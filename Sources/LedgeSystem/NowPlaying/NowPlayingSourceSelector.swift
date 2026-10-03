@@ -32,7 +32,11 @@ public enum NowPlayingSourceSelector {
         probe: @MainActor () async -> Bool = { await MediaRemoteBridge.probeReadAccess() },
         adapterProbe: @MainActor () async -> (dylib: URL, host: AdapterHost)? = {
             await NowPlayingProbe.workingAdapter()
-        }
+        },
+        /// Whether a snapshot's media may appear at all — the user's website
+        /// rules, read fresh. Passed down so a page nobody can see cannot hold
+        /// the notch against a player; see `CompositeNowPlayingSource`.
+        allowsMedia: @escaping @MainActor (NowPlayingSnapshot) -> Bool = { _ in true }
     ) async -> Choice {
         if forceStub {
             // Carries sample data rather than nothing, so the card — marquee,
@@ -56,7 +60,9 @@ public enum NowPlayingSourceSelector {
         if let found = await adapterProbe() {
             let adapter = MediaRemoteAdapterSource(dylibURL: found.dylib, host: found.host)
             adapter.start()
-            let composite = CompositeNowPlayingSource(adapter: adapter, scripting: scripting)
+            let composite = CompositeNowPlayingSource(
+                adapter: adapter, scripting: scripting, allowsMedia: allowsMedia
+            )
             log.notice("now playing: using the MediaRemote adapter (system-wide)")
             return Choice(source: composite, reason: "MediaRemote adapter via \(found.host.name)")
         }

@@ -1,4 +1,5 @@
 import Foundation
+import LedgeCore
 import Testing
 
 @testable import LedgeUI
@@ -122,5 +123,55 @@ struct LevelsTargetTests {
     func beginningWithNoDevices() {
         let after = LevelsCardView.interactionTarget(holding: nil) { [] }
         #expect(after == nil)
+    }
+}
+
+/// A bar that moves when nothing moved is the control lying. The device is
+/// free to clamp a scalar to its nearest step or refuse it outright, so what
+/// the bar shows after a write is the hardware's answer, not the gesture's.
+@Suite("Adopting what the device answered")
+@MainActor
+struct LevelFeedbackAdoptionTests {
+
+    @Test("A clamped write shows where the output really landed")
+    func clampedWriteShows() {
+        let shown = LevelsCardView.adopting(
+            LevelFeedback(level: 0.062, isMuted: false), requested: 0, wasMuted: false
+        )
+        #expect(shown.level == 0.062)
+        #expect(shown.isMuted == false)
+    }
+
+    @Test("A refused write leaves the bar at the level the device kept")
+    func refusedWriteShows() {
+        let shown = LevelsCardView.adopting(
+            LevelFeedback(level: 0.9, isMuted: true), requested: 0.2, wasMuted: true
+        )
+        #expect(shown.level == 0.9, "the old level, because the write did not take")
+        #expect(shown.isMuted, "and it is still muted")
+    }
+
+    @Test("A muted answer shows as muted")
+    func mutedAnswerShows() {
+        let shown = LevelsCardView.adopting(
+            LevelFeedback(level: 0.5, isMuted: true), requested: 0.5, wasMuted: false
+        )
+        #expect(shown.isMuted)
+    }
+
+    /// No answer at all — no such output — keeps the gesture's own value
+    /// rather than snapping the bar to zero under the pointer.
+    @Test("No answer keeps the gesture's value")
+    func noAnswerKeepsTheGesture() {
+        let shown = LevelsCardView.adopting(nil, requested: 0.4, wasMuted: true)
+        #expect(shown.level == 0.4)
+        #expect(shown.isMuted == false, "raising unmutes, as it always did")
+    }
+
+    @Test("Out-of-range requests are clamped either way")
+    func clampsRequests() {
+        #expect(LevelsCardView.adopting(nil, requested: 4, wasMuted: false).level == 1)
+        #expect(LevelsCardView.adopting(nil, requested: -1, wasMuted: false).level == 0)
+        #expect(LevelFeedback(level: .nan, isMuted: false).level == 0)
     }
 }

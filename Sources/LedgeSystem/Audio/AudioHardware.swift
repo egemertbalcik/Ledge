@@ -29,6 +29,13 @@ public protocol AudioHardware: Sendable {
     /// Level, mute and name for a device, as one reading.
     func readout(for device: AudioObjectID) -> HUDReadout?
 
+    /// The output channels this device reports, or nil when it will not say.
+    ///
+    /// The watch has to cover the same elements the writer does: a device whose
+    /// mute lives only on its channels, or whose channels go past the second,
+    /// changed from outside Ledge without anything noticing.
+    func outputChannels(_ device: AudioObjectID) -> [UInt32]?
+
     /// - Returns: nil when the hardware refused, which is ordinary for a
     ///   property a device does not have.
     func listen(
@@ -53,16 +60,21 @@ public struct SystemAudioHardware: AudioHardware {
         return AudioObjectHasProperty(object, &address)
     }
 
+    public func outputChannels(_ device: AudioObjectID) -> [UInt32]? {
+        SystemVolumeHardware().outputChannels(device)
+    }
+
     public func readout(for device: AudioObjectID) -> HUDReadout? {
         guard let level = VolumeController.level(of: device) else { return nil }
         let muted = VolumeController.isMuted(device)
         // A mute that arrived from outside Ledge — Control Centre, a headset
         // button — is the user muting, and the watch is where we find out.
         // Only above zero, where a muted output cannot be our own silence.
-        VolumeController.noteObservedMute(muted, level: level)
+        VolumeController.noteObservedMute(muted, level: level, device: device)
         return HUDReadout(
             kind: .volume,
-            level: level,
+            // The logical level: a clamped zero shows as zero.
+            level: VolumeController.shownLevel(device, raw: level),
             isMuted: VolumeController.showsMuted(device, level: level),
             deviceName: VolumeController.deviceName(device)
         )

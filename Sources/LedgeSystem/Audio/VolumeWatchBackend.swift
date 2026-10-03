@@ -30,9 +30,18 @@ final class VolumeWatchBackend: @unchecked Sendable {
 
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "volume")
 
-    /// At most one system listener plus this many device listeners: mute, and
-    /// the volume scalar for the main element and two channels.
-    static let maximumDeviceListeners = 4
+    /// The ceiling on device listeners for one binding: two properties — mute
+    /// and the volume scalar — on the main element plus the channels this
+    /// device reports, and no device contributes more than
+    /// `channelWatchLimit` of those.
+    ///
+    /// The number is the point, not the arithmetic: a binding that exceeds it
+    /// is the registration runaway this backend exists to prevent, and the
+    /// tests hold it to the bound rather than to a comment.
+    static let maximumDeviceListeners = 2 * (1 + channelWatchLimit)
+
+    /// What a *stereo* device — nearly everything — actually registers.
+    static let stereoDeviceListeners = 2 * (1 + 2)
 
     /// A property address, as something that can key a dictionary.
     struct AddressKey: Hashable, Sendable {
@@ -90,13 +99,6 @@ final class VolumeWatchBackend: @unchecked Sendable {
     /// the budget is how "bounded recovery" becomes an unbounded retry.
     private var repairAttempts = 0
     private static let maximumRepairAttempts = 3
-    /// Set when a bind left the device without the listeners it should have —
-    /// a property that vanished mid-arm, a registration the hardware refused.
-    /// An unchanged device ID is not on its own proof that a binding is sound,
-    /// so a known-incomplete one is allowed one bounded repair per notification
-    /// rather than being skipped forever.
-    private var bindingIncomplete = false
-
     private var reconcilePending = false
     private var dirty = false
     /// A level notification sets this; the read happens once per window rather
@@ -204,6 +206,11 @@ final class VolumeWatchBackend: @unchecked Sendable {
     /// than retried on every start and every notification forever.
     private func repairIfNeeded() {
         guard isWatching else { return }
+        // Incompleteness is *derived*, from the addresses this device has that
+        // this binding is not listening to — never from a flag set at bind
+        // time. An unchanged device id is not proof a binding is sound, and a
+        // stored "it was incomplete" bit went stale the moment a repair
+        // succeeded.
 
         if systemListener == nil {
             guard repairAttempts < Self.maximumRepairAttempts else { return }
@@ -323,35 +330,60 @@ final class VolumeWatchBackend: @unchecked Sendable {
             return
         }
 
-        addListeners(for: device, addresses: Self.watchedAddresses)
+        addListeners(for: device, addresses: watchedAddresses(for: device))
         Self.log.debug("watching \(self.deviceListeners.count) volume properties")
         publish(hardware.readout(for: device))
     }
 
-    /// Mute, and the volume scalar for the main element and two channels: a
-    /// device that answers only per channel would otherwise change without ever
-    /// notifying.
-    private static let watchedAddresses: [AudioObjectPropertyAddress] = {
-        var addresses = [
-            AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyMute,
-                mScope: kAudioDevicePropertyScopeOutput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-        ]
-        for element in [kAudioObjectPropertyElementMain, UInt32(1), UInt32(2)] {
-            addresses.append(AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
-                mScope: kAudioDevicePropertyScopeOutput,
-                mElement: element
-            ))
+    /// Mute and volume, on every element this device actually has.
+    ///
+    /// Derived per device rather than fixed. Mute on the master alone missed a
+    /// headset whose mute lives on its channels, and volume on the master plus
+    /// channels 1–2 missed everything above the second channel of a multichannel
+    /// interface — in both cases a change made outside Ledge never arrived.
+    /// `hasProperty` then drops whatever the device does not expose, so a
+    /// stereo device registers exactly what it registered before.
+    ///
+    /// Bounded: `channelWatchLimit` elements at most, so a device claiming a
+    /// hundred channels cannot turn one binding into a hundred registrations —
+    /// the runaway this whole backend exists to prevent.
+    private func watchedAddresses(for device: AudioObjectID) -> [AudioObjectPropertyAddress] {
+        let channels = (hardware.outputChannels(device) ?? VolumeElement.assumedChannels)
+            .prefix(Self.channelWatchLimit)
+        let elements = [kAudioObjectPropertyElementMain] + channels
+        var addresses: [AudioObjectPropertyAddress] = []
+        for selector in [kAudioDevicePropertyMute, kAudioDevicePropertyVolumeScalar] {
+            for element in elements {
+                addresses.append(AudioObjectPropertyAddress(
+                    mSelector: selector,
+                    mScope: kAudioDevicePropertyScopeOutput,
+                    mElement: element
+                ))
+            }
         }
         return addresses
-    }()
+    }
+
+    /// How many channels of one device are worth listening to.
+    ///
+    /// **Documented limitation.** A change made outside Ledge to a channel
+    /// above this one is not observed: the readout catches up at the next
+    /// notification from any watched element, or at the next readout the
+    /// interface asks for, and until then the bar can be stale. A device with
+    /// more than sixteen output channels is a studio interface, where the
+    /// levels are set in its own software rather than in the notch.
+    ///
+    /// The alternative — one listener on `kAudioObjectPropertyElementWildcard`
+    /// — would cover every channel with a single registration. It is not used
+    /// because it cannot be verified here: removal identity for a wildcard
+    /// registration is exactly the property this backend exists to guarantee,
+    /// and proving it needs a real multichannel device. Until then, bounded
+    /// and honest beats unbounded and clever.
+    static let channelWatchLimit = 16
 
     /// Addresses the device has that this binding is not listening to.
     private func missingAddresses(for device: AudioObjectID) -> [AudioObjectPropertyAddress] {
-        Self.watchedAddresses.filter { address in
+        watchedAddresses(for: device).filter { address in
             deviceListeners[AddressKey(address)] == nil && hardware.hasProperty(device, address)
         }
     }
@@ -386,7 +418,9 @@ final class VolumeWatchBackend: @unchecked Sendable {
         // is redraw with nothing to say. Wait it out and take one reading at
         // the end, which is also what catches a device clamping the value we
         // asked for.
-        let remaining = VolumeController.selfWriteRemaining()
+        // This device's own window, not the Mac's: a write to one output used
+        // to silence the news from another.
+        let remaining = boundDevice.map { VolumeController.selfWriteRemaining(on: $0) } ?? 0
         if remaining > 0 {
             settlePending = true
             queue.asyncAfter(deadline: .now() + remaining) { [self] in

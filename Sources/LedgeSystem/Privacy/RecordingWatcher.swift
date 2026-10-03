@@ -92,17 +92,124 @@ public final class SystemRecordingSource: RecordingSource {
         self.init(pollInterval: 60)
     }
 
-    init(pollInterval: TimeInterval) {
+    init(pollInterval: TimeInterval, sweep: (@Sendable () -> RecordingState)? = nil) {
         self.pollInterval = pollInterval
+        self.injectedSweep = sweep
     }
+
+    /// Stands in for the hardware sweep, in tests.
+    private nonisolated let injectedSweep: (@Sendable () -> RecordingState)?
 
     // MARK: - Reading
 
+    /// The last reading, and which session it belongs to.
+    ///
+    /// The session is part of the cache, under the same lock, because the sweep
+    /// behind a reading takes milliseconds and a stop can land in the middle of
+    /// one. Checking the session *after* writing the value let an old sweep
+    /// finish and repopulate the cache a stopped — or restarted — watch had
+    /// just cleared, so the previous session's camera state came back.
+    ///
+    /// `activeSession` nil means stopped: nothing may publish, and `current()`
+    /// has nothing to say.
+    private struct Cache {
+        var activeSession: Int?
+        var value: RecordingState?
+    }
+
+    private nonisolated let cache = OSAllocatedUnfairLock(initialState: Cache())
+
+    /// What is recording, as of the last reading.
+    ///
+    /// A lock and a copy. The sweep behind it never runs on the main actor —
+    /// not even for the first answer: the watch takes an initial reading on
+    /// its own queue as soon as its listeners are armed and announces it
+    /// through the mailbox, so the first state arrives as a change like any
+    /// other. Until then this says nothing is recording, which is the quiet
+    /// answer rather than a guess.
     public func current() -> RecordingState {
+        cache.withLock { $0.value } ?? RecordingState()
+    }
+
+    /// Opens a session for publication, with nothing in it. Atomic: a sweep
+    /// from the previous session cannot land between the clear and the
+    /// activation.
+    private nonisolated func activateCache(session: Int) {
+        cache.withLock { $0 = Cache(activeSession: session, value: nil) }
+    }
+
+    /// Closes the cache to every session and empties it.
+    private nonisolated func deactivateCache() {
+        cache.withLock { $0 = Cache() }
+    }
+
+    /// Tests: puts a known state in the cache for a session, so the clearing
+    /// paths can be checked without a camera or a microphone in use.
+    func setCachedStateForTesting(_ state: RecordingState?, session: Int? = nil) {
+        cache.withLock { c in
+            if let session { c.activeSession = session }
+            c.value = state
+        }
+    }
+
+    /// Tests: which session may publish, if any.
+    var activeCacheSessionForTesting: Int? { cache.withLock { $0.activeSession } }
+
+    /// Sweeps the hardware and publishes the result, if the session that asked
+    /// for it is still the live one.
+    ///
+    /// - Returns: whether the reading was published. A false means the session
+    ///   ended while the sweep was running, and nothing — not the cache, not a
+    ///   callback — may carry it any further.
+    @discardableResult
+    nonisolated func reconcileState(session: Int) -> Bool {
+        let state = sweepHardware()
+        // The session is checked *with* the write, under one lock. Checking it
+        // first and writing after leaves exactly the window this closes.
+        return cache.withLock { c in
+            guard c.activeSession == session else { return false }
+            c.value = state
+            return true
+        }
+    }
+
+    /// The reading itself. Injectable so a test can hold a sweep open across a
+    /// stop without a camera or a microphone in use.
+    private nonisolated func sweepHardware() -> RecordingState {
+        if let injectedSweep { return injectedSweep() }
+        let holders = Self.inputHolders()
+        logHoldersIfChanged(holders)
         return RecordingState(
-            camera: isAnyCameraRunning(),
-            microphone: Self.microphoneHeld(by: Self.inputHolders())
+            camera: Self.isAnyCameraRunning(),
+            microphone: Self.microphoneHeld(by: holders)
         )
+    }
+
+    /// The holder set as it was last logged, so an unchanged one says nothing.
+    /// Behind a lock: the logging now happens on the watch's queue.
+    private nonisolated let loggedHolders = OSAllocatedUnfairLock<Set<String>>(initialState: [])
+
+    /// Names who holds the microphone, when that changes.
+    ///
+    /// The indicator is only as trustworthy as the thing it points at, and a
+    /// wrong one is worth being able to diagnose from a log rather than a
+    /// guess. Hashed: these are process identities on the user's machine.
+    private nonisolated func logHoldersIfChanged(_ holders: [String]) {
+        let current = Set(holders)
+        let changed = loggedHolders.withLock { last -> Bool in
+            guard last != current else { return false }
+            last = current
+            return true
+        }
+        guard changed else { return }
+        guard !current.isEmpty else {
+            Self.log.debug("privacy: nothing holds the microphone")
+            return
+        }
+        let excluded = current.filter { Self.isSystemSpeech($0) }
+        Self.log.debug("""
+            privacy: microphone held by \(current.sorted().joined(separator: ", "), privacy: .private(mask: .hash))             counted=\(current.count - excluded.count, privacy: .public)             speech=\(excluded.count, privacy: .public)
+            """)
     }
 
     /// Whether any of these holders is worth an indicator.
@@ -126,7 +233,16 @@ public final class SystemRecordingSource: RecordingSource {
     /// name is an app recording you, and is reported as one. The processes
     /// that actually hold the input for dictation are not documented anywhere,
     /// so the match is by family rather than by a list of exact ids — which
-    /// `inputHolders()` logging is for: use it once, read the name back.
+    /// `logHoldersIfChanged` is for: read the names back from a real session.
+    ///
+    /// **Siri and the assistant are deliberately in here**, not an accident of
+    /// a loose pattern. On a Mac with "Hey Siri" enabled, the keyword detector
+    /// holds the input permanently: counted, it would light the microphone dot
+    /// for ever and the indicator would mean nothing. macOS shows its own
+    /// indicator while Siri is actually listening to a request, which is the
+    /// part worth seeing, and it does not need a second one from Ledge. The
+    /// cost of this choice, stated plainly: an app that asked the *system* to
+    /// transcribe for it is not counted either.
     nonisolated static func isSystemSpeech(_ bundleID: String) -> Bool {
         guard bundleID.hasPrefix("com.apple.") else { return false }
         let name = bundleID.lowercased()
@@ -136,8 +252,8 @@ public final class SystemRecordingSource: RecordingSource {
             || name.contains("assistant")
     }
 
-    private func isAnyCameraRunning() -> Bool {
-        Self.videoDevices().contains { Self.isVideoDeviceRunning($0) }
+    private nonisolated static func isAnyCameraRunning() -> Bool {
+        videoDevices().contains { isVideoDeviceRunning($0) }
     }
 
     /// A cheap trigger for the expensive answer.
@@ -305,6 +421,9 @@ public final class SystemRecordingSource: RecordingSource {
         stopWatching()
         let command = lifecycle.withLock { c -> Int in c &+= 1; return c }
         let session = mailbox.open { _ in MainActor.assumeIsolated { onChange() } }
+        // Opened for this session before any listener is armed, so a reading
+        // taken by the previous one cannot land in it.
+        activateCache(session: session)
         queue.async { [self] in
             guard lifecycle.withLock({ $0 }) == command else { return }
             self.onChange = onChange
@@ -348,6 +467,15 @@ public final class SystemRecordingSource: RecordingSource {
                 privacy: watching \(self.audioListeners.count, privacy: .public) mic + \
                 \(self.cmioListeners.count, privacy: .public) camera properties
                 """)
+
+            // The first reading, taken here — on this queue, with the
+            // listeners already armed, so nothing that starts recording in the
+            // meantime is missed — and announced like any other change. The
+            // main actor never sweeps the HAL, and a provider switched on
+            // again cannot answer from the previous session.
+            guard reconcileState(session: session) else { return }
+            guard lifecycle.withLock({ $0 }) == command else { return }
+            mailbox.post(Tick(), generation: session)
         }
 
         // A camera or microphone plugged in after this point has no listener, so
@@ -414,6 +542,14 @@ public final class SystemRecordingSource: RecordingSource {
         queue.asyncAfter(deadline: .now() + 0.05) { [self] in
             notifyPending = false
             guard session == generation, onChange != nil else { return }
+            // The expensive part happens here, on this queue, and the main
+            // actor is handed a finished answer. One reconcile per coalescing
+            // window, exactly as before — no task per callback.
+            //
+            // A reading from a session that ended while the sweep ran is
+            // discarded, and announces nothing: it is neither the truth nor
+            // this watch's business any more.
+            guard reconcileState(session: session) else { return }
             // The session is checked again at the far end: a stop cannot reach
             // a hop already enqueued on the main queue.
             mailbox.post(Tick(), generation: session)
@@ -470,6 +606,13 @@ public final class SystemRecordingSource: RecordingSource {
         _ = lifecycle.withLock { c -> Int in c &+= 1; return c }
         poll?.cancel()
         poll = nil
+        // Synchronously, not on the queue: a provider switched off and on
+        // again asks `current()` immediately, and a clear queued behind the
+        // teardown let it answer with the previous session's camera and
+        // microphone state until the next poll an entire minute later.
+        // Atomically: no session may publish, and nothing is left to read.
+        deactivateCache()
+        loggedHolders.withLock { $0 = [] }
         // Disqualifies anything already on its way to main.
         mailbox.close()
         queue.async { [self] in

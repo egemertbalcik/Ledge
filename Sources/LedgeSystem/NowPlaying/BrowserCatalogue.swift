@@ -42,8 +42,11 @@ public final class BrowserCatalogue {
     /// case the application registered.
     private static let curated = Set(MediaOwner.browsers.map { $0.lowercased() })
 
-    /// The default browser's identifier, lowercased, or nil until asked.
-    private var preferred: String??
+    /// The default browser's identifier, lowercased, or nil until asked, with
+    /// when it was read.
+    private var preferred: (value: String?, at: TimeInterval)?
+
+    private let now: @MainActor () -> TimeInterval
 
     private var observer: NSObjectProtocol?
 
@@ -52,8 +55,23 @@ public final class BrowserCatalogue {
     /// which is the case this type exists for.
     private let lookup: @MainActor () -> String?
 
-    init(lookup: @escaping @MainActor () -> String? = BrowserCatalogue.preferredWebHandler) {
+    /// How long a resolved default browser is trusted before it is read again.
+    ///
+    /// The launch notification covers an application *starting*; it does not
+    /// cover one that was already running being made the default browser,
+    /// which is exactly what happens when somebody installs a browser, opens
+    /// it, and accepts its offer to take over. Five minutes is far longer than
+    /// a media poll and far shorter than a session.
+    static let defaultBrowserTTL: TimeInterval = 5 * 60
+
+    init(
+        lookup: @escaping @MainActor () -> String? = BrowserCatalogue.preferredWebHandler,
+        now: @escaping @MainActor () -> TimeInterval = {
+            Date().timeIntervalSinceReferenceDate
+        }
+    ) {
         self.lookup = lookup
+        self.now = now
         // A browser installed while Ledge runs — and made the default, which
         // is what installing one usually means — would otherwise read as a
         // native player until the next launch. There is no "an app was
@@ -73,8 +91,13 @@ public final class BrowserCatalogue {
                 // nothing new. Anything else costs one LaunchServices read at
                 // the next question — a few milliseconds, against an event
                 // that happens a handful of times an hour.
-                if let id, id == (self.preferred ?? nil) || Self.curated.contains(id) { return }
+                if let id, id == (self.preferred?.value ?? nil) || Self.curated.contains(id) {
+                    return
+                }
                 self.preferred = nil
+                // A newly launched application may be the new default browser,
+                // so every owner is worth judging again.
+                self.judged.removeAll()
             }
         }
     }
@@ -89,8 +112,48 @@ public final class BrowserCatalogue {
         guard !bundleID.isEmpty else { return true }
         let id = bundleID.lowercased()
         if Self.curated.contains(id) { return true }
+        if id == defaultBrowser() { return true }
+        // An owner we have never classified, and the cached answer predates
+        // it: ask again before deciding. Someone who installed a browser,
+        // made it their default and started playing in it would otherwise be
+        // told it was a native player until the next launch — the launch
+        // notification only fires for applications started *after* the cache
+        // was filled.
+        guard revalidate(forUnfamiliar: id) else { return false }
         return id == defaultBrowser()
     }
+
+    /// Identifiers already judged, so an unfamiliar one is only unfamiliar
+    /// once. Bounded: a Mac plays media from a handful of applications, and
+    /// this exists to avoid a LaunchServices read per poll, not to be a
+    /// history.
+    private var judged: Set<String> = []
+
+    /// Whether the cached default browser is worth re-reading for this owner.
+    ///
+    /// Two chances for an owner to be reconsidered: the first time it is seen,
+    /// and whenever the cached answer has aged past its TTL. The second is
+    /// what covers an application that was already running and *then* became
+    /// the default browser — a launch notification never arrives for that, and
+    /// without it such a browser stayed classified as a native player for the
+    /// rest of the session.
+    ///
+    /// - Returns: true when the cache was dropped and should be consulted
+    ///   again.
+    private func revalidate(forUnfamiliar id: String) -> Bool {
+        let unfamiliar = !judged.contains(id)
+        let stale = preferred.map { now() - $0.at >= Self.defaultBrowserTTL } ?? true
+        // Both are bounded: an owner is unfamiliar once, and the TTL is five
+        // minutes. A familiar owner with a fresh answer costs nothing, which
+        // is what keeps this off the media poll.
+        guard unfamiliar || stale else { return false }
+        if judged.count >= Self.judgedLimit { judged.removeAll() }
+        judged.insert(id)
+        preferred = nil
+        return true
+    }
+
+    static let judgedLimit = 64
 
     /// Whether clicking this card should bring its owner forward — the
     /// question `MediaOwner.isOpenableApp` answers, asked of the system.
@@ -101,15 +164,19 @@ public final class BrowserCatalogue {
     /// The default browser's identifier, lowercased, or nil if the system
     /// names none.
     func defaultBrowser() -> String? {
-        if let preferred { return preferred }
+        if let preferred, now() - preferred.at < Self.defaultBrowserTTL {
+            return preferred.value
+        }
         let found = lookup()?.lowercased()
         // A nil answer is not cached as an answer: a LaunchServices database
         // that has not finished rebuilding after an OS update would otherwise
         // make the default browser look like a native player for the rest of
         // the session.
         guard let found else { return nil }
-        preferred = found
-        Self.log.notice("default browser: \(found, privacy: .public)")
+        if preferred?.value != found {
+            Self.log.notice("default browser: \(found, privacy: .public)")
+        }
+        preferred = (found, now())
         return found
     }
 

@@ -49,6 +49,21 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
     /// never had to say.
     public var live: Bool?
 
+    /// The host of the media *asset*, when the system reported one at all.
+    ///
+    /// Not the website: see `MediaOriginEvidence`. MediaRemote has no page-URL
+    /// or origin key — the whole key set was probed on macOS 26 — so this
+    /// comes from `kMRMediaRemoteNowPlayingInfoAssetURL`, which for ordinary
+    /// playback is a CDN. Only a host that came from inside a `blob:` URL
+    /// stands for a web content origin, which is what the flag below records.
+    ///
+    /// A host, never a path or a query.
+    public var assetHost: String?
+
+    /// Whether `assetHost` came from inside a `blob:` URL, and so names the
+    /// origin of the document that created the media rather than a CDN.
+    public var assetHostFromBlob: Bool?
+
     public var artworkID: String?
     public var artworkMIME: String?
     /// Base64. Sent only when `artworkID` changes, so most lines omit it.
@@ -121,6 +136,12 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
                 reported: mediaType.flatMap(MediaKind.init(rawValue:)),
                 bundleID: bundle,
                 duration: total
+            ),
+            // Canonicalised here, once, so nothing downstream has to think
+            // about `www.`, case or a trailing dot — and carried with its
+            // provenance, so a CDN host cannot be mistaken for a website.
+            origin: MediaOriginEvidence.from(
+                host: assetHost, isBlob: assetHostFromBlob ?? false
             )
         )
     }

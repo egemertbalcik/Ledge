@@ -7,7 +7,7 @@ import SwiftUI
 public struct LevelsActions {
     public var outputs: () -> [AudioOutputOption]
     public var displays: () -> [DisplayLevelOption]
-    public var setOutputVolume: (UInt32, Double) -> Void
+    public var setOutputVolume: (UInt32, Double) -> LevelFeedback?
     public var setDisplayBrightness: (UInt32, Double) -> Void
     /// Latches a drag in flight, so the overlay stays open while the pointer
     /// wanders off the bar being dragged.
@@ -16,7 +16,7 @@ public struct LevelsActions {
     public init(
         outputs: @escaping () -> [AudioOutputOption] = { [] },
         displays: @escaping () -> [DisplayLevelOption] = { [] },
-        setOutputVolume: @escaping (UInt32, Double) -> Void = { _, _ in },
+        setOutputVolume: @escaping (UInt32, Double) -> LevelFeedback? = { _, _ in nil },
         setDisplayBrightness: @escaping (UInt32, Double) -> Void = { _, _ in },
         setDragging: @escaping (Bool) -> Void = { _ in }
     ) {
@@ -163,7 +163,33 @@ public struct LevelsCardView: View {
     private func setVolume(_ level: Double) {
         volume = level
         if level > 0 { isMuted = false }
-        if let output { actions.setOutputVolume(output.id, level) }
+        guard let output else { return }
+        let shown = Self.adopting(
+            actions.setOutputVolume(output.id, level),
+            requested: level,
+            wasMuted: isMuted
+        )
+        volume = shown.level
+        isMuted = shown.isMuted
+    }
+
+    /// What the bar should show after a write: the device's answer when it
+    /// gave one, and the gesture's own value when it did not.
+    ///
+    /// A clamped or refused write must not leave the bar at a level the output
+    /// is not at — the control would be lying until the next poll corrected
+    /// it, which is the failure the readback exists to prevent. A device that
+    /// answers nothing (no such output) leaves the gesture's value in place
+    /// rather than snapping the bar to zero.
+    static func adopting(
+        _ feedback: LevelFeedback?,
+        requested: Double,
+        wasMuted: Bool
+    ) -> (level: Double, isMuted: Bool) {
+        guard let feedback else {
+            return (min(max(requested, 0), 1), requested > 0 ? false : wasMuted)
+        }
+        return (feedback.level, feedback.isMuted)
     }
 
     private var volumeSymbol: String {

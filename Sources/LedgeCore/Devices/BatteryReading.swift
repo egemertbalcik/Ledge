@@ -88,6 +88,32 @@ public enum DevicePresence: String, Hashable, Sendable, Codable {
 /// Providers report these; the catalogue and the alert engine consume them.
 /// Deliberately a value with no behaviour: it is the boundary that keeps a
 /// Bluetooth scanner from knowing anything about settings or alerts.
+/// Why an observation exists.
+///
+/// The difference decides whether a device counts as having just *attached*,
+/// which is the one case an alert may fire on a first reading with nothing to
+/// have crossed. Launching with low AirPods already in your ears is not an
+/// attachment: the list of what was already connected is an inventory, and an
+/// inventory is a baseline, not news.
+public enum ObservationCause: Equatable, Sendable, Codable {
+
+    /// A real connect or disconnect callback from the system.
+    case connectionEvent
+
+    /// The list of what was already connected when a provider started.
+    case startupInventory
+
+    /// The periodic re-ask of devices already known to be connected.
+    case periodicRefresh
+
+    /// A proximity broadcast, which says a device is nearby and nothing about
+    /// it attaching.
+    case advertisement
+
+    /// Whether this cause may give a device attachment semantics.
+    public var isAttachmentEvidence: Bool { self == .connectionEvent }
+}
+
 public struct DeviceObservation: Hashable, Sendable {
 
     /// Stable identity from the source — a Bluetooth address, a peripheral
@@ -115,6 +141,12 @@ public struct DeviceObservation: Hashable, Sendable {
     /// has nothing stable to offer, in which case the name is the fallback.
     public var canonicalHint: String?
 
+    /// Why this observation exists — see `ObservationCause`. Defaults to the
+    /// quiet reading: anything that has not said it is a connection event is
+    /// treated as a sighting, so a new source cannot create attachment
+    /// semantics by omission.
+    public var cause: ObservationCause
+
     public init(
         deviceID: DeviceIdentity,
         name: String,
@@ -123,7 +155,8 @@ public struct DeviceObservation: Hashable, Sendable {
         observedAt: Date,
         symbolName: String = "headphones",
         isApple: Bool = false,
-        canonicalHint: String? = nil
+        canonicalHint: String? = nil,
+        cause: ObservationCause = .periodicRefresh
     ) {
         self.deviceID = deviceID
         self.name = name
@@ -133,6 +166,7 @@ public struct DeviceObservation: Hashable, Sendable {
         self.symbolName = symbolName
         self.isApple = isApple
         self.canonicalHint = canonicalHint
+        self.cause = cause
     }
 
     /// The identity this observation's record is stored under.
@@ -203,6 +237,25 @@ public struct DeviceIdentity: Hashable, Sendable, Codable {
     ///   - hint: a stable discriminator from the source, preferred over the
     ///     name — an AirPods model identifier, say, which survives a rename.
     ///   - name: what the device called itself, used when there is no hint.
+    ///
+    /// **Known limitation, not a solved problem.** The hint is a *model*
+    /// identifier, so two sets of the same model of AirPods canonicalise to
+    /// one record: their proximity readings merge, and the record shows
+    /// whichever advertised most recently. The alternative — keying on the
+    /// rotating peripheral UUID — was measured on this Mac producing a fresh
+    /// identifier every few minutes and a new "device" with it, for ever.
+    /// Between a bounded wrong answer and unbounded growth, this is the
+    /// bounded one.
+    ///
+    /// Nor is the proximity record related to the same earbuds' entry from the
+    /// paired-device list: there is no trustworthy identifier linking the two,
+    /// and matching on the display name would be exactly the mistake that
+    /// makes two identical sets one device. Both records stay; the *alert* is
+    /// deduplicated instead — see `BatteryAlertEngine.withoutDuplicates`.
+    ///
+    /// Fixing either properly needs evidence this code cannot get: hardware
+    /// validation with two same-model sets, and an identifier Apple does not
+    /// publish. Do not invent one.
     public func canonical(hint: String? = nil, name: String) -> DeviceIdentity {
         switch source {
         case .peripheralUUID:
@@ -265,4 +318,15 @@ public struct DeviceIdentity: Hashable, Sendable, Codable {
         case .thisMac: 15 * 60
         }
     }
+
+    /// Whether this source reports only when something changes, rather than
+    /// repeating itself on a cadence.
+    ///
+    /// This Mac's battery does: it is read from the power source, which
+    /// announces changes and says nothing while a charged battery sits on the
+    /// charger. Judging it by elapsed time marked the one device that is
+    /// certainly present as stale after fifteen quiet minutes. Nothing is
+    /// polled to fix that — the absence of news is simply not evidence of
+    /// absence for this kind of source.
+    public var reportsOnlyOnChange: Bool { source == .thisMac }
 }

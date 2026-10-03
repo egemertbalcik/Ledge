@@ -77,13 +77,13 @@ public final class PrivacyProvider: ActivityProvider {
         }
         isPublished = true
 
-        // The holders are named because the indicator is only as trustworthy
-        // as the thing it points at, and a wrong one is worth being able to
-        // diagnose from a log rather than a guess.
+        // Who holds the microphone is logged by the watcher, from the one
+        // enumeration it already does. Naming them here meant a second sweep
+        // of every audio process — milliseconds of main-thread work — purely
+        // to write a log line.
         Self.log.notice("""
             recording: camera=\(state.camera, privacy: .public) \
-            mic=\(state.microphone, privacy: .public) \
-            holders=[\(SystemRecordingSource.inputHolders().joined(separator: ", "), privacy: .public)]
+            mic=\(state.microphone, privacy: .public)
             """)
         continuation?.yield(.publish(Activity(
             id: Self.activityID,

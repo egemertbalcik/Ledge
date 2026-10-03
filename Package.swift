@@ -86,7 +86,13 @@ let package = Package(
             name: "LedgeProvidersTests",
             dependencies: ["LedgeProviders", "LedgeCore", "LedgeSystem"]
         ),
-        .testTarget(name: "LedgeSystemTests", dependencies: ["LedgeSystem", "LedgeCore"]),
+        .testTarget(
+            name: "LedgeSystemTests",
+            // The adapter is here for one reason: the asset-URL parser that
+            // decides what counts as evidence of a website is C, and testing a
+            // Swift re-implementation of it would test the wrong code.
+            dependencies: ["LedgeSystem", "LedgeCore", "LedgeMediaAdapter"]
+        ),
         .testTarget(name: "LedgeUITests", dependencies: ["LedgeUI", "LedgeCore"]),
         .testTarget(name: "LedgeShellTests", dependencies: ["LedgeShell", "LedgeCore", "LedgeProviders", "LedgeUI"]),
     ],

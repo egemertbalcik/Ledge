@@ -31,6 +31,68 @@ public struct BatterySample: Hashable, Sendable, Codable {
 /// Nothing here polls, and nothing here asks a source for a reading.
 public enum BatteryHistory {
 
+    /// How long a silence has to be before the chart stops joining across it.
+    ///
+    /// Half an hour. A device in use is sampled far more often than that
+    /// — every change, plus a heartbeat — so a gap this wide means the device
+    /// was away, asleep, or Ledge was not running. Drawing a straight line
+    /// across it invents a battery level for a period nobody observed.
+    public static let segmentGap: TimeInterval = 30 * 60
+
+    /// One unbroken run of samples for one component.
+    ///
+    /// The chart draws a line per segment rather than one line per component,
+    /// so a disconnection is a gap on the chart instead of a confident
+    /// diagonal through the hours the device was in its case.
+    public struct Segment: Hashable, Sendable, Identifiable {
+        public let component: BatteryComponent
+        /// Which run this is, within the component. Part of the identity the
+        /// chart draws by.
+        public let run: Int
+        public let samples: [BatterySample]
+
+        public var id: String { "\(component.label)#\(run)" }
+
+        public init(component: BatteryComponent, run: Int, samples: [BatterySample]) {
+            self.component = component
+            self.run = run
+            self.samples = samples
+        }
+    }
+
+    /// Splits samples into runs that may honestly be joined by a line.
+    ///
+    /// A run ends at a sample taken while the device was disconnected — that
+    /// sample is the boundary and belongs to the run it closes — and at any
+    /// silence of `maxGap` or longer.
+    public static func segments(
+        _ samples: [BatterySample],
+        maxGap: TimeInterval = segmentGap
+    ) -> [Segment] {
+        var byComponent: [BatteryComponent: [BatterySample]] = [:]
+        for sample in samples { byComponent[sample.component, default: []].append(sample) }
+
+        var result: [Segment] = []
+        for (component, unsorted) in byComponent {
+            let ordered = unsorted.sorted { $0.at < $1.at }
+            var run = 0
+            var current: [BatterySample] = []
+            for sample in ordered {
+                if let previous = current.last,
+                   !previous.isConnected || sample.at.timeIntervalSince(previous.at) >= maxGap {
+                    result.append(Segment(component: component, run: run, samples: current))
+                    run += 1
+                    current = []
+                }
+                current.append(sample)
+            }
+            if !current.isEmpty {
+                result.append(Segment(component: component, run: run, samples: current))
+            }
+        }
+        return result.sorted { ($0.component.sortOrder, $0.run) < ($1.component.sortOrder, $1.run) }
+    }
+
     /// Below this, a change in level is noise. AirPods report in coarse steps
     /// anyway, and a chart of 1% jitter is a chart of nothing.
     public static let significantChange: Double = 0.05

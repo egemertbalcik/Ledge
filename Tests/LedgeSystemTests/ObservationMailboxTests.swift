@@ -316,3 +316,310 @@ struct ObservationMailboxForgetTests {
         #expect(mailbox.trackedDeviceCount == 1)
     }
 }
+
+/// Quitting is an ordered barrier, not a flush. A late observation must either
+/// reach the catalogue before it is written to disk or never be accepted at
+/// all — an alert latch lost in that window says the same thing again after
+/// the next launch, which is the one thing the latch exists to prevent.
+@Suite("Closing the mailbox")
+struct MailboxShutdownTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+
+    private static func observation(
+        _ address: String,
+        level: Double = 0.5,
+        at seconds: TimeInterval = 0
+    ) -> DeviceObservation {
+        DeviceObservation(
+            deviceID: .bluetooth(address), name: "AirPods",
+            readings: [BatteryReading(
+                component: .left, level: level,
+                observedAt: t0.addingTimeInterval(seconds)
+            )],
+            presence: .connected, observedAt: t0.addingTimeInterval(seconds),
+            cause: .connectionEvent
+        )
+    }
+
+    /// Order, not timing: the log says which finished first, so the test
+    /// cannot pass by being lucky about scheduling.
+    @Test("Close waits for the delivery that is already in flight")
+    func closeAwaitsTheDrain() async {
+        let held = AsyncGate()
+        let log = EventLog()
+        let mailbox = ObservationMailbox(deliver: { _ in
+            await held.wait()
+            await log.append("delivered")
+        })
+
+        mailbox.submit(Self.observation("aa:aa"))
+        // Let the drain reach the delivery and block there.
+        await untilDraining(mailbox)
+
+        let closing = Task {
+            await mailbox.close()
+            await log.append("closed")
+        }
+        // Give a close that does not wait every chance to finish early.
+        await briefly()
+        await held.open()
+        await closing.value
+
+        let order = await log.events
+        #expect(
+            order == ["delivered", "closed"],
+            "close returned before the delivery landed: \(order)"
+        )
+        #expect(mailbox.isDraining == false)
+    }
+
+    @Test("A closed mailbox accepts nothing new")
+    func closedMailboxRefusesWork() async {
+        let delivered = DeliveryCount()
+        let mailbox = ObservationMailbox(deliver: { _ in await delivered.increment() })
+        await mailbox.close()
+
+        mailbox.submit(Self.observation("bb:bb"))
+        // Nothing to wait for, but give a stray task every chance to run.
+        await briefly()
+        #expect(await delivered.value == 0)
+        #expect(mailbox.pendingCount == 0)
+    }
+
+    @Test("Closing twice is not an error and does not hang")
+    func closeIsIdempotent() async {
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        await mailbox.close()
+        await mailbox.close()
+        #expect(mailbox.isClosed)
+    }
+
+    /// Everything accepted before the close has to land: an observation may
+    /// carry the history sample or the alert latch that stops the same alert
+    /// being raised again after the next launch.
+    @Test("Work accepted before the close is delivered, not discarded")
+    func acceptedWorkIsDelivered() async {
+        let delivered = DeliveryCount()
+        let mailbox = ObservationMailbox(deliver: { _ in await delivered.increment() })
+        mailbox.submit(Self.observation("cc:cc"))
+        await mailbox.close()
+        let landed = await delivered.value
+        #expect(landed == 1, "an accepted observation was thrown away at shutdown")
+    }
+
+    /// One delivery held in flight and a second observation waiting behind
+    /// it: both must land *before* close returns. The two deliveries have no
+    /// order between them — the queue is keyed by device and coalesces, and
+    /// never promised one — so what is asserted is the barrier itself.
+    @Test("A queued observation behind one in flight still lands")
+    func queuedWorkBehindAnInFlightDeliveryLands() async {
+        let held = AsyncGate()
+        let log = EventLog()
+        let mailbox = ObservationMailbox(deliver: { observation in
+            await log.append("started \(observation.deviceID.value)")
+            if observation.deviceID == .bluetooth("first") { await held.wait() }
+            await log.append(observation.deviceID.value)
+        })
+
+        mailbox.submit(Self.observation("first"))
+        // Wait for the delivery to really be in flight, not merely for the
+        // flag that says one is about to be: the queue is a dictionary, and a
+        // second submit landing first would otherwise be delivered first.
+        await until { await log.events.contains("started first") }
+        mailbox.submit(Self.observation("second", level: 0.1, at: 300))
+
+        let closing = Task {
+            await mailbox.close()
+            await log.append("closed")
+        }
+        await briefly()
+        await held.open()
+        await closing.value
+
+        let order = await log.events
+        #expect(order.last == "closed", "something landed after the barrier returned: \(order)")
+        #expect(order.contains("first"), "the delivery in flight did not land")
+        #expect(
+            order.contains("second"),
+            "the observation queued before the close was thrown away: \(order)"
+        )
+        #expect(mailbox.pendingCount == 0)
+    }
+
+    /// A reset mid-session is a different thing: that one discards on purpose,
+    /// because the work belongs to a provider run that is over.
+    @Test("A mid-session reset still discards")
+    func invalidateStillDiscards() async {
+        let held = AsyncGate()
+        let mailbox = ObservationMailbox(deliver: { _ in await held.wait() })
+        mailbox.submit(Self.observation("dd:dd"))
+        await untilDraining(mailbox)
+        mailbox.submit(Self.observation("ee:ee", level: 0.2, at: 300))
+        mailbox.invalidate()
+        #expect(mailbox.pendingCount == 0, "the queued work was kept by a reset")
+        await held.open()
+    }
+
+    /// The bookkeeping exists to tell news from noise for the devices that are
+    /// around, not to remember every device the Mac has ever met.
+    @Test("The forwarded history stays bounded")
+    func bookkeepingIsBounded() async {
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        for index in 0..<(ObservationMailbox.trackedDeviceLimit + 40) {
+            mailbox.submit(Self.observation("device-\(index)", at: Double(index)))
+            // Let each drain turn complete, so these are forwarded rather than
+            // coalesced into one pending entry.
+            for _ in 0..<500 where mailbox.isDraining {
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        #expect(mailbox.trackedDeviceCount <= ObservationMailbox.trackedDeviceLimit)
+    }
+}
+
+/// A gate a delivery can be held at, so a test can watch the barrier wait.
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let resume = waiting
+        waiting.removeAll()
+        for continuation in resume { continuation.resume() }
+    }
+}
+
+/// Counts deliveries from whatever context they arrive on.
+private actor DeliveryCount {
+    private(set) var value = 0
+    func increment() { value += 1 }
+}
+
+/// What happened, in the order it happened.
+private actor EventLog {
+    private(set) var events: [String] = []
+    func append(_ event: String) { events.append(event) }
+}
+
+/// Waits for the mailbox to own its queue, without spinning: a hot
+/// `Task.yield()` loop starves everything else on the runtime, which showed up
+/// as unrelated timing tests failing under a full suite run.
+private func untilDraining(_ mailbox: ObservationMailbox) async {
+    for _ in 0..<2_000 where !mailbox.isDraining {
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+/// Long enough for anything already scheduled to run, short enough to be free.
+private func briefly() async {
+    try? await Task.sleep(for: .milliseconds(20))
+}
+
+/// Waits for a condition rather than for a guessed interval.
+private func until(_ condition: @escaping () async -> Bool) async {
+    for _ in 0..<2_000 {
+        if await condition() { return }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+/// Provider liveness goes through the same ordered path observations take. One
+/// unstructured task per update let a start overtake the stop that followed
+/// it, which left This Mac marked live after its provider had gone — and a
+/// record claiming a live reading from a provider that is not running is the
+/// staleness the liveness flag exists to prevent.
+@Suite("Ordered provider liveness")
+struct LivenessOrderingTests {
+
+    private func mailbox(
+        onLiveness: @escaping @Sendable (Bool, DeviceIdentity.Source) async -> Void
+    ) -> ObservationMailbox {
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        mailbox.setLivenessHandlerForTesting(onLiveness)
+        return mailbox
+    }
+
+    /// The gated case: the earlier `live = true` delivery is held, and
+    /// `live = false` is queued behind it. Whatever the scheduling, the last
+    /// state submitted is the state the store ends on.
+    @Test("A delayed start cannot overtake the stop that followed it")
+    func stopWinsOverDelayedStart() async {
+        let held = AsyncGate()
+        let log = EventLog()
+        let mailbox = mailbox(onLiveness: { live, _ in
+            if live { await held.wait() }
+            await log.append(live ? "live" : "stopped")
+        })
+
+        mailbox.sourceBecame(live: true, for: DeviceIdentity.Source.thisMac)
+        // Let the first delivery reach the gate before the stop is queued.
+        await briefly()
+        mailbox.sourceBecame(live: false, for: DeviceIdentity.Source.thisMac)
+        await held.open()
+        await mailbox.close()
+
+        let events = await log.events
+        #expect(
+            events.last == "stopped",
+            "a start overtook the stop that followed it: \(events)"
+        )
+    }
+
+    /// Coalesced per source: a provider toggled repeatedly leaves one update,
+    /// not a queue of them.
+    @Test("Repeated updates for one source coalesce")
+    func updatesCoalesce() async {
+        let log = EventLog()
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        mailbox.setLivenessHandlerForTesting({ live, _ in
+            await log.append(live ? "live" : "stopped")
+        })
+
+        // Twenty toggles, ending on a start: that is the state the store must
+        // settle on, and it should not take twenty deliveries to get there.
+        for index in 0..<21 {
+            mailbox.sourceBecame(live: index % 2 == 0, for: DeviceIdentity.Source.thisMac)
+        }
+        await mailbox.close()
+        let events = await log.events
+        #expect(events.count <= 2, "\(events.count) deliveries for twenty-one toggles")
+        #expect(events.last == "live", "the last state submitted did not win")
+    }
+
+    /// And the barrier waits for it: liveness accepted before a close must
+    /// reach the store, like any other accepted work.
+    @Test("Close delivers liveness accepted before it")
+    func closeDeliversLiveness() async {
+        let log = EventLog()
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        mailbox.setLivenessHandlerForTesting({ live, _ in
+            await log.append(live ? "live" : "stopped")
+        })
+        mailbox.sourceBecame(live: false, for: DeviceIdentity.Source.thisMac)
+        await mailbox.close()
+        let delivered = await log.events
+        #expect(delivered == ["stopped"], "a liveness update was dropped at shutdown")
+        #expect(mailbox.pendingLivenessCount == 0)
+    }
+
+    @Test("A closed mailbox accepts no more liveness")
+    func closedMailboxRefusesLiveness() async {
+        let log = EventLog()
+        let mailbox = ObservationMailbox(deliver: { _ in })
+        mailbox.setLivenessHandlerForTesting({ live, _ in
+            await log.append(live ? "live" : "stopped")
+        })
+        await mailbox.close()
+        mailbox.sourceBecame(live: true, for: DeviceIdentity.Source.thisMac)
+        await briefly()
+        let afterClose = await log.events
+        #expect(afterClose.isEmpty)
+    }
+}

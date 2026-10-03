@@ -10,6 +10,19 @@ import os
 /// a comparison and a return.
 public protocol DeviceObservationSink: Sendable {
     func submit(_ observation: DeviceObservation)
+
+    /// Says whether the provider behind a kind of source is running.
+    ///
+    /// Freshness for a source that reports only on change is its provider's
+    /// liveness — see `DeviceRecord.isFresh(now:sourceIsLive:)`. Nothing is
+    /// polled to keep a timestamp warm; the provider says when it starts and
+    /// when it stops.
+    func sourceBecame(live: Bool, for source: DeviceIdentity.Source)
+}
+
+extension DeviceObservationSink {
+    /// Most sources are judged by elapsed time and have nothing to say here.
+    public func sourceBecame(live: Bool, for source: DeviceIdentity.Source) {}
 }
 
 /// Holds the latest observation per device and forwards what is worth
@@ -42,7 +55,24 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         /// `invalidate()`, which is what guarantees that only one delivery is
         /// ever in flight.
         var isDraining = false
+
+        /// Closed to new work, on the way out. Submissions after this are
+        /// dropped rather than queued behind a process that is leaving.
+        var isClosed = false
+
+        /// Liveness changes waiting to be forwarded, latest per source.
+        var pendingLiveness: [DeviceIdentity.Source: Bool] = [:]
+
+        /// Waiting to be told the queue is empty and nothing is in flight.
+        var quiesced: [CheckedContinuation<Void, Never>] = []
     }
+
+    /// How many devices the forwarded-history maps may remember.
+    ///
+    /// They exist to tell news from noise, which only needs the devices
+    /// currently around. A Mac that has met a conference room's worth of
+    /// AirPods should not carry every one of them for the life of the process.
+    static let trackedDeviceLimit = 64
 
     private let state = OSAllocatedUnfairLock(initialState: State())
     private let deliver: @Sendable (DeviceObservation) async -> Void
@@ -56,6 +86,39 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         self.init(deliver: { [weak store] observation in
             await store?.record(observation)
         })
+        liveness = { [weak store] live, source in
+            await store?.setSource(source, live: live)
+        }
+    }
+
+    /// Queues a liveness change through the same ordered path observations
+    /// take.
+    ///
+    /// One unstructured task per update let a start overtake the stop that
+    /// followed it, leaving This Mac marked live after its provider had gone.
+    /// Coalesced per source — the latest state is the only one that matters —
+    /// and awaited by `close()` like any other accepted work.
+    public func sourceBecame(live: Bool, for source: DeviceIdentity.Source) {
+        let shouldStart: Bool = state.withLock { s in
+            guard !s.isClosed else { return false }
+            s.pendingLiveness[source] = live
+            guard !s.isDraining else { return false }
+            s.isDraining = true
+            return true
+        }
+        guard shouldStart else { return }
+        Task { [weak self] in await self?.drain() }
+    }
+
+    /// Where provider liveness goes. Separate from `deliver` so the fake
+    /// mailboxes in tests need know nothing about it.
+    private var liveness: @Sendable (Bool, DeviceIdentity.Source) async -> Void = { _, _ in }
+
+    /// Tests: where liveness updates go, without a catalogue behind them.
+    func setLivenessHandlerForTesting(
+        _ handler: @escaping @Sendable (Bool, DeviceIdentity.Source) async -> Void
+    ) {
+        liveness = handler
     }
 
     public func submit(_ observation: DeviceObservation) {
@@ -66,6 +129,9 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         // UUID, so the leak simply moved here.
         let key = observation.canonicalID
         let shouldStart: Bool = state.withLock { s in
+            // On the way out. Accepting this would queue work behind a
+            // shutdown that is already waiting for the queue to empty.
+            guard !s.isClosed else { return false }
             let previous = s.forwarded[key]
             let last = s.lastForwardedAt[key]
 
@@ -133,12 +199,30 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     /// the queue empty, so there is exactly one delivery in flight whatever
     /// else happens; `invalidate()` empties the queue instead, which is what
     /// actually stops the work.
+    /// One unit of queued work.
+    private enum Work {
+        case observation(DeviceObservation)
+        case liveness(DeviceIdentity.Source, Bool)
+    }
+
     private func drain() async {
         while true {
-            let next: DeviceObservation? = state.withLock { s in
+            let step: (next: Work?, waiting: [CheckedContinuation<Void, Never>])
+            step = state.withLock { s in
+                // Liveness first: it is a flag, it is cheap, and a provider
+                // stopping is what the observations behind it are measured
+                // against.
+                if let entry = s.pendingLiveness.first {
+                    s.pendingLiveness.removeValue(forKey: entry.key)
+                    return (.liveness(entry.key, entry.value), [])
+                }
                 guard let entry = s.pending.first else {
                     s.isDraining = false
-                    return nil
+                    // Nothing queued and nothing in flight: whoever is waiting
+                    // for that — a shutdown barrier — can go on.
+                    let waiting = s.quiesced
+                    s.quiesced.removeAll()
+                    return (nil, waiting)
                 }
                 s.pending.removeValue(forKey: entry.key)
                 // Recorded as forwarded *before* it is delivered, not after.
@@ -149,10 +233,75 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
                 // again — so a busy moment forwarded the same reading twice.
                 s.forwarded[entry.key] = entry.value
                 s.lastForwardedAt[entry.key] = entry.value.observedAt
-                return entry.value
+                // Bounded here, where an entry is actually added.
+                Self.evictOldest(&s)
+                return (.observation(entry.value), [])
             }
-            guard let next else { return }
-            await deliver(next)
+            guard let next = step.next else {
+                for continuation in step.waiting { continuation.resume() }
+                return
+            }
+            switch next {
+            case .observation(let observation): await deliver(observation)
+            case .liveness(let source, let live): await liveness(live, source)
+            }
+        }
+    }
+
+    /// Closes the mailbox and delivers everything accepted before the close.
+    ///
+    /// A durability barrier, not a cancellation. An observation submitted
+    /// before shutdown was *accepted* — it may carry the history sample or the
+    /// alert latch that stops the same alert being raised again after the next
+    /// launch — so it has to reach the catalogue before the catalogue is
+    /// written. Discarding the queue here meant quitting at the wrong moment
+    /// lost it, which is exactly the repeat the latch exists to prevent.
+    ///
+    /// New submissions are refused from the first line: the producers are
+    /// stopped before this is called, and anything arriving afterwards belongs
+    /// to a session that is over.
+    ///
+    /// Idempotent, and safe to call when nothing is in flight. `invalidate()`
+    /// keeps its own discard semantics, for a provider resetting mid-session.
+    public func close() async {
+        let needsDrain: Bool = state.withLock { s in
+            s.isClosed = true
+            // Queued work is kept — observations *and* liveness. If no drain
+            // owns the queue — the last one retired before the close — this
+            // call starts one.
+            guard !s.pending.isEmpty || !s.pendingLiveness.isEmpty else { return false }
+            guard !s.isDraining else { return false }
+            s.isDraining = true
+            return true
+        }
+        if needsDrain { Task { [weak self] in await self?.drain() } }
+
+        let settled: Bool = state.withLock { s in
+            s.pending.isEmpty && s.pendingLiveness.isEmpty && !s.isDraining
+        }
+        guard !settled else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = state.withLock { s in
+                guard !s.pending.isEmpty || !s.pendingLiveness.isEmpty || s.isDraining
+                else { return true }
+                s.quiesced.append(continuation)
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    /// Keeps the bookkeeping bounded, dropping the devices not heard from for
+    /// longest. Never drops anything still pending.
+    private static func evictOldest(_ s: inout State) {
+        guard s.forwarded.count > trackedDeviceLimit else { return }
+        let ordered = s.lastForwardedAt.sorted { $0.value < $1.value }
+        var excess = s.forwarded.count - trackedDeviceLimit
+        for (id, _) in ordered where excess > 0 {
+            guard s.pending[id] == nil else { continue }
+            s.forwarded.removeValue(forKey: id)
+            s.lastForwardedAt.removeValue(forKey: id)
+            excess -= 1
         }
     }
 
@@ -170,6 +319,9 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     public func invalidate() {
         state.withLock { s in
             s.pending.removeAll()
+            // Liveness is kept: a provider stopping is exactly what a reset
+            // means, and losing that would leave a record claiming a live
+            // reading from a provider that is gone.
             s.forwarded.removeAll()
             s.lastForwardedAt.removeAll()
         }
@@ -187,6 +339,7 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     // MARK: - Tests
 
     var pendingCount: Int { state.withLock { $0.pending.count } }
+    var pendingLivenessCount: Int { state.withLock { $0.pendingLiveness.count } }
 
     /// How many devices this mailbox is remembering. The number that must not
     /// grow when an identifier rotates.
@@ -194,4 +347,5 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         state.withLock { Set($0.forwarded.keys).union($0.lastForwardedAt.keys).count }
     }
     var isDraining: Bool { state.withLock { $0.isDraining } }
+    var isClosed: Bool { state.withLock { $0.isClosed } }
 }

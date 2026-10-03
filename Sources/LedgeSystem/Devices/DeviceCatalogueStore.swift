@@ -158,6 +158,20 @@ public actor DeviceCatalogueStore {
         return catalogue
     }
 
+    /// Records whether the provider behind a kind of source is running.
+    ///
+    /// Session state: never written to disk, and nothing polls to maintain it.
+    /// It is what lets a source that reports only on change — this Mac's
+    /// battery — be current while its provider runs and doubtful once it stops.
+    public func setSource(_ source: DeviceIdentity.Source, live: Bool) {
+        load()
+        if live {
+            catalogue.liveSources.insert(source)
+        } else {
+            catalogue.liveSources.remove(source)
+        }
+    }
+
     // MARK: - Observing
 
     public func record(_ observation: DeviceObservation) async {
@@ -172,12 +186,21 @@ public actor DeviceCatalogueStore {
 
         // Whether this observation *is* the device attaching, rather than a
         // passive sighting or the first reading after launch. Only a genuine
-        // attach may alert without a previous level to have crossed.
+        // attach may alert without a previous level to have crossed — and only
+        // a connection callback is evidence of one.
+        //
+        // The inventory of what was already connected looks identical to an
+        // attachment from here: presence connected, no prior record, a low
+        // level. Launching with low AirPods in your ears would then alert
+        // immediately, every launch, about a state the user already knows.
+        // `ObservationCause` is what tells the two apart.
+        let couldAttach = observation.cause.isAttachmentEvidence
         let isAttaching: Bool
         var record: DeviceRecord
         if let index = catalogue.index(of: id) {
             record = catalogue.devices[index]
-            isAttaching = observation.presence == .connected
+            isAttaching = couldAttach
+                && observation.presence == .connected
                 && record.presence != .connected
             // A rename is a rename, not a new device.
             record.name = observation.name
@@ -186,9 +209,10 @@ public actor DeviceCatalogueStore {
                 id: id, name: observation.name,
                 firstSeen: at, lastSeen: at
             )
-            // A device we have never seen, reporting itself connected, has
-            // just been attached as far as anything here can tell.
-            isAttaching = observation.presence == .connected
+            // A device we have never seen before. Attaching only if something
+            // actually saw it attach; an inventory or an advertisement
+            // establishes the baseline quietly instead.
+            isAttaching = couldAttach && observation.presence == .connected
         }
 
         record.lastSeen = at
@@ -217,9 +241,16 @@ public actor DeviceCatalogueStore {
         // The same physical AirPods can hold two records — one per source —
         // and there is no dependable way to relate them. The records stay
         // separate; the alert does not fire twice.
-        let alerts = BatteryAlertEngine.withoutDuplicates(
+        let surviving = BatteryAlertEngine.withoutDuplicates(
             decided, recent: recentlyDelivered, now: at
-        ).map { enrich($0, from: record) }
+        )
+        // The latch of a suppressed decision *stays*. Everything dropped here
+        // is a cross-record duplicate — the same alert about one physical
+        // device, already shown or queued through its other record — so the
+        // user has seen it. Releasing the latch meant the second record said
+        // the same thing again on a later reconnect, once the five-minute
+        // duplicate window had passed.
+        let alerts = surviving.map { enrich($0, from: record) }
 
         // The record goes in *before* anything is written or delivered. An
         // earlier version wrote immediately inside the block above, which put
@@ -249,7 +280,7 @@ public actor DeviceCatalogueStore {
             }
         }
 
-        appendHistory(for: observation, id: id, connected: observation.presence == .connected)
+        appendHistory(for: observation, id: id, lastKnown: record.readings)
         runMaintenanceIfDue()
         scheduleWrite()
     }
@@ -257,21 +288,63 @@ public actor DeviceCatalogueStore {
     private func appendHistory(
         for observation: DeviceObservation,
         id: DeviceIdentity,
-        connected: Bool
+        lastKnown: [BatteryReading]
     ) {
         let key = DeviceCatalogue.historyKey(id)
         var samples = catalogue.history[key] ?? []
+
+        // A disconnect carries no levels, so it used to add nothing at all —
+        // and the chart then drew a straight line from the last reading
+        // before the device left to the first one after it came back, through
+        // hours nobody observed. The boundary is recorded instead, carrying
+        // the last known level and saying the device was gone.
+        if observation.presence == .disconnected, observation.readings.isEmpty {
+            for reading in lastKnown where reading.reliability != .unreliable {
+                let boundary = BatterySample(
+                    component: reading.component, level: reading.level,
+                    charging: reading.charging, at: observation.observedAt,
+                    isConnected: false
+                )
+                let previous = samples.last { $0.component == reading.component }
+                // Always kept: a boundary is the one sample whose whole job is
+                // to mark where the line stops.
+                guard previous?.isConnected != false else { continue }
+                samples.append(boundary)
+            }
+            catalogue.history[key] = samples
+            return
+        }
+
         for reading in observation.readings where reading.reliability != .unreliable {
+            let previous = samples.last { $0.component == reading.component }
             let candidate = BatterySample(
                 component: reading.component, level: reading.level,
                 charging: reading.charging, at: reading.observedAt,
-                isConnected: connected
+                // A proximity advertisement says "in range" and nothing about
+                // attachment: `unknown` is not a disconnection, and recording
+                // it as one drew a gap through a device that never left.
+                isConnected: Self.connectivity(observation.presence, after: previous)
             )
-            let previous = samples.last { $0.component == reading.component }
             guard BatteryHistory.isWorthKeeping(candidate, after: previous) else { continue }
             samples.append(candidate)
         }
         catalogue.history[key] = samples
+    }
+
+    /// Whether a sample should say the device was connected.
+    ///
+    /// Only a definite presence changes the answer. An unknown one keeps
+    /// whatever the last sample said, and a first sample with nothing to go on
+    /// counts as connected: something is reporting its battery.
+    private static func connectivity(
+        _ presence: DevicePresence,
+        after previous: BatterySample?
+    ) -> Bool {
+        switch presence {
+        case .connected: return true
+        case .disconnected: return false
+        case .unknown: return previous?.isConnected ?? true
+        }
     }
 
     /// Gives an alert the device's own styling and full battery picture.
@@ -364,6 +437,12 @@ public actor DeviceCatalogueStore {
     /// Tests: what is queued for a consumer that has not arrived yet.
     public func queuedAlertCount() -> Int { pendingAlerts.count }
 
+    /// Tests: empties the pending queue without delivering it, so a later
+    /// count measures only what happened afterwards.
+    func drainQueuedAlertsForTesting() {
+        pendingAlerts.removeAll()
+    }
+
     /// Shows what a rule would look like, using made-up numbers.
     ///
     /// Goes to the live consumer — the same path a real alert takes, so a
@@ -379,6 +458,7 @@ public actor DeviceCatalogueStore {
             deviceName: deviceName,
             component: rule.component ?? .main,
             level: rule.threshold,
+            threshold: rule.threshold,
             delivery: rule.delivery,
             firedAt: now()
         )
@@ -411,6 +491,16 @@ public actor DeviceCatalogueStore {
         load()
         guard let index = catalogue.index(of: id) else { return }
         catalogue.devices[index].alerts = configuration
+        // A deleted rule's latch has nothing left to suppress, and would sit
+        // in the persisted state for the life of the record. The default
+        // rule's id is kept whatever the configuration says: an uncustomised
+        // device has no rules listed and still alerts through it, so dropping
+        // that latch would let the default alert repeat.
+        var live = Set(configuration.rules.map(\.id))
+        live.insert(BatteryAlertRule.defaultLowID)
+        for component in catalogue.devices[index].alertState.keys {
+            catalogue.devices[index].alertState[component]?.firedRuleIDs.formIntersection(live)
+        }
         scheduleWrite()
     }
 

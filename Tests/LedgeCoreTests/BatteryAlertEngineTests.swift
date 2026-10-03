@@ -549,3 +549,265 @@ struct BatteryComponentTests {
         #expect(!BatteryComponent.other("Transmitter").isInUse)
     }
 }
+
+/// A rule with nowhere to deliver is a rule that is off. Settings lets both
+/// destinations be unticked, and the engine used to fire anyway: nothing
+/// appeared, and the latch was spent — so ticking a destination back on left
+/// the user waiting for an alert that had already silently happened.
+@Suite("Alerts nobody can see")
+struct UndeliverableAlertTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+
+    private static func observation(_ level: Double, at seconds: TimeInterval) -> DeviceObservation {
+        DeviceObservation(
+            deviceID: .bluetooth("aa:bb"), name: "AirPods",
+            readings: [BatteryReading(
+                component: .left, level: level, observedAt: t0.addingTimeInterval(seconds)
+            )],
+            presence: .connected, observedAt: t0.addingTimeInterval(seconds),
+            cause: .connectionEvent
+        )
+    }
+
+    private static func configuration(delivery: AlertDelivery) -> DeviceAlertConfiguration {
+        DeviceAlertConfiguration(
+            rules: [BatteryAlertRule(
+                kind: .low, component: .left, threshold: 0.2, delivery: delivery
+            )],
+            isCustomised: true
+        )
+    }
+
+    @Test("A rule with no destination knows it cannot deliver")
+    func ruleKnowsItCannotDeliver() {
+        #expect(BatteryAlertRule(kind: .low, threshold: 0.2, delivery: []).canDeliver == false)
+        #expect(BatteryAlertRule(kind: .low, threshold: 0.2, delivery: .notch).canDeliver)
+        #expect(BatteryAlertRule(kind: .low, threshold: 0.2, delivery: .both).canDeliver)
+    }
+
+    @Test("It does not fire, and does not spend its latch")
+    func undeliverableRuleIsInert() {
+        let configuration = Self.configuration(delivery: [])
+        let first = BatteryAlertEngine.evaluate(
+            state: [:], observation: Self.observation(0.30, at: 0),
+            configuration: configuration
+        )
+        let crossing = BatteryAlertEngine.evaluate(
+            state: first.state, observation: Self.observation(0.15, at: 60),
+            configuration: configuration
+        )
+        #expect(crossing.alerts.isEmpty, "an alert nobody could see was raised")
+        #expect(
+            crossing.state[.left]?.firedRuleIDs.isEmpty == true,
+            "and it spent the latch, so enabling delivery would stay silent"
+        )
+    }
+
+    /// The consequence that mattered: switch a destination back on, and the
+    /// next reading below the threshold is announced — the earlier silence did
+    /// not consume it.
+    @Test("Enabling delivery afterwards still announces")
+    func enablingDeliveryAnnounces() {
+        let off = Self.configuration(delivery: [])
+        let baseline = BatteryAlertEngine.evaluate(
+            state: [:], observation: Self.observation(0.30, at: 0), configuration: off
+        )
+        let whileOff = BatteryAlertEngine.evaluate(
+            state: baseline.state, observation: Self.observation(0.15, at: 60),
+            configuration: off
+        )
+        #expect(whileOff.alerts.isEmpty)
+
+        // Same rule id, now with somewhere to go, and the level comes back
+        // down after recovering.
+        var on = Self.configuration(delivery: .notch)
+        on.rules[0] = BatteryAlertRule(
+            id: off.rules[0].id, kind: .low, component: .left,
+            threshold: 0.2, delivery: .notch
+        )
+        let recovered = BatteryAlertEngine.evaluate(
+            state: whileOff.state, observation: Self.observation(0.40, at: 120),
+            configuration: on
+        )
+        let crossing = BatteryAlertEngine.evaluate(
+            state: recovered.state, observation: Self.observation(0.15, at: 180),
+            configuration: on
+        )
+        #expect(crossing.alerts.count == 1, "the alert was swallowed by the earlier silence")
+    }
+}
+
+/// Two rules the user deliberately set on one device — "tell me at 30%, and
+/// again at 10%" — are two things they asked for. One reading crossing both
+/// must deliver both, while two *records* of the same physical device raising
+/// the same alert still collapse to one.
+@Suite("Several rules on one device")
+struct MultipleRuleTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+
+    private static func alert(
+        _ ruleID: UUID,
+        level: Double,
+        threshold: Double = 0.2,
+        name: String = "AirPods",
+        component: BatteryComponent = .left
+    ) -> BatteryAlert {
+        BatteryAlert(
+            ruleID: ruleID, kind: .low, deviceID: .bluetooth("aa:bb"),
+            deviceName: name, component: component, level: level,
+            threshold: threshold, delivery: .notch, firedAt: t0
+        )
+    }
+
+    /// One reading at 8% crosses a 30% rule and a 10% rule at once. Both
+    /// alerts carry the same *level* — the reading — so only the rule's own
+    /// threshold can tell the two wishes apart.
+    @Test("Two thresholds crossed at once both deliver")
+    func twoThresholdsBothDeliver() {
+        let shallow = Self.alert(UUID(), level: 0.08, threshold: 0.30)
+        let deep = Self.alert(UUID(), level: 0.08, threshold: 0.10)
+        let kept = BatteryAlertEngine.withoutDuplicates(
+            [shallow, deep], recent: [], now: Self.t0
+        )
+        #expect(kept.count == 2, "a rule the user added was silently swallowed")
+    }
+
+    /// The case the deduplication exists for: one physical device, two
+    /// *records* (Bluetooth address and proximity UUID), raising the same alert
+    /// a moment apart. Two records, because that is what makes it a duplicate
+    /// rather than two wishes — see `SameRecordRuleTests`.
+    @Test("The same alert from two records of one device collapses")
+    func duplicateAcrossRecordsCollapses() {
+        let first = Self.alert(UUID(), level: 0.18, threshold: 0.2)
+        var second = Self.alert(UUID(), level: 0.18, threshold: 0.2)
+        second.deviceID = DeviceIdentity(source: .proximityName, value: "airpods")
+        let kept = BatteryAlertEngine.withoutDuplicates(
+            [second], recent: [first], now: Self.t0.addingTimeInterval(30)
+        )
+        #expect(kept.isEmpty, "the same device said the same thing twice")
+    }
+
+}
+
+/// Deduplication is for one physical device wearing two records — one from the
+/// paired list, one from a proximity advertisement. It is not for two rules the
+/// user deliberately set on the same device, even at the same threshold.
+@Suite("Two rules, one record")
+struct SameRecordRuleTests {
+
+    private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
+    private static let airpods = DeviceIdentity.bluetooth("aa:bb")
+    private static let proximity = DeviceIdentity(source: .proximityName, value: "airpods")
+
+    private static func alert(
+        rule: UUID,
+        device: DeviceIdentity,
+        level: Double = 0.18,
+        threshold: Double = 0.2,
+        component: BatteryComponent = .left
+    ) -> BatteryAlert {
+        BatteryAlert(
+            ruleID: rule, kind: .low, deviceID: device, deviceName: "AirPods",
+            component: component, level: level, threshold: threshold,
+            delivery: .notch, firedAt: t0
+        )
+    }
+
+    /// Two rules, same device, same component, same kind, *same threshold* —
+    /// a reachable configuration, and both were being collapsed into one.
+    @Test("Two rules at the same threshold on one record both deliver")
+    func sameThresholdTwoRulesBothDeliver() {
+        // One of them has already been delivered a moment ago — which is what
+        // the suppression looks at. The other belongs to the same record, so
+        // it is a second thing the user asked for, not a duplicate.
+        let alreadyDelivered = Self.alert(rule: UUID(), device: Self.airpods)
+        let second = Self.alert(rule: UUID(), device: Self.airpods)
+        let kept = BatteryAlertEngine.withoutDuplicates(
+            [second], recent: [alreadyDelivered], now: Self.t0.addingTimeInterval(30)
+        )
+        #expect(kept.count == 1, "a rule the user added was silently swallowed")
+
+        // And both crossing in the same pass survive together.
+        let bothAtOnce = BatteryAlertEngine.withoutDuplicates(
+            [alreadyDelivered, second], recent: [], now: Self.t0
+        )
+        #expect(bothAtOnce.count == 2)
+    }
+
+    /// And the suppression it exists for still works: the same alert about one
+    /// physical device, arriving through two records.
+    @Test("The same alert from two records still collapses")
+    func twoRecordsStillCollapse() {
+        let viaPairedList = Self.alert(rule: UUID(), device: Self.airpods)
+        let viaProximity = Self.alert(rule: UUID(), device: Self.proximity)
+        let kept = BatteryAlertEngine.withoutDuplicates(
+            [viaProximity], recent: [viaPairedList], now: Self.t0.addingTimeInterval(30)
+        )
+        #expect(kept.isEmpty, "one device said the same thing twice")
+    }
+
+    /// A record repeating itself is the latch's job, not this one's: the same
+    /// record's own earlier alert must not suppress a later decision here.
+    @Test("One record's own earlier alert does not suppress it")
+    func sameRecordDoesNotSuppressItself() {
+        let rule = UUID()
+        let earlier = Self.alert(rule: rule, device: Self.airpods)
+        let again = Self.alert(rule: rule, device: Self.airpods)
+        let kept = BatteryAlertEngine.withoutDuplicates(
+            [again], recent: [earlier], now: Self.t0.addingTimeInterval(30)
+        )
+        #expect(kept.count == 1)
+    }
+
+}
+
+/// A charged alert for a battery that never reports charging can never fire.
+/// The row must stay repairable: disabling all of it took Delete and the
+/// battery picker with it, which left decoded rules impossible to fix.
+@Suite("Which alert-row controls are usable")
+struct RuleControlsTests {
+
+    private static func charged(component: BatteryComponent? = .case) -> BatteryAlertRule {
+        BatteryAlertRule(kind: .charged, component: component, threshold: 1.0)
+    }
+
+    private static func low() -> BatteryAlertRule {
+        BatteryAlertRule(kind: .low, component: .left, threshold: 0.2)
+    }
+
+    @Test("A charged rule on a battery with no charging evidence cannot fire")
+    func impossibleRuleCannotFire() {
+        let controls = RuleControls(rule: Self.charged(), componentReportsCharging: false)
+        #expect(controls.canFire == false)
+        #expect(controls.canEnable == false, "it could be switched on and promise nothing")
+        #expect(controls.canEditThreshold == false)
+        #expect(controls.canChooseDelivery == false)
+        #expect(controls.canPreview == false)
+    }
+
+    @Test("And it stays repairable")
+    func impossibleRuleIsRepairable() {
+        let controls = RuleControls(rule: Self.charged(), componentReportsCharging: false)
+        #expect(controls.canChooseBattery, "choosing another battery is the repair")
+        #expect(controls.canDelete, "and removing it is the other way out")
+    }
+
+    @Test("A charged rule on a battery that does report charging is fully usable")
+    func possibleChargedRule() {
+        let controls = RuleControls(rule: Self.charged(), componentReportsCharging: true)
+        #expect(controls.canFire)
+        #expect(controls.canEnable)
+        #expect(controls.canEditThreshold)
+    }
+
+    /// A low alert needs no charging evidence at all, so nothing is ever
+    /// dimmed for it.
+    @Test("A low rule is never limited by charging evidence")
+    func lowRuleUnaffected() {
+        let controls = RuleControls(rule: Self.low(), componentReportsCharging: false)
+        #expect(controls.canFire)
+        #expect(controls.canEnable)
+    }
+}

@@ -26,11 +26,15 @@ struct VolumeWatchBackendTests {
 
     // MARK: - Starting
 
-    @Test("Arming holds one system listener and at most four device listeners")
+    @Test("Arming holds one system listener and a bounded set of device listeners")
     func armingIsBounded() {
         let (backend, hardware) = started()
         #expect(hardware.systemRegistrations.count == 1)
         #expect(hardware.deviceRegistrations.count <= VolumeWatchBackend.maximumDeviceListeners)
+        #expect(
+            hardware.deviceRegistrations.count <= VolumeWatchBackend.stereoDeviceListeners,
+            "a stereo device registered \(hardware.deviceRegistrations.count) listeners"
+        )
         #expect(hardware.liveCount == backend.registrationCount())
         backend.stop()
     }
@@ -91,6 +95,10 @@ struct VolumeWatchBackendTests {
         #expect(Set(deviceAfter).isDisjoint(with: Set(deviceBefore)), "device listeners were not replaced")
         #expect(hardware.deviceRegistrations.allSatisfy { $0.object == 200 })
         #expect(hardware.deviceRegistrations.count <= VolumeWatchBackend.maximumDeviceListeners)
+        #expect(
+            hardware.deviceRegistrations.count <= VolumeWatchBackend.stereoDeviceListeners,
+            "a stereo device registered \(hardware.deviceRegistrations.count) listeners"
+        )
         #expect(backend.boundDeviceForTesting() == 200)
         backend.stop()
     }
@@ -577,5 +585,104 @@ struct VolumeWatchLifecycleTests {
         #expect(hardware.systemRegistrations.count == 1, "the later start did not arm")
         #expect(!seen.withLock { $0 }.isEmpty, "the later start delivered nothing")
         backend.stop()
+    }
+}
+
+/// The watch has to cover the same elements the writer does. Mute on the
+/// master alone missed a headset whose mute lives on its channels; volume on
+/// the master plus channels 1–2 missed everything above the second channel of
+/// a multichannel interface. In both cases a change made outside Ledge — in
+/// Control Centre, on the device itself — never arrived.
+@Suite("Watching the device's real topology", .serialized)
+struct WatchTopologyTests {
+
+    private func started(
+        configure: (FakeAudioHardware) -> Void
+    ) -> (VolumeWatchBackend, FakeAudioHardware) {
+        let hardware = FakeAudioHardware()
+        configure(hardware)
+        let backend = VolumeWatchBackend(hardware: hardware)
+        backend.start { _ in }
+        backend.settleForTesting()
+        return (backend, hardware)
+    }
+
+    private func registeredElements(
+        _ hardware: FakeAudioHardware,
+        selector: AudioObjectPropertySelector
+    ) -> Set<UInt32> {
+        Set(
+            hardware.deviceRegistrations
+                .filter { $0.selector == selector }
+                .map(\.element)
+        )
+    }
+
+    @Test("A channel-only device's mute is watched on its channels")
+    func channelOnlyMuteIsWatched() {
+        let (backend, hardware) = started {
+            // No master element at all: mute and volume live on 1 and 2.
+            $0.setElements([1, 2], for: 100)
+        }
+        let muted = registeredElements(hardware, selector: kAudioDevicePropertyMute)
+        #expect(
+            muted.contains(1) && muted.contains(2),
+            "a channel-only device's mute was never watched: \(muted.sorted())"
+        )
+        backend.stop()
+    }
+
+    @Test("Channels above the second are watched too")
+    func highChannelsAreWatched() {
+        let (backend, hardware) = started {
+            $0.setChannels([1, 2, 3, 4, 5, 6], for: 100)
+            $0.setElements([0, 1, 2, 3, 4, 5, 6], for: 100)
+        }
+        let scalars = registeredElements(hardware, selector: kAudioDevicePropertyVolumeScalar)
+        #expect(
+            scalars.contains(5) && scalars.contains(6),
+            "channels past the second were never watched: \(scalars.sorted())"
+        )
+        backend.stop()
+    }
+
+    /// Bounded, because this backend exists to stop registration runaway: a
+    /// device claiming a hundred channels gets the first sixteen.
+    @Test("A device claiming many channels is capped")
+    func manyChannelsAreCapped() {
+        let (backend, hardware) = started {
+            $0.setChannels((1...100).map { UInt32($0) }, for: 100)
+            $0.setElements(Set((0...100).map { UInt32($0) }), for: 100)
+        }
+        #expect(
+            hardware.deviceRegistrations.count <= VolumeWatchBackend.maximumDeviceListeners,
+            "\(hardware.deviceRegistrations.count) listeners for one device"
+        )
+        backend.stop()
+    }
+
+    /// And a device that exposes only a master registers only the master —
+    /// `hasProperty` still filters, so nothing new is registered for the
+    /// devices that were already covered.
+    @Test("A master-only device registers only master listeners")
+    func masterOnlyIsUnchanged() {
+        let (backend, hardware) = started { $0.setElements([0], for: 100) }
+        #expect(hardware.deviceRegistrations.allSatisfy { $0.element == 0 })
+        #expect(hardware.deviceRegistrations.count == 2, "mute and volume on the master")
+        backend.stop()
+    }
+
+    @Test("Every registration is released on stop")
+    func stopReleasesEverything() {
+        let (backend, hardware) = started {
+            $0.setChannels([1, 2, 3, 4], for: 100)
+            $0.setElements([0, 1, 2, 3, 4], for: 100)
+        }
+        #expect(hardware.liveCount == backend.registrationCount())
+        backend.stop()
+        // Removal happens on the backend's own queue, like registration.
+        backend.settleForTesting()
+        #expect(hardware.liveCount == 0, "\(hardware.liveCount) registrations outlived the watch")
+        #expect(hardware.addCount == hardware.removeCount, "adds and removes did not balance")
     }
 }

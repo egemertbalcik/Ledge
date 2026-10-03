@@ -150,26 +150,33 @@ public enum Prefs {
     /// more than a hover away.
     public static let showVideoInCompact = PrefKey<Bool>("nowplaying.showVideoInCompact", default: true)
 
-    /// Whether a web page's media may have a card at all.
+    /// The websites whose media may appear, and how far — as JSON.
     ///
-    /// Off by default. A browser holds one now-playing slot for every tab and
-    /// hands it around, so what arrives is often a video nobody chose — and an
-    /// autoplaying advertisement in a background tab registers exactly as a
-    /// track does. Native players say what they are playing; a page does not.
+    /// Empty by default, which means every website is hidden. A browser holds
+    /// one now-playing slot for every tab and hands it around, so what arrives
+    /// is often not what anybody chose to play; an allow list turns "anything
+    /// in a browser" into "the handful of sites I actually listen to".
     ///
-    /// Replaces `nowplaying.appMediaOnly` and `nowplaying.hideWebMediaCard`,
-    /// which expressed the same thing as two overlapping negatives and
-    /// defaulted to showing web media. An explicit setting of either is
-    /// carried over by `WebMediaMigration`; an installation that never
-    /// touched them gets this default instead.
-    public static let showWebMediaCards = PrefKey<Bool>("nowplaying.showWebMediaCards", default: false)
+    /// Hosts only — never a URL, a path or a query. See `WebsiteHost`.
+    ///
+    /// Replaces the two global switches (`showWebMediaCards`,
+    /// `showWebMediaInCompact`), which could only say "all websites" or
+    /// "none". `WebMediaMigration` reads them once and retires them: an "all
+    /// websites" choice is *not* turned into a rule per site, because there is
+    /// no list of sites to write and inventing one would broaden access.
+    public static let websiteRules = PrefKey<String>("nowplaying.websiteRules", default: "")
 
-    /// Whether a web page's media may also hold the compact view.
+    /// Whether Settings still owes the user an explanation for web media
+    /// having stopped appearing.
     ///
-    /// Off by default, and meaningless without `showWebMediaCards` — see
-    /// `WebMediaPolicy`, which is where that dependency is enforced rather
-    /// than trusted to each reader.
-    public static let showWebMediaInCompact = PrefKey<Bool>("nowplaying.showWebMediaInCompact", default: false)
+    /// Raised once by `WebMediaMigration` for an installation that had the old
+    /// global setting on, and cleared only by something the user does —
+    /// dismissing it, or adding their first website. Persisted because the
+    /// update that retires those keys is followed by a relaunch, and a notice
+    /// that lives in memory is a notice nobody sees.
+    public static let webMediaNoticePending = PrefKey<Bool>(
+        "nowplaying.webMediaNoticePending", default: false
+    )
 
     // General
     public static let launchAtLogin = PrefKey<Bool>("general.launchAtLogin", default: false)
@@ -238,13 +245,14 @@ public enum Prefs {
         "behavior.companionOverFullscreen",
         // The equaliser just moves now.
         "nowplaying.equalizerEnabled",
-        // Two negatives that together said what `showWebMediaCards` and
-        // `showWebMediaInCompact` now say as two positives. Retired *after*
-        // `WebMediaMigration` has read them: a choice somebody actually made
-        // is carried over, while an installation that never touched them
-        // takes the new default. See that type for the mapping.
+        // Three generations of one setting, all retired *after*
+        // `WebMediaMigration` has read them. None of them could name a
+        // website, and none is carried forward as a rule — see that type for
+        // why granting "every site" would be the wrong reading.
         "nowplaying.appMediaOnly",
         "nowplaying.hideWebMediaCard",
+        "nowplaying.showWebMediaCards",
+        "nowplaying.showWebMediaInCompact",
     ]
 
     /// Every key name, for reset-to-defaults.
@@ -265,7 +273,7 @@ public enum Prefs {
         hudEnabled.name, hudBrightnessEnabled.name, suppressSystemHUD.name,
         hudVolumeStep.name, hudBrightnessStep.name, hudContentOffset.name, hudGlowBar.name,
         externalBrightness.name,
-        showVideoInCompact.name, showWebMediaCards.name, showWebMediaInCompact.name,
+        showVideoInCompact.name, websiteRules.name, webMediaNoticePending.name,
         launchAtLogin.name, hideFromScreenCapture.name, advanced.name,
         debugTint.name,
     ]
@@ -335,25 +343,68 @@ public final class Preferences {
     public var shelfAutoScreenshots: Bool { didSet { persist(shelfAutoScreenshots, Prefs.shelfAutoScreenshots) } }
 
     public var showVideoInCompact: Bool { didSet { persist(showVideoInCompact, Prefs.showVideoInCompact) } }
-    public var showWebMediaCards: Bool {
-        didSet {
-            persist(showWebMediaCards, Prefs.showWebMediaCards)
-            // Cards off takes the compact switch down with it, rather than
-            // leaving it set and waiting. Otherwise turning cards back on
-            // months later would also bring back a compact presence nobody
-            // asked for twice — and the stored pair would sit in the state
-            // `WebMediaPolicy` reads as invalid.
-            if !showWebMediaCards, showWebMediaInCompact { showWebMediaInCompact = false }
+    /// The website rules, as stored. Edited through `webMedia`.
+    public var websiteRules: String {
+        didSet { persist(websiteRules, Prefs.websiteRules) }
+    }
+
+    /// Whether the web-media pane still owes an explanation — see
+    /// `Prefs.webMediaNoticePending`. Survives relaunches; cleared by the user.
+    public var webMediaNoticePending: Bool {
+        didSet { persist(webMediaNoticePending, Prefs.webMediaNoticePending) }
+    }
+
+    /// Which websites may appear, and how far — the one decision everything
+    /// downstream asks.
+    ///
+    /// Decoded on read and encoded on write, which keeps the stored form an
+    /// implementation detail: callers deal in `WebsiteRule`, never in JSON.
+    /// Tolerant on the way in — a rule whose host no longer parses, or a file
+    /// written by a future version, is skipped rather than taking the rest of
+    /// the list down with it.
+    public var webMedia: WebsitePolicy {
+        get { WebsitePolicy(rules: Self.decodeRules(websiteRules)) }
+        set {
+            websiteRules = Self.encodeRules(newValue.rules)
+            // Adding a website answers the question the notice was asking, so
+            // it stops asking.
+            if !newValue.isEmpty, webMediaNoticePending { webMediaNoticePending = false }
         }
     }
 
-    public var showWebMediaInCompact: Bool {
-        didSet { persist(showWebMediaInCompact, Prefs.showWebMediaInCompact) }
+    static func decodeRules(_ stored: String) -> [WebsiteRule] {
+        guard !stored.isEmpty, let data = stored.data(using: .utf8) else { return [] }
+        guard let decoded = try? JSONDecoder().decode([StoredWebsiteRule].self, from: data)
+        else { return [] }
+        return decoded.compactMap(\.rule)
     }
 
-    /// The two switches as the one decision everything downstream asks.
-    public var webMedia: WebMediaPolicy {
-        WebMediaPolicy(showsCards: showWebMediaCards, showsInCompact: showWebMediaInCompact)
+    static func encodeRules(_ rules: [WebsiteRule]) -> String {
+        let stored = rules.map(StoredWebsiteRule.init)
+        guard let data = try? JSONEncoder().encode(stored) else { return "" }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The stored shape: a host as plain text, so a rule can be read back even
+    /// if `WebsiteHost`'s rules change, and skipped if it can no longer be
+    /// canonicalised.
+    struct StoredWebsiteRule: Codable {
+        var host: String
+        var appearance: String
+
+        init(_ rule: WebsiteRule) {
+            host = rule.host.value
+            appearance = rule.appearance.rawValue
+        }
+
+        var rule: WebsiteRule? {
+            guard let host = WebsiteHost(host) else { return nil }
+            // An appearance this version does not know is read as the smaller
+            // of the two: a card, never the compact view. Widening on an
+            // unknown value would grant more than the user chose.
+            let appearance = WebsiteAppearance(rawValue: appearance) ?? .card
+            return WebsiteRule(host: host, appearance: appearance)
+        }
     }
 
     public var launchAtLogin: Bool { didSet { persist(launchAtLogin, Prefs.launchAtLogin) } }
@@ -412,8 +463,8 @@ public final class Preferences {
         outlineEnabled = store.value(for: Prefs.outlineEnabled)
         shelfAutoScreenshots = store.value(for: Prefs.shelfAutoScreenshots)
         showVideoInCompact = store.value(for: Prefs.showVideoInCompact)
-        showWebMediaCards = store.value(for: Prefs.showWebMediaCards)
-        showWebMediaInCompact = store.value(for: Prefs.showWebMediaInCompact)
+        websiteRules = store.value(for: Prefs.websiteRules)
+        webMediaNoticePending = store.value(for: Prefs.webMediaNoticePending)
         launchAtLogin = store.value(for: Prefs.launchAtLogin)
         hideFromScreenCapture = store.value(for: Prefs.hideFromScreenCapture)
         advanced = store.value(for: Prefs.advanced)
@@ -489,8 +540,8 @@ public final class Preferences {
         outlineEnabled = Prefs.outlineEnabled.defaultValue
         shelfAutoScreenshots = Prefs.shelfAutoScreenshots.defaultValue
         showVideoInCompact = Prefs.showVideoInCompact.defaultValue
-        showWebMediaCards = Prefs.showWebMediaCards.defaultValue
-        showWebMediaInCompact = Prefs.showWebMediaInCompact.defaultValue
+        websiteRules = Prefs.websiteRules.defaultValue
+        webMediaNoticePending = Prefs.webMediaNoticePending.defaultValue
         launchAtLogin = Prefs.launchAtLogin.defaultValue
         hideFromScreenCapture = Prefs.hideFromScreenCapture.defaultValue
         advanced = Prefs.advanced.defaultValue

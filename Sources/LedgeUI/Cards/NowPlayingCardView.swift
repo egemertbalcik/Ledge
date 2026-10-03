@@ -65,7 +65,7 @@ public struct NowPlayingActions {
     /// Routes system audio to the given output.
     public var selectOutput: (UInt32) -> Void
     /// Sets one output device's own volume, 0...1.
-    public var setOutputVolume: (UInt32, Double) -> Void
+    public var setOutputVolume: (UInt32, Double) -> LevelFeedback?
     /// Latches a drag in flight, so the overlay stays open while the pointer
     /// wanders off the row being dragged.
     public var setDragging: (Bool) -> Void
@@ -87,7 +87,7 @@ public struct NowPlayingActions {
         chooseOutput: @escaping () -> Void = {},
         outputs: @escaping () -> [AudioOutputOption] = { [] },
         selectOutput: @escaping (UInt32) -> Void = { _ in },
-        setOutputVolume: @escaping (UInt32, Double) -> Void = { _, _ in },
+        setOutputVolume: @escaping (UInt32, Double) -> LevelFeedback? = { _, _ in nil },
         setRoutePickerRows: @escaping (Int) -> Void = { _ in },
         openOwningApp: @escaping () -> Void = {},
         setDragging: @escaping (Bool) -> Void = { _ in }
@@ -783,8 +783,11 @@ public struct NowPlayingCardView: View {
                         // before the pointer can wander off the shape mid-slide.
                         actions.setDragging(true)
                         let next = min(max(value.location.x / width, 0), 1)
-                        draggedLevels[option.id] = next
-                        actions.setOutputVolume(option.id, next)
+                        // The latched drag level is the device's answer, so a
+                        // clamped or refused write shows where the output
+                        // really is while the pointer is still down.
+                        draggedLevels[option.id] = actions
+                            .setOutputVolume(option.id, next)?.level ?? next
                     }
                     .onEnded { value in
                         // Tap only if the threshold was never crossed — not if
@@ -801,7 +804,7 @@ public struct NowPlayingCardView: View {
                                 // unless it happened to travel far enough to
                                 // count as a drag.
                                 let next = min(max(value.location.x / width, 0), 1)
-                                actions.setOutputVolume(option.id, next)
+                                _ = actions.setOutputVolume(option.id, next)
                             } else {
                                 actions.selectOutput(option.id)
                             }
@@ -842,7 +845,7 @@ public struct NowPlayingCardView: View {
         .accessibilityAdjustableAction { direction in
             let step: Double = direction == .increment ? 0.05 : -0.05
             let next = min(max((option.level ?? 0) + step, 0), 1)
-            actions.setOutputVolume(option.id, next)
+            _ = actions.setOutputVolume(option.id, next)
             // Re-snapshot rather than latching a drag level: there is no
             // gesture end here to unlatch it, and the device answers at once.
             routeOptions = actions.outputs()

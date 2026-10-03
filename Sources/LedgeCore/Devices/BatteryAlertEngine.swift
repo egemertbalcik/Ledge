@@ -8,6 +8,13 @@ public struct BatteryAlert: Hashable, Sendable {
     public var deviceName: String
     public var component: BatteryComponent
     public var level: Double
+    /// The threshold of the rule that fired.
+    ///
+    /// Carried so two rules the user deliberately set on one device — "tell me
+    /// at 30%, and again at 10%" — can be told apart when a single reading
+    /// crosses both. The *level* cannot do it: both alerts carry the same
+    /// reading, which is why matching on it swallowed the second.
+    public var threshold: Double
     public var delivery: AlertDelivery
     public var firedAt: Date
 
@@ -25,6 +32,7 @@ public struct BatteryAlert: Hashable, Sendable {
         deviceName: String,
         component: BatteryComponent,
         level: Double,
+        threshold: Double,
         delivery: AlertDelivery,
         firedAt: Date
     ) {
@@ -34,6 +42,7 @@ public struct BatteryAlert: Hashable, Sendable {
         self.deviceName = deviceName
         self.component = component
         self.level = level
+        self.threshold = threshold
         self.delivery = delivery
         self.firedAt = firedAt
     }
@@ -102,28 +111,40 @@ public enum BatteryAlertEngine {
         now: Date
     ) -> [BatteryAlert] {
         let live = recent.filter { now.timeIntervalSince($0.firedAt) <= duplicateAlertWindow }
-        var seen = Set(live.map(Signature.init))
-        var kept: [BatteryAlert] = []
-        for alert in alerts {
-            let signature = Signature(alert)
-            guard !seen.contains(signature) else { continue }
-            seen.insert(signature)
-            kept.append(alert)
+        // Only what *other records* have already said. Two rules belonging to
+        // one record are two things the user asked for — "tell me at 30%, and
+        // again at 10%" — and collapsing them threw one away even when their
+        // thresholds differed, because the levels were identical. Suppression
+        // is for one physical device wearing two records, which is a different
+        // record id by definition.
+        return alerts.filter { alert in
+            !live.contains { other in
+                other.deviceID != alert.deviceID && Signature(other) == Signature(alert)
+            }
         }
-        return kept
     }
 
     /// What makes two alerts "the same" for the purpose above. Deliberately
     /// not the device identity — that is the whole point.
+    ///
+    /// The *threshold* is part of it, and has to be. Two rules on one device
+    /// at different thresholds — "tell me at 30%, and again at 10%" — are two
+    /// things the user asked for, and one reading crossing both must deliver
+    /// both. Matching on name, component and kind alone threw the second away,
+    /// and matching on the level cannot help: both alerts carry the same
+    /// reading. Two *records* of the same physical device, meanwhile, raise
+    /// the same rule at the same threshold, which is what this collapses.
     struct Signature: Hashable {
         let name: String
         let component: BatteryComponent
         let kind: AlertKind
+        let threshold: Double
 
         init(_ alert: BatteryAlert) {
             name = alert.deviceName
             component = alert.component
             kind = alert.kind
+            threshold = alert.threshold
         }
     }
 
@@ -171,14 +192,19 @@ public enum BatteryAlertEngine {
                         continue
                     }
                     guard reading.level <= rule.threshold else { continue }
-                    if let previous {
+                    if isAttaching {
+                        // An attach is an event in its own right: putting
+                        // earbuds in at 12% is worth saying whether or not
+                        // there was a previous reading to cross from. The
+                        // fired latch below is what stops it being said again
+                        // on the next reconnection.
+                    } else if let previous {
                         // Ordinarily a crossing: it must have been above.
                         guard previous > rule.threshold else { continue }
                     } else {
-                        // No previous level. Only a device *attaching* below
-                        // the threshold is news; a passive first sighting is
-                        // the quiet baseline.
-                        guard isAttaching else { continue }
+                        // A passive first sighting — a startup inventory, a
+                        // refresh, an advertisement — is the quiet baseline.
+                        continue
                     }
                     guard !componentState.firedRuleIDs.contains(rule.id) else { continue }
 
@@ -241,6 +267,7 @@ public enum BatteryAlertEngine {
             deviceName: observation.name,
             component: reading.component,
             level: reading.level,
+            threshold: rule.threshold,
             delivery: rule.delivery,
             firedAt: reading.observedAt
         )

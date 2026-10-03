@@ -51,6 +51,15 @@ public final class DevicesSettingsModel {
     /// otherwise.
     public private(set) var hasLoaded = false
 
+    /// Which kinds of source were reporting when the catalogue was last read.
+    /// The detail pane asks this the same way the list does.
+    public private(set) var liveSources: Set<DeviceIdentity.Source> = []
+
+    /// Whether the provider behind this device is running.
+    public func sourceIsLive(_ id: DeviceIdentity) -> Bool {
+        liveSources.contains(id.source)
+    }
+
     /// Everything that touches the store. Injected, so the pane can be driven
     /// from fake data in a test or a preview without a store existing.
     public struct Actions: Sendable {
@@ -185,12 +194,31 @@ public final class DevicesSettingsModel {
         detailWork = nil
     }
 
+    /// The pane's row order. Pure and total, so two refreshes of the same
+    /// devices produce the same list.
+    static func rowOrder(_ a: Row, _ b: Row) -> Bool {
+        if a.isPinned != b.isPinned { return a.isPinned }
+        let aHere = a.presence == .connected
+        let bHere = b.presence == .connected
+        if aHere != bHere { return aHere }
+        let byName = a.name.localizedCaseInsensitiveCompare(b.name)
+        if byName != .orderedSame { return byName == .orderedAscending }
+        // Two devices with the same name — two sets of the same earbuds —
+        // still need a settled order.
+        return a.id.value < b.id.value
+    }
+
     private func apply(_ catalogue: DeviceCatalogue) {
         let at = now()
+        liveSources = catalogue.liveSources
         rows = catalogue.devices
             .filter { !$0.isHidden }
             .map { record -> Row in
-                let shown = record.displayedLowestInUse(now: at)
+                // Whether the provider behind this device is running. Only a
+                // source that reports on change — this Mac's battery — is
+                // judged by it; everything else goes by elapsed time.
+                let live = catalogue.sourceIsLive(record.id)
+                let shown = record.displayedLowestInUse(now: at, sourceIsLive: live)
                 return Row(
                     id: record.id,
                     name: record.name,
@@ -201,18 +229,19 @@ public final class DevicesSettingsModel {
                     // Whether the *level shown* is historical — which a
                     // disconnect makes true at once, and which the record's
                     // own freshness alone could not express.
-                    isStale: shown.isHistorical || record.isStale(now: at),
+                    isStale: shown.isHistorical || record.isStale(now: at, sourceIsLive: live),
                     lastSeen: record.lastSeen,
                     isPinned: record.isPinned
                 )
             }
-            // Pinned first, then whatever we heard from most recently. A list
-            // that reorders itself as devices come and go is a list nobody can
-            // click in.
-            .sorted {
-                if $0.isPinned != $1.isPinned { return $0.isPinned }
-                return $0.lastSeen > $1.lastSeen
-            }
+            // Pinned first, then the devices that are here, then by name.
+            //
+            // Deliberately *not* by when each was last heard from: the pane
+            // re-reads every five seconds, and sorting on a timestamp that
+            // moves meant rows swapped places under the pointer — a list
+            // nobody can click in. Name is stable between refreshes, and the
+            // "last seen" line still says what it says.
+            .sorted(by: Self.rowOrder)
         isLoading = false
         hasLoaded = true
         if let selected, let fresh = catalogue.devices.first(where: { $0.id == selected.id }) {
@@ -344,11 +373,63 @@ public final class DevicesSettingsModel {
     /// - Returns: whether it was granted *and* still wanted. A user who turns
     ///   the switch back off while the system prompt is up must not have it
     ///   turned on again when they answer.
+    ///
+    /// Concurrent askers share one request. Ticking the box, previewing, and
+    /// ticking a second rule's box used to be three prompts queued behind each
+    /// other — the system shows one and silently denies the rest, which reads
+    /// as permission being refused.
     public func requestNotificationAuthorization() async -> Bool {
         let revision = notificationRevision
-        let granted = await actions.requestNotificationAuthorization()
+        if let existing = authorizationWork {
+            // Join the request in flight. Waiters never clear it: only the
+            // asker that created it does, and only if it is still the one
+            // registered — an older waiter clearing a newer request left the
+            // next caller starting a second system prompt behind the first.
+            let granted = await existing.task.value
+            return revision == notificationRevision && granted
+        }
+        let actions = actions
+        authorizationToken &+= 1
+        let token = authorizationToken
+        let work = Task<Bool, Never> { await actions.requestNotificationAuthorization() }
+        authorizationWork = (token, work)
+        let granted = await work.value
+        if authorizationWork?.token == token { authorizationWork = nil }
         guard revision == notificationRevision else { return false }
         return granted
+    }
+
+    /// The one outstanding permission request, so several askers cannot queue
+    /// prompts behind each other — tagged, so only its owner may retire it.
+    private var authorizationWork: (token: Int, task: Task<Bool, Never>)?
+    private var authorizationToken = 0
+
+    /// Whether a permission request is in flight. A test seam.
+    var hasAuthorizationRequestInFlight: Bool { authorizationWork != nil }
+
+    /// Turns notification delivery on for one rule, by its id.
+    ///
+    /// By id, and applied to the configuration as it is *now*, because the
+    /// system prompt is modal to nothing: the user can edit the threshold, the
+    /// component, or the enabled switch while it is up. Writing back a rule
+    /// captured before the prompt discarded every one of those edits.
+    public func enableNotificationDelivery(ruleID: UUID, for id: DeviceIdentity) {
+        guard var configuration = currentAlerts(for: id) else { return }
+        guard let index = configuration.rules.firstIndex(where: { $0.id == ruleID }) else { return }
+        guard !configuration.rules[index].delivery.contains(.notification) else { return }
+        configuration.rules[index].delivery.insert(.notification)
+        configuration.isCustomised = true
+        setAlerts(configuration, for: id)
+    }
+
+    /// The configuration a rule edit should be applied on top of: what has
+    /// been queued but not yet written, else what the selection holds.
+    private func currentAlerts(for id: DeviceIdentity) -> DeviceAlertConfiguration? {
+        if let pending = pendingAlertWrites[id] { return pending }
+        guard let selected, selected.id == id else { return nil }
+        return selected.alerts.isCustomised
+            ? selected.alerts
+            : DeviceAlertConfiguration(rules: [.defaultLow()], isCustomised: false)
     }
 
     /// Called when notification delivery is switched off, so any outstanding

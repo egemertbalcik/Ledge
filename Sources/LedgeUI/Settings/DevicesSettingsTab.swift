@@ -30,9 +30,24 @@ struct DevicesSettingsTab: View {
         .onDisappear { model.endWatching() }
     }
 
+    private var loadingState: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Looking for devices…")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
+        .accessibilityLabel("Looking for devices")
+    }
+
     @ViewBuilder
     private var list: some View {
-        if model.rows.isEmpty, model.hasLoaded {
+        if !model.hasLoaded, model.isLoading {
+            // The first read goes to disk. A blank pane for that moment reads
+            // as "no devices", which is a different claim entirely.
+            loadingState
+        } else if model.rows.isEmpty, model.hasLoaded {
             emptyState
         } else {
             // Scrolls: a Mac with a keyboard, a trackpad, a mouse and two sets

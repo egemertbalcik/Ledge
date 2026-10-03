@@ -172,6 +172,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         scriptingHandles: @escaping (String) -> Bool,
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate },
         lastTransportAt: @escaping @MainActor () -> TimeInterval = { NowPlayingCommander.lastCommandAt },
+        allowsMedia: @escaping @MainActor (NowPlayingSnapshot) -> Bool = { _ in true },
         playbackWatcher: PlaybackChangeWatcher? = nil
     ) {
         self.adapter = adapter
@@ -180,6 +181,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         self.scriptingHandles = scriptingHandles
         self.now = now
         self.lastTransportAt = lastTransportAt
+        self.allowsMedia = allowsMedia
         self.playbackWatcher = playbackWatcher
         // The players announce play, pause and track changes themselves. That
         // is the signal that makes a cached answer safe: anything the adapter
@@ -198,7 +200,11 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     }
 
     /// The production wiring.
-    public convenience init(adapter: any NowPlayingSource, scripting: ScriptingNowPlayingSource) {
+    public convenience init(
+        adapter: any NowPlayingSource,
+        scripting: ScriptingNowPlayingSource,
+        allowsMedia: @escaping @MainActor (NowPlayingSnapshot) -> Bool = { _ in true }
+    ) {
         self.init(
             adapter: adapter,
             scripting: scripting,
@@ -206,6 +212,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
                 await scripting?.snapshot(forBundleID: bundleID)
             },
             scriptingHandles: { ScriptingNowPlayingSource.handles($0) },
+            allowsMedia: allowsMedia,
             playbackWatcher: PlaybackChangeWatcher()
         )
     }
@@ -393,8 +400,12 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // are watching arrives under the same identity, is honoured at once,
         // and is what then lets something else through.
         if let held = heldPlaying,
-           held.snapshot.trackKey != answered.trackKey,
-           !Self.hasFinished(held.snapshot, at: now, since: held.at) {
+           Self.isDifferentItem(held.snapshot, answered),
+           !Self.hasFinished(held.snapshot, at: now, since: held.at),
+           // A page the user cannot see must not hold the notch against
+           // anything: nothing is drawn for it, so holding meant the notch
+           // showed nothing at all while a player was waiting behind it.
+           allowsMedia(held.snapshot) {
             let catalogue = BrowserCatalogue.shared
             let pageOverApp = catalogue.isOpenableApp(bundleID: held.snapshot.appBundleID)
                 && catalogue.isWebOwner(bundleID: answered.appBundleID)
@@ -466,6 +477,16 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
 
     private var handover = CrossAppHandover()
 
+    /// Whether a snapshot's media is allowed to appear at all.
+    ///
+    /// Injected rather than looked up: this type knows about *sources*, not
+    /// about the user's website rules. It needs the answer because a page
+    /// nobody can see must not hold the notch either — a hidden page kept as
+    /// the incumbent delayed a native player's card by the length of the
+    /// corroboration window, and the user would have seen nothing at all in
+    /// the meantime.
+    private let allowsMedia: @MainActor (NowPlayingSnapshot) -> Bool
+
     /// Whether this different item has been seen before, long enough ago to
     /// mean it is still there rather than passing through.
     private func corroborated(
@@ -478,6 +499,12 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // still not a reason to hand the card over: nothing was pressed, and
         // the thing making sound is the other one.
         guard answered.isPlaying else {
+            challenger = nil
+            return false
+        }
+        // A page nobody can see has nothing to corroborate: letting it take
+        // the seat would replace a visible card with no card at all.
+        guard allowsMedia(answered) else {
             challenger = nil
             return false
         }
@@ -549,10 +576,28 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// what you are watching is honoured immediately.
     private func rememberIfPlaying(_ snapshot: NowPlayingSnapshot, at now: TimeInterval) {
         if snapshot.isPlaying {
-            heldPlaying = (snapshot, now)
-        } else if heldPlaying?.snapshot.trackKey == snapshot.trackKey {
+            // Only something that may actually appear is worth holding the
+            // seat for.
+            heldPlaying = allowsMedia(snapshot) ? (snapshot, now) : nil
+        } else if heldPlaying.map({ !Self.isDifferentItem($0.snapshot, snapshot) }) == true {
             heldPlaying = nil
         }
+    }
+
+    /// Whether two snapshots are different things to show.
+    ///
+    /// The track key, and the *verified* website. A tab navigating from an
+    /// allowed site to an unlisted one is a different thing even when the
+    /// title has not caught up — whether Ledge may show it at all has just
+    /// changed, which cannot go unnoticed.
+    ///
+    /// Deliberately **not** the whole origin. An unverified asset host changes
+    /// freely during one track — adaptive streaming moves between edge servers
+    /// mid-playback — and it matches no rule, so none of that is a new item.
+    /// Treating it as one reset the pause clock, disturbed handover and
+    /// republished a card that had not changed.
+    static func isDifferentItem(_ a: NowPlayingSnapshot, _ b: NowPlayingSnapshot) -> Bool {
+        a.trackKey != b.trackKey || a.verifiedWebsite != b.verifiedWebsite
     }
 
     /// A held snapshot with its position moved forward, so the scrub bar keeps

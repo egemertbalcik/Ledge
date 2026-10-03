@@ -336,9 +336,14 @@ struct CalendarProviderTests {
         }
 
         // Every countdown tick used to cost six store queries for grids that
-        // had not changed. The card still republishes on each tick.
+        // had not changed. That count is the point of this test.
         #expect(source.monthQueries == queriesPerRead)
-        #expect(events.filter { if case .publish = $0 { true } else { false } }.count == 3)
+        // The card still republishes on each tick. At least the three asked
+        // for: the provider has a timer of its own, and under a loaded machine
+        // one of its ticks can land inside this window — which is not what
+        // this test is about, and counting exactly made it fail by being slow.
+        let publishes = events.filter { if case .publish = $0 { true } else { false } }.count
+        #expect(publishes >= 3, "a tick did not republish the card")
     }
 
     @Test("A store change re-reads the month grids")

@@ -74,19 +74,30 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
     /// - the reading itself is recent. Its own timestamp, not the record's:
     ///   a disconnect updates `lastSeen`, so judging by the record made a
     ///   two-day-old level look current the instant the device went away.
-    public func isCurrent(_ reading: BatteryReading, now: Date) -> Bool {
+    /// - Parameter sourceIsLive: whether the thing that reports this device is
+    ///   running. Only consulted for a source that speaks on change — see
+    ///   `isFresh(now:sourceIsLive:)`.
+    public func isCurrent(
+        _ reading: BatteryReading,
+        now: Date,
+        sourceIsLive: Bool = false
+    ) -> Bool {
         guard reading.reliability == .fresh else { return false }
         guard presence != .disconnected else { return false }
+        if id.reportsOnlyOnChange { return sourceIsLive }
         return now.timeIntervalSince(reading.observedAt) <= id.freshnessInterval
     }
 
     /// The lowest worn battery that still describes now, and whether what is
     /// shown is historical. One place, so the row and the detail pane cannot
     /// disagree.
-    public func displayedLowestInUse(now: Date) -> (level: Double?, isHistorical: Bool) {
+    public func displayedLowestInUse(
+        now: Date,
+        sourceIsLive: Bool = false
+    ) -> (level: Double?, isHistorical: Bool) {
         let worn = readings.filter { $0.component.isInUse && $0.reliability != .unreliable }
         guard let lowest = worn.min(by: { $0.level < $1.level }) else { return (nil, false) }
-        return (lowest.level, !isCurrent(lowest, now: now))
+        return (lowest.level, !isCurrent(lowest, now: now, sourceIsLive: sourceIsLive))
     }
 
     /// Whether what this record says describes now.
@@ -96,11 +107,27 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
     /// records stale and no stored flag to go out of date — a clock that
     /// jumps forwards or backwards simply produces a different answer to the
     /// same question, which is the behaviour wanted.
-    public func isFresh(now: Date) -> Bool {
-        now.timeIntervalSince(lastSeen) <= id.freshnessInterval
+    /// - Parameter sourceIsLive: whether the provider behind this device is
+    ///   running right now.
+    ///
+    /// A source that speaks only when something changes is not stale for having
+    /// nothing to say: this Mac's battery sits at 100% on the charger for hours
+    /// and reports nothing, which the elapsed-time rule turned into "last seen
+    /// 3 hours ago" — the one device that is certainly here, shown as doubtful.
+    ///
+    /// But "fresh for ever" is the other mistake. Switch the Battery provider
+    /// off and the stored record would go on claiming a live reading until the
+    /// end of time. Freshness for such a source is the provider's liveness,
+    /// which the store is told about when a provider starts and stops — no
+    /// polling, and no timestamp to keep warm.
+    public func isFresh(now: Date, sourceIsLive: Bool = false) -> Bool {
+        if id.reportsOnlyOnChange { return sourceIsLive }
+        return now.timeIntervalSince(lastSeen) <= id.freshnessInterval
     }
 
-    public func isStale(now: Date) -> Bool { !isFresh(now: now) }
+    public func isStale(now: Date, sourceIsLive: Bool = false) -> Bool {
+        !isFresh(now: now, sourceIsLive: sourceIsLive)
+    }
 
     /// What to show, in one place: the observed attachment, qualified by
     /// whether we still believe it.
@@ -139,6 +166,18 @@ public struct DeviceCatalogue: Sendable, Codable {
     /// inside them so a history rewrite does not rewrite the catalogue.
     public var history: [String: [BatterySample]]
 
+    /// Which kinds of source are reporting right now.
+    ///
+    /// Session state, not storage: it says what is running, and a stored answer
+    /// to that would be a lie the moment the app quit. Deliberately excluded
+    /// from `Codable` for the same reason — see the coding keys below.
+    public var liveSources: Set<DeviceIdentity.Source> = []
+
+    /// Whether the provider behind this record is reporting.
+    public func sourceIsLive(_ id: DeviceIdentity) -> Bool {
+        liveSources.contains(id.source)
+    }
+
     /// History the user chose to keep after removing its device.
     ///
     /// Maintenance drops history whose device is gone; without this it also
@@ -159,6 +198,13 @@ public struct DeviceCatalogue: Sendable, Codable {
     }
 
     // MARK: - Codable
+
+    /// Listed explicitly so `liveSources` is never written: it says which
+    /// providers are running *now*, and a stored answer to that is a lie the
+    /// moment the app quits.
+    private enum CodingKeys: String, CodingKey {
+        case version, devices, history, retainedHistory
+    }
 
     /// Decoded field by field, with defaults.
     ///

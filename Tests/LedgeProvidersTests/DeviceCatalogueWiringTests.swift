@@ -193,7 +193,7 @@ struct DeviceCatalogueWiringTests {
     @Test("An observation carries the component, charging evidence and timestamp through")
     func observationsArePreserved() {
         let at = Self.t0.addingTimeInterval(120)
-        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: at)
+        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: at, cause: .connectionEvent)
 
         #expect(observation.deviceID == .bluetooth("AA:BB:CC:DD:EE:FF"))
         #expect(observation.readings.count == 3)
@@ -210,30 +210,30 @@ struct DeviceCatalogueWiringTests {
     @Test("Identity comes from the address, never the name")
     func identityIsTheAddress() {
         let first = DeviceObservations.fromBluetooth(
-            Self.snapshot(address: "AA:AA", name: "AirPods Pro"), at: Self.t0
+            Self.snapshot(address: "AA:AA", name: "AirPods Pro"), at: Self.t0, cause: .connectionEvent
         )
         let second = DeviceObservations.fromBluetooth(
-            Self.snapshot(address: "BB:BB", name: "AirPods Pro"), at: Self.t0
+            Self.snapshot(address: "BB:BB", name: "AirPods Pro"), at: Self.t0, cause: .connectionEvent
         )
         #expect(first.deviceID != second.deviceID, "two devices collided on a shared name")
 
         let renamed = DeviceObservations.fromBluetooth(
-            Self.snapshot(address: "AA:AA", name: "Ege's AirPods"), at: Self.t0
+            Self.snapshot(address: "AA:AA", name: "Ege's AirPods"), at: Self.t0, cause: .connectionEvent
         )
         #expect(first.deviceID == renamed.deviceID, "a rename was treated as a new device")
     }
 
     @Test("Address case does not split one device in two")
     func addressCaseIsNormalised() {
-        let upper = DeviceObservations.fromBluetooth(Self.snapshot(address: "AA:BB"), at: Self.t0)
-        let lower = DeviceObservations.fromBluetooth(Self.snapshot(address: "aa:bb"), at: Self.t0)
+        let upper = DeviceObservations.fromBluetooth(Self.snapshot(address: "AA:BB"), at: Self.t0, cause: .connectionEvent)
+        let lower = DeviceObservations.fromBluetooth(Self.snapshot(address: "aa:bb"), at: Self.t0, cause: .connectionEvent)
         #expect(upper.deviceID == lower.deviceID)
     }
 
     @Test("A device reporting no battery still produces an observation")
     func missingComponentsAreFine() {
         let observation = DeviceObservations.fromBluetooth(
-            Self.snapshot(levels: [:]), at: Self.t0
+            Self.snapshot(levels: [:]), at: Self.t0, cause: .connectionEvent
         )
         #expect(observation.readings.isEmpty)
         #expect(observation.deviceID == .bluetooth("AA:BB:CC:DD:EE:FF"))
@@ -251,7 +251,7 @@ struct DeviceCatalogueWiringTests {
 
     @Test("A Bluetooth accessory does not claim charged support it cannot honour")
     func bluetoothDoesNotSupportCharged() {
-        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: Self.t0)
+        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: Self.t0, cause: .connectionEvent)
         #expect(!BatteryAlertEngine.supportsCharged(observation.readings, for: .left))
     }
 
@@ -267,7 +267,7 @@ struct DeviceCatalogueWiringTests {
             .appendingPathComponent("devices.json")
         let store = DeviceCatalogueStore(url: url, now: { Self.t0 })
 
-        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: Self.t0)
+        let observation = DeviceObservations.fromBluetooth(Self.snapshot(), at: Self.t0, cause: .connectionEvent)
         for _ in 0..<100 { await store.record(observation) }
 
         let queued = await store.queuedAlertCount()
