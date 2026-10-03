@@ -38,11 +38,25 @@ if ! grep -q "Authority=Developer ID Application" <<<"$SIGNATURE"; then
     exit 1
 fi
 
-if ! xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1; then
-    echo "error: no notarization credentials under profile \"$PROFILE\"." >&2
-    echo "       Store them once with:" >&2
-    echo "         xcrun notarytool store-credentials $PROFILE \\" >&2
-    echo "             --apple-id <email> --team-id <TEAMID> --password <app-specific>" >&2
+# Why the reply matters, not just that it failed. A missing profile and a
+# rejected one both make this command exit non-zero, and reporting both as
+# "no credentials" sends you off storing credentials that were already there
+# — which is exactly what happened the first time an Apple agreement lapsed.
+if ! CHECK="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1)"; then
+    if printf '%s' "$CHECK" | grep -q "required agreement"; then
+        echo "error: Apple rejected the credentials — an agreement needs signing." >&2
+        echo "       Sign in at https://developer.apple.com/account and accept the" >&2
+        echo "       pending agreement (Account → Agreements, or the banner on the" >&2
+        echo "       landing page), then run this again. Nothing is wrong locally:" >&2
+        echo "       the build and the signature are fine." >&2
+    else
+        echo "error: no usable notarization credentials under profile \"$PROFILE\"." >&2
+        echo "       Store them once with:" >&2
+        echo "         xcrun notarytool store-credentials $PROFILE \\" >&2
+        echo "             --apple-id <email> --team-id <TEAMID> --password <app-specific>" >&2
+    fi
+    echo >&2
+    printf '       notarytool said: %s\n' "$(printf '%s' "$CHECK" | head -2 | tr '\n' ' ')" >&2
     exit 1
 fi
 
