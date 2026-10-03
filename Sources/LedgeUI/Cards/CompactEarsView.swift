@@ -365,22 +365,13 @@ public struct CompactEarsView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         case .privacy(let payload):
-            if payload.isSystemSpeech, !payload.cameraActive {
-                // Moving bars, not the word. The ear is narrow, the word is
-                // long, and the leading glyph already says what this is —
-                // what the far side has to say is that it is *listening right
-                // now*, which motion says and text cannot. Synthesized, like
-                // the music equalizer: no audio is captured to draw it.
-                MiniWaveform(isAnimating: true, tint: .white)
-            } else {
-                // The dots themselves, in Apple's colours — green camera, amber mic.
-                HStack(spacing: 5) {
-                    if payload.cameraActive {
-                        Circle().fill(.green).frame(width: 7, height: 7)
-                    }
-                    if payload.micActive {
-                        Circle().fill(.orange).frame(width: 7, height: 7)
-                    }
+            // The dots themselves, in Apple's colours — green camera, amber mic.
+            HStack(spacing: 5) {
+                if payload.cameraActive {
+                    Circle().fill(.green).frame(width: 7, height: 7)
+                }
+                if payload.micActive {
+                    Circle().fill(.orange).frame(width: 7, height: 7)
                 }
             }
         case .focus(let payload):
@@ -419,10 +410,7 @@ public struct CompactEarsView: View {
             payload.mode == .stopwatch ? "stopwatch" : (payload.isBreak ? "cup.and.saucer.fill" : "timer")
         case .shelf: "tray.full.fill"
         case .privacy(let payload):
-            // Dictation gets the waveform macOS itself puts on the cursor, so
-            // the notch shows the same thing the pointer does.
-            payload.cameraActive ? "video.fill"
-                : (payload.isSystemSpeech ? "waveform" : "mic.fill")
+            payload.cameraActive ? "video.fill" : "mic.fill"
         case .keyboard(let payload): payload.symbolName ?? "keyboard"
         case .levels: "slider.horizontal.3"
         }
@@ -440,9 +428,7 @@ public struct CompactEarsView: View {
         case .timer(let payload): payload.isBreak ? .green : .orange
         case .shelf: .teal
         case .privacy(let payload):
-            // Dictation is not a privacy warning, so it does not wear the
-            // warning colour: it is something the user just switched on.
-            payload.cameraActive ? .green : (payload.isSystemSpeech ? .white : .orange)
+            payload.cameraActive ? .green : .orange
         case .keyboard: .white
         case .levels: .white
         }

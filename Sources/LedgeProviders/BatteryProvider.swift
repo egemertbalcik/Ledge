@@ -124,11 +124,17 @@ public final class BatteryProvider: ActivityProvider {
     private var previous: PowerSnapshot?
     private var warnings = Warnings()
 
+    /// Where observations go. This Mac is a device in the catalogue like any
+    /// other; the readings are the ones this provider already receives.
+    private let observations: (any DeviceObservationSink)?
+
     public init(
         source: any PowerSource,
+        observations: (any DeviceObservationSink)? = nil,
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.source = source
+        self.observations = observations
         self.now = now
     }
 
@@ -141,6 +147,10 @@ public final class BatteryProvider: ActivityProvider {
             // Seed the baseline so the first real change is measured against
             // reality rather than against nothing.
             self.previous = self.source.snapshot()
+            // And report it, or this Mac is absent from the catalogue until
+            // something happens to its power — which on a desk machine left
+            // plugged in could be days.
+            if let start = self.previous { self.report(start) }
             // Seed the latch from the starting level, so launching at 15%
             // does not immediately warn about a level the user already knows.
             if let start = self.previous, !start.isPluggedIn {
@@ -164,7 +174,22 @@ public final class BatteryProvider: ActivityProvider {
         liveSince = nil
     }
 
+    /// Reports the reading this provider was already handed. IOKit states
+    /// the charging flag, so this Mac genuinely supports charged alerts.
+    private func report(_ snapshot: PowerSnapshot) {
+        guard let observations else { return }
+        let observation = DeviceObservations.fromMac(
+            name: "This Mac",
+            level: snapshot.percentage,
+            isCharging: snapshot.isCharging,
+            at: Date(timeIntervalSinceReferenceDate: now())
+        )
+        // Synchronous: no task per advertisement, per connect or per reading.
+        observations.submit(observation)
+    }
+
     private func handle(_ snapshot: PowerSnapshot) {
+        report(snapshot)
         Self.log.debug("""
             power reading: pct=\(snapshot.percentage, privacy: .public) \
             plugged=\(snapshot.isPluggedIn, privacy: .public) \

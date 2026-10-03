@@ -587,17 +587,6 @@ public struct SatelliteView: View {
                     : camera ? "Camera in use" : "Microphone in use"
             )
 
-        case .dictation:
-            circle {
-                // The waveform macOS puts on the cursor while it listens, so
-                // the notch and the pointer say the same thing.
-                Image(systemName: "waveform")
-                    .font(.cardTitle)
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Dictating")
-
         case .charging(let level):
             circle {
                 ring(

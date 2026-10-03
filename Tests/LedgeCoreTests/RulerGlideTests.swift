@@ -91,7 +91,7 @@ struct RulerGlideTests {
 
     @Test("Nonsense neither moves nor poisons it")
     func nonsense() {
-        var nan = RulerGlide(velocity: .nan)
+        let nan = RulerGlide(velocity: .nan)
         #expect(!nan.isGliding)
         var glide = RulerGlide(velocity: Double(fast))
         #expect(glide.step(.nan) == 0)

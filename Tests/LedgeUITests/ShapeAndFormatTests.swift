@@ -9,6 +9,7 @@ import Testing
 /// apart once when only one was corrected, which is why it lives in one place
 /// and is checked here.
 @Suite("Continuous corner")
+@MainActor
 struct ContinuousCornerTests {
 
     @Test("Reach grows with smoothing")
@@ -36,6 +37,7 @@ struct ContinuousCornerTests {
 }
 
 @Suite("Shapes")
+@MainActor
 struct ShapeTests {
 
     private let rect = CGRect(x: 0, y: 0, width: 300, height: 120)
@@ -69,6 +71,7 @@ struct ShapeTests {
 /// Formatters that appear on every card. Cheap to get subtly wrong, and wrong
 /// in a way that only shows up at the boundaries.
 @Suite("Card formatting")
+@MainActor
 struct CardFormattingTests {
 
     @Test("Clock pads seconds to two digits")
@@ -98,6 +101,7 @@ struct CardFormattingTests {
 }
 
 @Suite("Rows hold the order they opened in")
+@MainActor
 struct HeldOrderTests {
 
     private struct Row: Identifiable, Equatable {
@@ -152,6 +156,7 @@ struct HeldOrderTests {
 }
 
 @Suite("What counts as the same card")
+@MainActor
 struct CardIdentityTests {
 
     private func activity(_ kind: ActivityKind, _ source: String) -> Activity {

@@ -434,15 +434,7 @@ public final class ActivityCoordinator {
         // opens, and the ears decide what to draw in it. When the two rules
         // differed the island opened for a video the compact view then
         // declined to draw, and the notch sat there with two empty ears.
-        // Dictation counts as a resident while it lasts. Without this the card
-        // existed, flashed for its announcement and vanished — the phase only
-        // opens for something the coordinator calls a live fact, and a thing
-        // that is listening to you right now is exactly that.
-        let dictation = queue.activities.contains { activity in
-            guard case .privacy(let payload) = activity.payload else { return false }
-            return payload.isSystemSpeech && payload.micActive && !payload.cameraActive
-        }
-        let playing = timerRunning || closeEvent || dictation || queue.activities.contains {
+        let playing = timerRunning || closeEvent || queue.activities.contains {
             $0.id.kind == .nowPlaying && $0.restsInEars
         }
         let present = playing
@@ -503,14 +495,6 @@ public final class ActivityCoordinator {
             $0.id.kind == .timer && $0.id.source == "session"
         }
         presentation.privacyActive = queue.activities.first { $0.id.kind == .privacy }
-        // Only dictation, not every recording: an app listening to you during
-        // an hour-long call must not hold the island open for the hour, while
-        // dictation is seconds of the user's own doing and is exactly what
-        // they want confirmed for its duration.
-        presentation.dictationActive = queue.activities.first { activity in
-            guard case .privacy(let payload) = activity.payload else { return false }
-            return payload.isSystemSpeech && payload.micActive && !payload.cameraActive
-        }
         // The lingering card follows the queue while it lasts: the coordinator
         // decides *whether* a paused track may still be drawn, but which track
         // that is can change underneath it — skipping while paused is somebody

@@ -102,6 +102,72 @@ struct PrivacyProviderTests {
     }
 }
 
+/// Dictation used to be a thing Ledge detected, published, described and drew
+/// differently. All of that is gone. What remains is an exclusion with no
+/// interface: dictation produces no indicator at all, not even a microphone
+/// one (see `RecordingWatcher.microphoneHeld(by:)`). These tests are the floor
+/// under the removal — the genuine indicators must still work.
+@Suite("Recording indicators after the dictation removal")
+@MainActor
+struct RecordingIndicatorTests {
+
+    private func collect(
+        _ provider: PrivacyProvider,
+        while body: () -> Void
+    ) async -> [ProviderEvent] {
+        let stream = provider.start()
+        body()
+        provider.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        return events
+    }
+
+    @Test("A microphone holder is published as the microphone indicator")
+    func microphonePublishes() async {
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 })
+        let events = await collect(provider) {
+            source.set(RecordingState(microphone: true))
+        }
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload
+        else {
+            Issue.record("expected a privacy publish")
+            return
+        }
+        #expect(payload.micActive)
+        #expect(payload.cameraActive == false)
+        #expect(payload.title == "Microphone")
+    }
+
+    @Test("The camera, and both together, are published too")
+    func cameraAndBoth() {
+        #expect(PrivacyPayload(cameraActive: true).title == "Camera")
+        #expect(PrivacyPayload(cameraActive: true, micActive: true).title == "Camera & Mic")
+    }
+
+    /// The satellite has one recording case and no second reading of it.
+    @Test("The satellite carries the recording indicator and nothing beside it")
+    func satelliteCarriesPrivacy() {
+        let indicator = SatelliteContent.privacy(camera: false, microphone: true)
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: indicator, timer: nil, timerIsMainIsland: false
+        ) == indicator)
+    }
+
+    /// A card stored by a version that recorded the speech flag must still
+    /// read. The flag is not decoded: what is on screen comes from the live
+    /// reading, never from a stored one.
+    @Test("A stored payload from before the removal still decodes")
+    func oldPayloadDecodes() throws {
+        let json = Data(#"{"cameraActive":false,"micActive":true,"isSystemSpeech":true}"#.utf8)
+        let payload = try JSONDecoder().decode(PrivacyPayload.self, from: json)
+        #expect(payload.micActive)
+        #expect(payload.title == "Microphone", "the flag is not read, and nothing is hidden by it")
+    }
+}
+
 @Suite("Provider default enablement")
 @MainActor
 struct ProviderDefaultEnablementTests {

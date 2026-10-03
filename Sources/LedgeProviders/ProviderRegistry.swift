@@ -70,7 +70,13 @@ public enum ProviderRegistry {
     /// - Parameter nowPlayingProvider: constructed by the shell after the
     ///   MediaRemote probe decides which source to use. Passed in rather than
     ///   built here so the registry stays free of that async dance.
+    /// - Parameter observations: the catalogue's sink. Providers report what
+    ///   their existing reads already saw; nothing here adds a scan, a query
+    ///   or a timer. nil in tests and the preview, where the catalogue is not
+    ///   part of what is being exercised.
     public static func all(
+        observations: (any DeviceObservationSink)? = nil,
+        catalogue: DeviceCatalogueStore? = nil,
         nowPlayingProvider: @escaping @MainActor () -> any ActivityProvider,
         weatherCity: @escaping @MainActor () -> String = { "" },
         timerProvider: @escaping @MainActor () -> any ActivityProvider = { TimerProvider() },
@@ -113,7 +119,7 @@ public enum ProviderRegistry {
                 kind: .power,
                 // Power state is public IOKit — nothing to ask for.
                 permission: nil,
-                make: { BatteryProvider(source: IOKitPowerSource()) }
+                make: { BatteryProvider(source: IOKitPowerSource(), observations: observations) }
             ),
 
             ProviderRegistration(
@@ -128,7 +134,7 @@ public enum ProviderRegistry {
                 // still runs, it just stops noticing changes as they happen.
                 permission: .bluetooth,
                 permissionIsOptional: true,
-                make: { BluetoothProvider(source: IOBluetoothDeviceSource()) }
+                make: { BluetoothProvider(source: IOBluetoothDeviceSource(), observations: observations) }
             ),
 
             ProviderRegistration(
@@ -147,7 +153,25 @@ public enum ProviderRegistry {
                 // the behaviour that actually shipped. The scan is still gated on
                 // the Bluetooth permission, and the toggle is in Settings.
                 permission: .bluetooth,
-                make: { AirPodsProximityProvider() }
+                make: { AirPodsProximityProvider(observations: observations) }
+            ),
+
+            ProviderRegistration(
+                id: "devicealerts",
+                displayName: "Device Battery Alerts",
+                kind: .device,
+                // No permission of its own. It shows what the catalogue has
+                // already decided from readings other providers obtained, and
+                // asks the hardware nothing.
+                permission: nil,
+                make: {
+                    guard let store = catalogue else {
+                        // Nothing to deliver from. A provider that would never
+                        // publish is still better than a nil in the table.
+                        return DeviceAlertProvider(store: DeviceCatalogueStore())
+                    }
+                    return DeviceAlertProvider(store: store)
+                }
             ),
 
             ProviderRegistration(

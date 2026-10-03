@@ -382,8 +382,16 @@ struct TimerHandOverTests {
         clock += 61
         timer.tickNow()
 
-        // The break must not have begun yet.
-        try await Task.sleep(for: .milliseconds(100))
+        // The break must not have begun yet — and that is checked *without*
+        // waiting.
+        //
+        // The handoff is a `DispatchQueue.main.asyncAfter`, so it cannot run
+        // until this main-actor function yields. Sleeping first and then
+        // asserting made the test a bet that the sleep would resume before the
+        // five-second handoff fired; under a loaded suite a 100ms sleep was
+        // measured resuming after thirteen seconds, and the bet lost. Nothing
+        // is awaited between the tick and the assertion now, so load cannot
+        // reach it.
         timer.stop()
         var events: [ProviderEvent] = []
         for await event in stream { events.append(event) }
@@ -473,7 +481,14 @@ struct TimerLifecycleTests {
         let before = publications
         // The regular scheduler fires at least once per second. Test the
         // publications, not the separate TimelineView stopwatch rendering.
-        try await Task.sleep(for: .milliseconds(1500))
+        //
+        // Waited for rather than slept through: a fixed 1.5s was a bet that
+        // the tick would not be delayed past it, and under a parallel suite
+        // that bet lost about one run in four.
+        let deadline = Date().addingTimeInterval(10)
+        while publications <= before, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         #expect(publications > before)
         #expect(timer.stopwatch.isRunning)
         #expect(timer.session?.isRunning == false)

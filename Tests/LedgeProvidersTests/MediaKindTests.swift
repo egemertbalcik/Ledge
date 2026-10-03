@@ -11,7 +11,12 @@ private final class ScriptedSource: NowPlayingSource {
     let identifier = "scripted"
     var isAvailable = true
     var current: NowPlayingSnapshot?
-    func snapshot() async -> NowPlayingSnapshot? { current }
+    /// How many times the player has actually been asked.
+    var reads = 0
+    func snapshot() async -> NowPlayingSnapshot? {
+        reads += 1
+        return current
+    }
 }
 
 private func media(
@@ -87,13 +92,12 @@ struct MediaGateTests {
 
     private func provider(
         _ source: ScriptedSource,
-        showsVideo: @escaping () -> Bool = { true },
-        appsOnly: @escaping () -> Bool = { false }
+        showsVideo: @escaping () -> Bool = { true }
     ) -> NowPlayingProvider {
         NowPlayingProvider(
             source: source, artwork: ArtworkLoader(),
             playingInterval: 60, idleInterval: 60,
-            playbackWatcher: nil, showsVideo: showsVideo, appsOnly: appsOnly
+            playbackWatcher: nil, showsVideo: showsVideo
         )
     }
 
@@ -251,31 +255,58 @@ struct CompactEligibilityTests {
 @MainActor
 struct LiveMediaTests {
 
-    private func live(_ kind: MediaKind, playing: Bool = true) -> NowPlayingSnapshot {
+    private func live(
+        _ kind: MediaKind,
+        playing: Bool = true,
+        bundleID: String = "com.apple.Safari"
+    ) -> NowPlayingSnapshot {
         NowPlayingSnapshot(
             title: "The match", artist: "A channel", isPlaying: playing,
             elapsed: 900, duration: 0,
-            appName: "Safari", appBundleID: "com.apple.Safari",
+            appName: "A player", appBundleID: bundleID,
             trackKey: "live", isLive: true, kind: kind
         )
+    }
+
+    /// An app's own live video, for the general video switch — which is what
+    /// that switch governs now that browser media answers to its own.
+    private func liveInApp(_ kind: MediaKind) -> NowPlayingSnapshot {
+        live(kind, bundleID: "com.apple.TV")
     }
 
     /// The two-minute floor exists to keep clips out, and a broadcast has no
     /// length to measure against it.
     @Test("A live broadcast reaches the compact view despite having no length")
     func liveVideoIsCompactWorthy() {
-        #expect(NowPlayingProvider.showsInCompact(live(.video), showsVideo: true))
+        #expect(NowPlayingProvider.showsInCompact(live(.video), showsVideo: true, webMedia: .shown))
         #expect(NowPlayingProvider.shouldShow(live(.video)))
     }
 
-    @Test("Turning video off still turns it off")
+    @Test("Turning video off still turns an app's live video off")
     func togglingStillApplies() {
-        #expect(NowPlayingProvider.showsInCompact(live(.video), showsVideo: false) == false)
+        #expect(NowPlayingProvider.showsInCompact(liveInApp(.video), showsVideo: false) == false)
+        #expect(NowPlayingProvider.showsInCompact(liveInApp(.video), showsVideo: true))
+    }
+
+    /// The specific switch wins over the general one. Leaving both in force
+    /// made "Show web media in the compact view" a control that did nothing
+    /// whenever video was off — and for a browser, "video" is a guess made
+    /// from the runtime in the first place.
+    @Test("Browser media in the ears does not also need the video switch")
+    func webCompactIsAuthoritative() {
+        #expect(NowPlayingProvider.showsInCompact(live(.video), showsVideo: false, webMedia: .shown))
+        #expect(
+            NowPlayingProvider.showsInCompact(
+                live(.video), showsVideo: true,
+                webMedia: WebMediaPolicy(showsCards: true, showsInCompact: false)
+            ) == false,
+            "and its own switch still decides"
+        )
     }
 
     @Test("Live radio is audio and behaves as audio always has")
     func liveAudioUnaffected() {
-        #expect(NowPlayingProvider.showsInCompact(live(.audio), showsVideo: false))
+        #expect(NowPlayingProvider.showsInCompact(live(.audio), showsVideo: false, webMedia: .shown))
     }
 
     /// A duration of zero while playing is what a stream looks like when the
@@ -291,83 +322,12 @@ struct LiveMediaTests {
 }
 
 /// A browser holds one now-playing slot for every tab and hands it around, so
-/// the card can be a video nobody chose. "Only show media from apps" refuses
-/// the lot of it.
-@Suite("Only media from apps")
+/// what arrives from one is often not what anyone chose to play. Both
+/// switches are off until somebody says otherwise, and these are the states
+/// they make.
+@Suite("Web media, by permission")
 @MainActor
-struct AppMediaOnlyTests {
-
-    private func collect(_ provider: NowPlayingProvider, while body: () async -> Void) async -> [ProviderEvent] {
-        let stream = provider.start()
-        await body()
-        provider.stop()
-        var events: [ProviderEvent] = []
-        for await event in stream { events.append(event) }
-        return events
-    }
-
-    private func provider(
-        _ source: ScriptedSource,
-        appsOnly: Bool,
-        hidesWebCard: Bool = true
-    ) -> NowPlayingProvider {
-        NowPlayingProvider(
-            source: source, artwork: ArtworkLoader(),
-            playingInterval: 60, idleInterval: 60,
-            playbackWatcher: nil,
-            appsOnly: { appsOnly }, hidesWebCard: { hidesWebCard }
-        )
-    }
-
-    @Test("A web page gets no card when only apps may have one")
-    func webRefused() async {
-        let source = ScriptedSource()
-        source.current = media("Some video", bundleID: "com.apple.Safari")
-        let made = provider(source, appsOnly: true)
-        let events = await collect(made) { await made.refreshNow() }
-        #expect(events.isEmpty, "nothing published at all — no card, no compact view, no peek")
-    }
-
-    @Test("A player still gets one")
-    func playerAllowed() async {
-        let source = ScriptedSource()
-        source.current = media("A track", bundleID: "com.spotify.client")
-        let made = provider(source, appsOnly: true)
-        let events = await collect(made) { await made.refreshNow() }
-        #expect(!events.isEmpty)
-    }
-
-    @Test("With the setting off, a web page is carried as before")
-    func webAllowedByDefault() async {
-        let source = ScriptedSource()
-        source.current = media("Some video", bundleID: "com.apple.Safari")
-        let made = provider(source, appsOnly: false)
-        let events = await collect(made) { await made.refreshNow() }
-        #expect(!events.isEmpty)
-    }
-
-    @Test("A card already up is taken away when the source turns out to be a page")
-    func cardRetracted() async {
-        // The provider retracts through the same path it uses for a player
-        // that stopped, so nothing is left behind in the queue.
-        let source = ScriptedSource()
-        source.current = media("A track", bundleID: "com.spotify.client")
-        let provider = provider(source, appsOnly: true)
-        let events = await collect(provider) {
-            await provider.refreshNow()
-            source.current = media("Some video", bundleID: "com.google.Chrome")
-            await provider.refreshNow()
-        }
-        let retracted = events.contains { if case .retract = $0 { return true } else { return false } }
-        #expect(retracted, "the player's card is withdrawn rather than replaced by the page's")
-    }
-}
-
-/// Keeping a page out of the ears and refusing it a card are two different
-/// wishes, and the second is only offered once the first has been made.
-@Suite("Web media: ears, then card")
-@MainActor
-struct WebMediaScopeTests {
+struct WebMediaGateTests {
 
     private func collect(_ provider: NowPlayingProvider, while body: () async -> Void) async -> [ProviderEvent] {
         let stream = provider.start()
@@ -387,56 +347,208 @@ struct WebMediaScopeTests {
         return nil
     }
 
-    @Test("Kept out of the ears, a page still has its card")
-    func compactOnlyKeepsTheCard() async {
-        let source = ScriptedSource()
-        source.current = media("Some video", bundleID: "com.apple.Safari")
-        let made = NowPlayingProvider(
-            source: source, artwork: ArtworkLoader(),
-            playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
-            appsOnly: { true }, hidesWebCard: { false }
-        )
-        let payload = published(await collect(made) { await made.refreshNow() })
-        #expect(payload != nil, "the card is still published")
-        #expect(payload?.showsInCompact == false, "but it does not rest in the ears")
+    private func retracted(_ events: [ProviderEvent]) -> Bool {
+        events.contains { if case .retract = $0 { return true } else { return false } }
     }
 
-    @Test("A player is untouched by either switch")
-    func playerUnaffected() async {
+    private func provider(
+        _ source: ScriptedSource,
+        webMedia: @escaping () -> WebMediaPolicy
+    ) -> NowPlayingProvider {
+        NowPlayingProvider(
+            source: source, artwork: ArtworkLoader(),
+            playingInterval: 60, idleInterval: 60,
+            playbackWatcher: nil, webMedia: webMedia
+        )
+    }
+
+    /// Nothing published is the whole of it: no card to cycle to, so no page
+    /// dot, nothing selectable, nothing to hand the ears, and no island
+    /// opening to announce it.
+    @Test("Off and off: a page is not published at all", arguments: [
+        "com.apple.Safari", "com.google.Chrome",
+    ])
+    func bothOffPublishesNothing(bundleID: String) async {
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: bundleID)
+        let made = provider(source, webMedia: { .hidden })
+        let events = await collect(made) { await made.refreshNow() }
+        #expect(events.isEmpty, "\(bundleID) got no card, no compact view, no announcement")
+    }
+
+    @Test("Cards on, compact off: the card exists and the ears stay empty")
+    func cardWithoutCompact() async {
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { WebMediaPolicy(showsCards: true, showsInCompact: false) })
+        let events = await collect(made) { await made.refreshNow() }
+        #expect(published(events) != nil)
+        #expect(published(events)?.showsInCompact == false)
+    }
+
+    @Test("Both on: a page's media is carried the way a player's is")
+    func cardAndCompact() async {
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { .shown })
+        let events = await collect(made) { await made.refreshNow() }
+        #expect(published(events)?.showsInCompact == true)
+    }
+
+    /// The invalid pair, which Settings cannot produce but a preference file
+    /// can hold. It must behave as both off rather than as compact-only.
+    @Test("Compact without cards publishes nothing")
+    func compactWithoutCards() async {
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { WebMediaPolicy(showsCards: false, showsInCompact: true) })
+        let events = await collect(made) { await made.refreshNow() }
+        #expect(events.isEmpty)
+    }
+
+    @Test("An app's own media is untouched by either switch")
+    func nativeMediaUnchanged() async {
+        for policy in [WebMediaPolicy.hidden, .shown] {
+            let source = ScriptedSource()
+            source.current = media("A track", bundleID: "com.spotify.client")
+            let made = provider(source, webMedia: { policy })
+            let events = await collect(made) { await made.refreshNow() }
+            #expect(published(events)?.title == "A track")
+            #expect(published(events)?.showsInCompact == true)
+        }
+    }
+
+    /// The card has to go while the same track keeps playing — waiting for the
+    /// next track would leave a card up that the user has just forbidden.
+    @Test("Switching cards off retracts the page's card there and then")
+    func disablingCardsRetractsImmediately() async {
+        var policy = WebMediaPolicy.shown
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { policy })
+        var reads = 0
+        let events = await collect(made) {
+            await made.refreshNow()
+            policy = .hidden
+            reads = source.reads
+            made.reconsider()
+        }
+        #expect(retracted(events), "the card is taken away without the track changing")
+        #expect(source.reads == reads, "and without asking the player anything")
+    }
+
+    @Test("Switching only the compact switch off keeps the card")
+    func disablingCompactKeepsTheCard() async {
+        var policy = WebMediaPolicy.shown
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { policy })
+        let events = await collect(made) {
+            await made.refreshNow()
+            policy = WebMediaPolicy(showsCards: true, showsInCompact: false)
+            made.reconsider()
+        }
+        let publishes = events.compactMap { event -> Activity? in
+            if case .publish(let activity) = event { return activity } else { return nil }
+        }
+        #expect(publishes.count == 2)
+        #expect(publishes.first?.restsInEars == true)
+        #expect(publishes.last?.restsInEars == false)
+        #expect(!retracted(events), "the card itself was never in question")
+    }
+
+    @Test("Switching cards on shows what is already playing, without a relaunch")
+    func enablingPublishesWhatIsPlaying() async {
+        var policy = WebMediaPolicy.hidden
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { policy })
+        let events = await collect(made) {
+            await made.refreshNow()
+            policy = .shown
+            made.reconsider()
+        }
+        #expect(published(events)?.title == "Some video")
+        #expect(published(events)?.showsInCompact == true)
+    }
+
+    /// The ghost case: a player's card must be withdrawn when a browser takes
+    /// the system's now-playing slot, not left in the cycle pointing at a page
+    /// that is not allowed to be there.
+    @Test("A player's card is withdrawn when a forbidden page takes the slot")
+    func playerCardWithdrawn() async {
         let source = ScriptedSource()
         source.current = media("A track", bundleID: "com.spotify.client")
-        let made = NowPlayingProvider(
-            source: source, artwork: ArtworkLoader(),
-            playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
-            appsOnly: { true }, hidesWebCard: { true }
-        )
-        let payload = published(await collect(made) { await made.refreshNow() })
-        #expect(payload?.showsInCompact == true)
+        let made = provider(source, webMedia: { .hidden })
+        let events = await collect(made) {
+            await made.refreshNow()
+            source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.google.Chrome")
+            await made.refreshNow()
+        }
+        #expect(retracted(events))
+        #expect(published(events)?.title == "A track", "and nothing of the page's was ever published")
     }
 
-    @Test("Hiding the card needs both switches")
-    func cardNeedsBoth() async {
-        // The second switch alone does nothing: it is disabled in Settings
-        // until the first is on, and the rule says the same thing so the two
-        // cannot drift apart.
+    /// What "hidden" has to mean end to end: the queue the cards are drawn
+    /// from never hears about it, so there is no card to cycle to, no page dot
+    /// counting it, nothing selected pointing at it, and nothing offered to
+    /// the ears. Driven through the queue rather than asserted on events
+    /// alone, because a ghost is a queue state, not a provider one.
+    @Test("A hidden page leaves no card, no dot, no selection and no resting seat")
+    func noGhostsInTheQueue() async {
+        var queue = ActivityQueue()
         let source = ScriptedSource()
-        source.current = media("Some video", bundleID: "com.apple.Safari")
-        let onlyCardSwitch = NowPlayingProvider(
-            source: source, artwork: ArtworkLoader(),
-            playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
-            appsOnly: { false }, hidesWebCard: { true }
-        )
-        let events = await collect(onlyCardSwitch) { await onlyCardSwitch.refreshNow() }
-        #expect(!events.isEmpty, "nothing is hidden while the first switch is off")
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { .hidden })
+        for event in await collect(made, while: { await made.refreshNow() }) {
+            queue.apply(event)
+        }
+        #expect(queue.isEmpty, "no card")
+        #expect(queue.count == 0, "nothing for the page dots to count")
+        #expect(queue.selectedID == nil, "nothing selected")
+        #expect(queue.activities.first(where: { $0.restsInEars }) == nil, "nothing in the ears")
     }
 
-    @Test("The compact rule reads the same way as the provider")
-    func ruleMatches() {
+    /// And the same page, allowed, does take all four — otherwise the test
+    /// above would pass against a provider that published nothing ever.
+    @Test("The same page, allowed, does take a card and a seat")
+    func allowedPageTakesItsPlace() async {
+        var queue = ActivityQueue()
+        let source = ScriptedSource()
+        source.current = media("Some video", duration: 9000, kind: .video, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { .shown })
+        for event in await collect(made, while: { await made.refreshNow() }) {
+            queue.apply(event)
+        }
+        #expect(queue.count == 1)
+        #expect(queue.selectedID?.source == "com.apple.Safari")
+        #expect(queue.activities.first?.restsInEars == true)
+    }
+
+    @Test("The compact rule reads the same way the provider does")
+    func ruleMatchesProvider() {
         let page = media("Some video", bundleID: "com.apple.Safari")
         let player = media("A track", bundleID: "com.spotify.client")
-        #expect(NowPlayingProvider.showsInCompact(page, showsVideo: true, appsOnly: true) == false)
-        #expect(NowPlayingProvider.showsInCompact(page, showsVideo: true, appsOnly: false))
-        #expect(NowPlayingProvider.showsInCompact(player, showsVideo: true, appsOnly: true))
+        #expect(NowPlayingProvider.showsInCompact(page, showsVideo: true, webMedia: .hidden) == false)
+        #expect(NowPlayingProvider.showsInCompact(
+            page, showsVideo: true,
+            webMedia: WebMediaPolicy(showsCards: true, showsInCompact: false)
+        ) == false)
+        #expect(NowPlayingProvider.showsInCompact(page, showsVideo: true, webMedia: .shown))
+        #expect(NowPlayingProvider.showsInCompact(player, showsVideo: true, webMedia: .hidden))
+    }
+
+    /// A browser that says nothing about what it is playing is judged by
+    /// length, so a long song streamed through a page is classified as video —
+    /// see `MediaKind.resolve`. The switches are therefore about browser media
+    /// as a whole, which is the conservative reading and the one the copy
+    /// describes.
+    @Test("Web audio is gated with web video, because the two cannot be told apart")
+    func webAudioIsGatedToo() async {
+        let source = ScriptedSource()
+        source.current = media("A song", duration: 200, kind: .audio, bundleID: "com.apple.Safari")
+        let made = provider(source, webMedia: { .hidden })
+        let events = await collect(made) { await made.refreshNow() }
+        #expect(events.isEmpty)
     }
 }
-

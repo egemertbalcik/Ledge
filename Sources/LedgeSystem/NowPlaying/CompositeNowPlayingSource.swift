@@ -318,6 +318,20 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// moves on promptly.
     static let heldGrace: TimeInterval = 15
 
+    /// How long an application's own media keeps the notch against a web page
+    /// claiming the slot.
+    ///
+    /// Separate from `heldGrace`, and longer, because the two windows measure
+    /// different things. `heldGrace` is about churn *within* a source, where
+    /// the real track is re-sighted every few seconds. This one covers a page
+    /// holding the system's single now-playing slot while a player keeps
+    /// playing unseen: the scripting fallback is what confirms the player is
+    /// still going, and where that is unavailable — Automation not granted —
+    /// a minute of no sighting whatsoever is where the page is finally let
+    /// through. A track whose length is known expires earlier than that, on
+    /// `hasFinished`.
+    static let appHoldAgainstPage: TimeInterval = 60
+
     /// The user asked for a track change, so the next different item is theirs
     /// and must not be resisted.
     public func expectChange() {
@@ -380,10 +394,31 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // and is what then lets something else through.
         if let held = heldPlaying,
            held.snapshot.trackKey != answered.trackKey,
-           now - held.at < Self.heldGrace,
-           !Self.hasFinished(held.snapshot, at: now, since: held.at),
-           !corroborated(answered, heldBundleID: held.snapshot.appBundleID, at: now) {
-            return Self.projecting(held.snapshot, from: held.at, to: now)
+           !Self.hasFinished(held.snapshot, at: now, since: held.at) {
+            let catalogue = BrowserCatalogue.shared
+            let pageOverApp = catalogue.isOpenableApp(bundleID: held.snapshot.appBundleID)
+                && catalogue.isWebOwner(bundleID: answered.appBundleID)
+            if pageOverApp {
+                // A page does not corroborate its way past an app's own media.
+                // Persistence is what the corroboration window measures, and a
+                // video autoplaying in a timeline is nothing *but* persistent —
+                // it keeps playing, so it keeps qualifying, and it took the
+                // notch from the track the user chose. An app's media holds the
+                // notch until it stops; then the page is welcome to it.
+                //
+                // Longer than `heldGrace` because the app is no longer being
+                // *seen*: the system names one now-playing item, the page has
+                // it, and the player is only sighted again through the
+                // scripting fallback below. A minute without any sighting at
+                // all is where this gives up.
+                if now - held.at < Self.appHoldAgainstPage,
+                   await stillPlaying(held.snapshot, at: now) {
+                    return Self.projecting(held.snapshot, from: held.at, to: now)
+                }
+            } else if now - held.at < Self.heldGrace,
+                      !corroborated(answered, heldBundleID: held.snapshot.appBundleID, at: now) {
+                return Self.projecting(held.snapshot, from: held.at, to: now)
+            }
         }
         challenger = nil
         defer { rememberIfPlaying(answered, at: now) }
@@ -425,7 +460,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
             to: newcomer.appBundleID,
             newcomerIsPlaying: newcomer.isPlaying,
             at: now,
-            isApp: { MediaOwner.isOpenableApp(bundleID: $0) }
+            isApp: { BrowserCatalogue.shared.isOpenableApp(bundleID: $0) }
         )
     }
 
@@ -465,7 +500,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // Only the incumbent gets this. A *different* player arriving is a
         // handover, and handovers keep their own rules.
         if answered.appBundleID == heldBundleID,
-           MediaOwner.isOpenableApp(bundleID: answered.appBundleID) {
+           BrowserCatalogue.shared.isOpenableApp(bundleID: answered.appBundleID) {
             challenger = nil
             return true
         }
@@ -489,6 +524,24 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     ) -> Bool {
         guard snapshot.duration > 0 else { return false }
         return snapshot.elapsed + max(0, now - since) >= snapshot.duration - 1
+    }
+
+    /// Whether the app that holds the notch is still actually playing.
+    ///
+    /// Asked of the scripting fallback, which is the one source that can see a
+    /// player the system has stopped naming. Three answers:
+    ///
+    /// - it names this player and says playing: hold the notch;
+    /// - it names this player and says paused: the user paused it, and the
+    ///   page is welcome to the notch now;
+    /// - it says nothing useful (no Automation permission, or a player it
+    ///   cannot script): no information, so the hold stands until
+    ///   `appHoldAgainstPage` runs out.
+    private func stillPlaying(_ held: NowPlayingSnapshot, at now: TimeInterval) async -> Bool {
+        guard let scripted = await fallback(at: now),
+              scripted.appBundleID == held.appBundleID
+        else { return true }
+        return scripted.isPlaying
     }
 
     /// Keeps the last playing answer, which is what a paused newcomer is

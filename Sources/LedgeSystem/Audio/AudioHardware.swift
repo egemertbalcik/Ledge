@@ -55,10 +55,15 @@ public struct SystemAudioHardware: AudioHardware {
 
     public func readout(for device: AudioObjectID) -> HUDReadout? {
         guard let level = VolumeController.level(of: device) else { return nil }
+        let muted = VolumeController.isMuted(device)
+        // A mute that arrived from outside Ledge — Control Centre, a headset
+        // button — is the user muting, and the watch is where we find out.
+        // Only above zero, where a muted output cannot be our own silence.
+        VolumeController.noteObservedMute(muted, level: level)
         return HUDReadout(
             kind: .volume,
             level: level,
-            isMuted: VolumeController.isMuted(device),
+            isMuted: VolumeController.showsMuted(device, level: level),
             deviceName: VolumeController.deviceName(device)
         )
     }

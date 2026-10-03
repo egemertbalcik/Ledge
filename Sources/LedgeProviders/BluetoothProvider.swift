@@ -18,10 +18,6 @@ public final class BluetoothProvider: ActivityProvider {
     /// How long a connect or disconnect card stays up.
     static let lifetime: TimeInterval = 4
 
-    /// Below this, a device's battery deserves a word before it dies mid-use.
-    static let lowBatteryThreshold: Double = 0.2
-    /// Re-arm above this, so a level hovering at the threshold does not nag.
-    static let lowBatteryRearm: Double = 0.25
     /// How often connected devices are re-asked for their levels. Battery
     /// data otherwise only arrives at connect time, and AirPods die hours
     /// later.
@@ -38,6 +34,9 @@ public final class BluetoothProvider: ActivityProvider {
     static let flapGrace: TimeInterval = 8
 
     private let source: any BluetoothDeviceSource
+    /// Where observations go. The catalogue decides alerts now; this provider
+    /// only reports what its existing reads already saw.
+    private let observations: (any DeviceObservationSink)?
     private let now: () -> TimeInterval
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
 
@@ -45,11 +44,23 @@ public final class BluetoothProvider: ActivityProvider {
     /// retract the card the connect put up.
     private var published: [String: ActivityID] = [:]
 
+    /// Reads of the paired-device list that are still running.
+    ///
+    /// `system_profiler` takes seconds, so one of these can land well after
+    /// the provider has stopped — repopulating its tables and the catalogue
+    /// for a provider nobody is listening to. Tracked so `stop()` can cancel
+    /// them, and stamped with the session so a result that slips through is
+    /// discarded rather than applied.
+    private var reads: Set<Task<Void, Never>> = []
+    private var session = 0
+
     public init(
         source: any BluetoothDeviceSource,
+        observations: (any DeviceObservationSink)? = nil,
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.source = source
+        self.observations = observations
         self.now = now
     }
 
@@ -69,9 +80,20 @@ public final class BluetoothProvider: ActivityProvider {
             // so their first disconnect found nothing published and said no
             // goodbye. Seed the tables quietly — no hello card, they were
             // there all along — so the departure is announced like any other.
-            Task { @MainActor [weak self] in
+            let session = self.session
+            var read: Task<Void, Never>!
+            read = Task { @MainActor [weak self] in
+                defer { self?.reads.remove(read) }
                 guard let self else { return }
-                for device in await self.source.connectedDevices()
+                let already = await self.source.connectedDevices()
+                // The read outlived the provider, or a newer run replaced it.
+                guard !Task.isCancelled, self.session == session else { return }
+                // Reported whether or not they are new to this provider: a
+                // device connected before Ledge started produced no connect
+                // event, so the catalogue would not have heard of it until the
+                // ten-minute refresh came round.
+                for device in already { self.report(device) }
+                for device in already
                 where self.published[device.address] == nil {
                     self.published[device.address] = ActivityID(kind: .device, source: device.address)
                     self.lastKnownName[device.address] = device.name
@@ -79,14 +101,18 @@ public final class BluetoothProvider: ActivityProvider {
                     if device.isApple { self.lastKnownApple.insert(device.address) }
                 }
             }
+            self.reads.insert(read)
         }
     }
 
     public func stop() {
+        // Anything in flight belongs to a run that is over.
+        session &+= 1
+        for read in reads { read.cancel() }
+        reads.removeAll()
         source.stopWatching()
         lowBatteryTimer?.cancel()
         lowBatteryTimer = nil
-        lowAnnounced.removeAll()
         for item in pendingGoodbyes.values { item.cancel() }
         pendingGoodbyes.removeAll()
         continuation?.finish()
@@ -116,7 +142,7 @@ public final class BluetoothProvider: ActivityProvider {
             lastKnownName[device.address] = device.name
             lastKnownSymbol[device.address] = device.symbolName
             if device.isApple { lastKnownApple.insert(device.address) }
-            checkLowBattery(device)
+            report(device)
             Self.log.debug("suppressed flap for \(device.name, privacy: .private(mask: .hash))")
             return
         }
@@ -134,7 +160,7 @@ public final class BluetoothProvider: ActivityProvider {
             connected \(device.name, privacy: .private(mask: .hash)) \
             levels=\(device.batteryLevels.count, privacy: .public)
             """)
-        checkLowBattery(device)
+        report(device)
 
         continuation?.yield(.publish(Activity(
             id: id,
@@ -172,11 +198,24 @@ public final class BluetoothProvider: ActivityProvider {
     }
 
     private func announceGoodbye(_ address: String) {
-        // The once-per-dip latch resets on a *real* departure, not on the raw
-        // disconnect: low AirPods drop their link every time they go idle —
-        // the very flaps the grace hides — and clearing the latch there
-        // re-announced "low battery" on every reconnect.
-        lowAnnounced.remove(address)
+        // An observed detach, reported as the event it is. The catalogue keeps
+        // the last known levels; their age is what marks them old.
+        if let observations {
+            let observation = DeviceObservations.disconnected(
+                address: address,
+                name: lastKnownName[address] ?? "Device",
+                symbolName: lastKnownSymbol[address] ?? "headphones",
+                isApple: lastKnownApple.contains(address),
+                at: Date(timeIntervalSinceReferenceDate: now())
+            )
+            // Synchronous: no task per advertisement, per connect or per reading.
+        observations.submit(observation)
+        }
+
+        // The once-per-dip latch used to be reset here. It now lives with
+        // the engine, keyed by component and persisted, so a departure is no
+        // longer the thing that rearms it — a recovery above the threshold
+        // is, which is the question actually being asked.
         let goodbye = ActivityID(kind: .device, source: address)
         // The entry has served its purpose once the goodbye is out; leaving
         // it made the map grow per paired device forever and let a spurious
@@ -196,10 +235,6 @@ public final class BluetoothProvider: ActivityProvider {
         )))
     }
 
-    /// Devices already warned about, so a level sitting under the threshold
-    /// announces once, not every check. Cleared when the level recovers or
-    /// the device disconnects.
-    private var lowAnnounced: Set<String> = []
     private var lowBatteryTimer: DispatchSourceTimer?
 
     private func startLowBatteryChecks() {
@@ -209,48 +244,47 @@ public final class BluetoothProvider: ActivityProvider {
             repeating: Self.lowBatteryCheckInterval,
             leeway: .seconds(60)
         )
+        let session = self.session
         timer.setEventHandler { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                for device in await self.source.connectedDevices() {
-                    self.checkLowBattery(device)
+            Task { @MainActor [weak self] in
+                guard let self, self.session == session else { return }
+                var read: Task<Void, Never>!
+                read = Task { @MainActor [weak self] in
+                    defer { self?.reads.remove(read) }
+                    guard let self else { return }
+                    let devices = await self.source.connectedDevices()
+                    // Same race as the startup read: a slow profiler query can
+                    // return after the provider stopped.
+                    guard !Task.isCancelled, self.session == session else { return }
+                    for device in devices { self.report(device) }
                 }
+                self.reads.insert(read)
             }
         }
         timer.resume()
         lowBatteryTimer = timer
     }
 
-    /// Announces a device crossing the low threshold — once per dip.
+    /// Reports what this read already saw, and lets the catalogue decide.
     ///
-    /// The case is left out: the alert is for a device that dies mid-use,
-    /// and a case at 15% with the buds at 90% is not that — yet it used to
-    /// raise "low battery" on every connect and every ten-minute sweep.
-    private func checkLowBattery(_ device: BluetoothDeviceSnapshot) {
-        let inUse = device.batteryLevels.filter { $0.key.caseInsensitiveCompare("Case") != .orderedSame }
-        guard let lowest = inUse.values.min() else { return }
-        if lowest > Self.lowBatteryRearm {
-            lowAnnounced.remove(device.address)
-            return
-        }
-        guard lowest <= Self.lowBatteryThreshold,
-              !lowAnnounced.contains(device.address)
-        else { return }
-        lowAnnounced.insert(device.address)
-
-        continuation?.yield(.publish(Activity(
-            id: ActivityID(kind: .device, source: device.address + "/low"),
-            createdAt: now(),
-            expiresAfter: Self.lifetime,
-            payload: .device(DevicePayload(
-                name: device.name,
-                symbolName: device.symbolName,
-                batteryLevels: device.batteryLevels,
-                isConnected: true,
-                isApple: device.isApple
-            ))
-        )))
+    /// This provider used to evaluate the low-battery rule itself, with its
+    /// own threshold, its own rearm and its own latch keyed by address. That
+    /// decision now lives in `BatteryAlertEngine` behind the catalogue, so
+    /// there is exactly one place that decides and one that delivers — the
+    /// old pair would have announced the same dip twice the moment both were
+    /// live.
+    ///
+    /// The ten-minute refresh below is *kept*: it is how levels are obtained
+    /// at all, not part of the alerting. Only the duplicate decision went.
+    private func report(_ device: BluetoothDeviceSnapshot) {
+        guard let observations else { return }
+        let observation = DeviceObservations.fromBluetooth(
+            device, at: Date(timeIntervalSinceReferenceDate: now())
+        )
+        // Synchronous: no task per advertisement, per connect or per reading.
+        observations.submit(observation)
     }
+
 
     /// Remembered because a disconnect notification carries only an address —
     /// the device is gone by the time it arrives, so its name has to come from

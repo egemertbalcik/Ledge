@@ -5,6 +5,7 @@ import Testing
 @testable import LedgeUI
 
 @Suite("Weather formatting")
+@MainActor
 struct WeatherFormattingTests {
 
     @Test("Temperatures round to whole degrees")

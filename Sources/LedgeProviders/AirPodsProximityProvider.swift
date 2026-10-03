@@ -29,11 +29,17 @@ public final class AirPodsProximityProvider: ActivityProvider {
     /// desk interleaved their counters and every alternation popped a card.
     private var lastLid: [String: UInt8] = [:]
 
+    /// Where observations go. Every advertisement this provider already
+    /// receives is reported; none is requested, and no scan is started for it.
+    private let observations: (any DeviceObservationSink)?
+
     public init(
         scanner: AirPodsProximityScanner = AirPodsProximityScanner(),
+        observations: (any DeviceObservationSink)? = nil,
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.scanner = scanner
+        self.observations = observations
         self.now = now
     }
 
@@ -55,7 +61,24 @@ public final class AirPodsProximityProvider: ActivityProvider {
         lastLid.removeAll()
     }
 
+    private func report(_ proximity: AirPodsProximity) {
+        guard let observations,
+              let observation = DeviceObservations.fromProximity(
+                  proximity,
+                  name: proximity.name,
+                  at: Date(timeIntervalSinceReferenceDate: now())
+              )
+        else { return }
+        // Synchronous: no task per advertisement, per connect or per reading.
+        observations.submit(observation)
+    }
+
     private func handle(_ proximity: AirPodsProximity) {
+        // Reported on every advertisement this provider was already given.
+        // The catalogue coalesces the repeats; nothing here asks for more of
+        // them, and the scanner's duty cycle is untouched.
+        report(proximity)
+
         let key = proximity.peripheralID?.uuidString ?? String(proximity.model)
         let previous = lastLid[key]
         lastLid[key] = proximity.lidCounter

@@ -8,20 +8,9 @@ public struct RecordingState: Equatable, Sendable {
     public var camera: Bool
     public var microphone: Bool
 
-    /// Whether the microphone is held by the system's own speech input rather
-    /// than by an app.
-    ///
-    /// It is the same microphone and the same indicator underneath, but not
-    /// the same event: an app recording you is worth a privacy dot, while
-    /// dictation is something *you* just started and want confirmed. Told
-    /// apart by who holds the input, because macOS publishes no "dictation is
-    /// running" of its own.
-    public var isSystemSpeech: Bool
-
-    public init(camera: Bool = false, microphone: Bool = false, isSystemSpeech: Bool = false) {
+    public init(camera: Bool = false, microphone: Bool = false) {
         self.camera = camera
         self.microphone = microphone
-        self.isSystemSpeech = isSystemSpeech
     }
 
     public var isActive: Bool { camera || microphone }
@@ -110,12 +99,41 @@ public final class SystemRecordingSource: RecordingSource {
     // MARK: - Reading
 
     public func current() -> RecordingState {
-        let holders = Self.inputHolders()
         return RecordingState(
             camera: isAnyCameraRunning(),
-            microphone: !holders.isEmpty,
-            isSystemSpeech: holders.contains(where: Self.isSystemSpeech)
+            microphone: Self.microphoneHeld(by: Self.inputHolders())
         )
+    }
+
+    /// Whether any of these holders is worth an indicator.
+    ///
+    /// Everything except the system's own speech input counts. Dictation is
+    /// the system transcribing for the user, at the user's own keystroke, and
+    /// the menu bar already says so while it runs; a second indicator in the
+    /// notch reports the user to themselves. Ledge shows nothing for
+    /// dictation — not a dictation state, and not a microphone state *because*
+    /// of dictation.
+    ///
+    /// A filter rather than a short circuit: dictation running does not excuse
+    /// an app recording at the same time, and that app still lights the dot.
+    nonisolated static func microphoneHeld(by holders: [String]) -> Bool {
+        holders.contains { !isSystemSpeech($0) }
+    }
+
+    /// Whether this bundle identifier is the system's own speech input.
+    ///
+    /// Apple's own identifiers only. A third-party app with "speech" in its
+    /// name is an app recording you, and is reported as one. The processes
+    /// that actually hold the input for dictation are not documented anywhere,
+    /// so the match is by family rather than by a list of exact ids — which
+    /// `inputHolders()` logging is for: use it once, read the name back.
+    nonisolated static func isSystemSpeech(_ bundleID: String) -> Bool {
+        guard bundleID.hasPrefix("com.apple.") else { return false }
+        let name = bundleID.lowercased()
+        return name.contains("speech")
+            || name.contains("dictation")
+            || name.contains("siri")
+            || name.contains("assistant")
     }
 
     private func isAnyCameraRunning() -> Bool {
@@ -164,42 +182,26 @@ public final class SystemRecordingSource: RecordingSource {
 
     // MARK: - CoreAudio
 
-    /// Microphone use is read per *process*, not per device.
+    /// The bundle identifiers of everything currently holding the input.
     ///
+    /// Logged when the set changes, which is how the identifier for a feature
+    /// Apple documents nowhere gets discovered: use it once, read it back.
+    ///
+    /// Read per *process*, not per device.
     /// `kAudioDevicePropertyDeviceIsRunningSomewhere` is device-wide: a duplex
     /// device (AirPods, USB headset) reports "running" during mere playback,
     /// which lit the mic dot whenever music played to a headset. The process
     /// object's `IsRunningInput` is scoped to actual capture, and skipping our
     /// own pid keeps any future in-process audio work from lighting our own
     /// dot.
-    nonisolated static func isAnyProcessRecordingInput() -> Bool {
-        !inputHolders().isEmpty
-    }
-
-    /// The bundle identifiers of everything currently holding the input.
     ///
-    /// Logged when the set changes, which is how the identifier for a feature
-    /// Apple documents nowhere gets discovered: use it once, read it back.
+    /// The raw list, unfiltered: `microphoneHeld(by:)` is the one place that
+    /// decides which of these is worth an indicator, so the two readings
+    /// cannot drift apart.
     public nonisolated static func inputHolders() -> [String] {
         processObjects()
             .filter { isProcessRecordingInput($0) && processPID($0) != getpid() }
             .map { bundleID($0) ?? "(unnamed)" }
-    }
-
-    /// Whether an identifier belongs to macOS's own speech input.
-    ///
-    /// A prefix-and-keyword test rather than an exact name: dictation is
-    /// served by a handful of Apple daemons whose names have changed across
-    /// releases and are documented nowhere, so matching the family is more
-    /// durable than matching whichever one answers today. Anything not
-    /// Apple's is an app recording you, which is the privacy dot's business.
-    nonisolated static func isSystemSpeech(_ bundleID: String) -> Bool {
-        guard bundleID.hasPrefix("com.apple.") else { return false }
-        let lowered = bundleID.lowercased()
-        return lowered.contains("speech")
-            || lowered.contains("dictation")
-            || lowered.contains("siri")
-            || lowered.contains("assistant")
     }
 
     nonisolated static func bundleID(_ object: AudioObjectID) -> String? {

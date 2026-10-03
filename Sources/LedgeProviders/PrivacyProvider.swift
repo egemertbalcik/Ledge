@@ -77,13 +77,12 @@ public final class PrivacyProvider: ActivityProvider {
         }
         isPublished = true
 
-        // The holders are named because macOS documents no "dictation is
-        // running" signal, and the daemon that serves it has been renamed
-        // more than once. Using the feature writes its own identifier here.
+        // The holders are named because the indicator is only as trustworthy
+        // as the thing it points at, and a wrong one is worth being able to
+        // diagnose from a log rather than a guess.
         Self.log.notice("""
             recording: camera=\(state.camera, privacy: .public) \
             mic=\(state.microphone, privacy: .public) \
-            speech=\(state.isSystemSpeech, privacy: .public) \
             holders=[\(SystemRecordingSource.inputHolders().joined(separator: ", "), privacy: .public)]
             """)
         continuation?.yield(.publish(Activity(
@@ -93,11 +92,7 @@ public final class PrivacyProvider: ActivityProvider {
             expiresAfter: nil,
             payload: .privacy(PrivacyPayload(
                 cameraActive: state.camera,
-                micActive: state.microphone,
-                // Dictation is the microphone too, but it is not the same
-                // event: an app recording you earns a privacy dot, while
-                // dictation is something you just started and want confirmed.
-                isSystemSpeech: state.isSystemSpeech
+                micActive: state.microphone
             ))
         )))
     }

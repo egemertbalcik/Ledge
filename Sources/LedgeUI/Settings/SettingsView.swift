@@ -86,7 +86,7 @@ public struct SettingsActions {
 /// `.provider(id)`.
 enum SettingsPane: Hashable {
     /// The panes anyone needs. Six rows, each with one job.
-    case general, cards, hud, permissions, about
+    case general, cards, hud, devices, permissions, about
     /// Tuning surfaces, shown only when `Prefs.advanced` is on: they exist for
     /// shaping the app, not for using it.
     case advanced, appearance, compact
@@ -107,6 +107,7 @@ struct SidebarIcon {
         case .appearance: SidebarIcon(symbol: "paintbrush.fill", color: .pink)
         case .compact: SidebarIcon(symbol: "capsule.fill", color: .indigo)
         case .hud: SidebarIcon(symbol: "speaker.wave.2.fill", color: .teal)
+        case .devices: SidebarIcon(symbol: "airpods.pro", color: .green)
         case .permissions: SidebarIcon(symbol: "lock.fill", color: .blue)
         case .about: SidebarIcon(symbol: "info", color: .gray)
         case .provider(let id): SidebarIcon.forProvider(id)
@@ -172,6 +173,7 @@ public struct SettingsView: View {
         case "appearance": .appearance
         case "compact": .compact
         case "hud": .hud
+        case "devices": .devices
         case "permissions": .permissions
         case "about": .about
         default: nil
@@ -209,6 +211,7 @@ public struct SettingsView: View {
         case .appearance: "Shape & Motion"
         case .compact: "Compact Ears"
         case .hud: "Levels"
+        case .devices: "Devices"
         case .permissions: "Permissions"
         case .about: "About"
         case .provider(let id):
@@ -227,6 +230,7 @@ public struct SettingsView: View {
             }
 
             Section {
+                row(.devices, "Devices")
                 row(.permissions, "Permissions")
                 row(.about, "About")
             }
@@ -278,6 +282,13 @@ public struct SettingsView: View {
             CompactSettingsTab(preferences: preferences, geometry: geometry)
         case .hud:
             HUDSettingsTab(preferences: preferences, actions: actions, model: model)
+        case .devices:
+            if let devices = model.devices {
+                DevicesSettingsTab(model: devices)
+            } else {
+                Text("The device catalogue is unavailable.")
+                    .foregroundStyle(.secondary)
+            }
         case .permissions:
             PermissionsSettingsTab(model: model, actions: actions)
         case .about:

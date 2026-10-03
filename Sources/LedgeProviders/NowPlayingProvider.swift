@@ -89,19 +89,33 @@ public final class NowPlayingProvider: ActivityProvider {
     /// somebody at the keyboard rather than more idle time.
     private var lastTrackKey: String?
 
+    /// What the source last reported, whether or not it earned a card.
+    ///
+    /// Kept so a preference change can be answered from memory. Re-reading
+    /// the source would be a second or more of osascript for an answer we
+    /// already have, and the question a switch asks is not "what is playing"
+    /// but "what is this allowed to do" — see `reconsider()`.
+    private var lastSnapshot: NowPlayingSnapshot?
+
     /// Whether video may hold the ears. Read fresh on every poll rather than
     /// captured, so turning the toggle off clears the compact view that is up.
     private let showsVideo: () -> Bool
 
-    /// Whether only an application's own media may rest in the compact view —
-    /// see `Prefs.appMediaOnly`.
-    private let appsOnly: () -> Bool
+    /// Whether a bundle identifier belongs to an application rather than to a
+    /// web page.
+    ///
+    /// Injected because the honest answer needs the system: `MediaOwner`
+    /// knows the browsers we listed, and `BrowserCatalogue` knows the ones
+    /// LaunchServices has registered for `https`, which is all of them. The
+    /// default is the pure reading, for tests and for a provider built
+    /// without a system to ask.
+    private let ownerIsApp: @MainActor (String) -> Bool
 
-    /// Whether a web page's media is refused a card as well as the ears — see
-    /// `Prefs.hideWebMediaCard`. Only consulted when `appsOnly` is on, because
-    /// hiding the card of something that is welcome in the ears is not a state
-    /// anyone asked for.
-    private let hidesWebCard: () -> Bool
+    /// Whether a web page's media may have a card, the ears, or neither.
+    /// Read fresh on every poll for the same reason as `showsVideo`: turning
+    /// either switch takes effect on the next tick, with no relaunch and no
+    /// waiting for the track to change.
+    private let webMedia: () -> WebMediaPolicy
 
     /// Whether the notch should carry this at all.
     ///
@@ -133,15 +147,31 @@ public final class NowPlayingProvider: ActivityProvider {
     /// live video stream reports no length and stays out of the ears, where a
     /// radio stream is let in: the one signal we have says nothing, so the
     /// quieter reading wins.
+    ///
+    /// Browser media answers to its own switch and not to the general video
+    /// one. Two reasons: the specific preference should win over the general
+    /// one, and the general one cannot be applied honestly to a browser
+    /// anyway — a page reports no media type, so "video" there is a guess
+    /// made from the runtime (`MediaKind.resolve`). Leaving both in force
+    /// made "Show web media in the compact view" a switch that did nothing,
+    /// which is worse than either rule on its own.
     static func showsInCompact(
         _ snapshot: NowPlayingSnapshot,
         showsVideo: Bool,
-        appsOnly: Bool = false
+        webMedia: WebMediaPolicy = .hidden,
+        ownerIsApp: Bool? = nil
     ) -> Bool {
-        // A web page's media can be kept out of the ears while keeping its
-        // card: the compact view is the part that sits there uninvited, and a
-        // card only appears when someone goes looking for it.
-        if appsOnly, !MediaOwner.isOpenableApp(bundleID: snapshot.appBundleID) { return false }
+        // A web page's media can have a card and still be kept out of the
+        // ears: the compact view is the part that sits there uninvited, where
+        // a card only appears when someone goes looking for it.
+        let isApp = ownerIsApp ?? MediaOwner.isOpenableApp(bundleID: snapshot.appBundleID)
+        guard webMedia.allowsCompact(ownerIsApp: isApp) else { return false }
+        // Said yes to browser media in the ears: that is the answer. The
+        // length floor below still applies, and refuses nothing a card was
+        // granted to — `shouldShow` holds video to the same two minutes.
+        guard isApp else {
+            return snapshot.isLive || snapshot.duration >= MediaKind.longFormDuration
+        }
         guard snapshot.kind == .video else { return true }
         // A live broadcast is long-form by definition: it has no length to
         // measure against the two-minute floor, and the floor exists to keep
@@ -158,14 +188,16 @@ public final class NowPlayingProvider: ActivityProvider {
         idleInterval: TimeInterval = 4.0,
         playbackWatcher: PlaybackChangeWatcher? = PlaybackChangeWatcher(),
         showsVideo: @escaping () -> Bool = { true },
-        appsOnly: @escaping () -> Bool = { false },
-        hidesWebCard: @escaping () -> Bool = { false },
+        webMedia: @escaping () -> WebMediaPolicy = { .hidden },
+        ownerIsApp: @escaping @MainActor (String) -> Bool = {
+            MediaOwner.isOpenableApp(bundleID: $0)
+        },
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.source = source
         self.showsVideo = showsVideo
-        self.appsOnly = appsOnly
-        self.hidesWebCard = hidesWebCard
+        self.webMedia = webMedia
+        self.ownerIsApp = ownerIsApp
         self.playbackWatcher = playbackWatcher
         self.artwork = artwork
         self.playingInterval = playingInterval
@@ -219,6 +251,17 @@ public final class NowPlayingProvider: ActivityProvider {
         refreshSoon()
     }
 
+    /// Re-decides what the current player may do, now.
+    ///
+    /// Called when a media preference changes. Turning web cards off retracts
+    /// the page's card on the spot rather than at the next track change;
+    /// turning them on puts it up without a relaunch; turning off only the
+    /// compact switch republishes the same card with the ears released.
+    public func reconsider() {
+        guard continuation != nil else { return }
+        publish(lastSnapshot)
+    }
+
     public func refreshSoon() {
         boostTask?.cancel()
         boostTask = Task { @MainActor [weak self] in
@@ -253,6 +296,7 @@ public final class NowPlayingProvider: ActivityProvider {
         // switched off and on again is the user asking for the card back.
         pauses.cardWentAway()
         lastTrackKey = nil
+        lastSnapshot = nil
     }
 
     private func poll() async {
@@ -274,13 +318,15 @@ public final class NowPlayingProvider: ActivityProvider {
     }
 
     private func publish(_ snapshot: NowPlayingSnapshot?) {
-        // Refused outright only when both switches are on: keeping a page out
-        // of the ears is one wish, and refusing it a card is a second and
-        // larger one. Refused here rather than hidden in the view, so nothing
-        // downstream has to know the difference — the island does not open for
-        // it either.
-        let refusedAsWebContent = appsOnly() && hidesWebCard()
-            && snapshot.map { !MediaOwner.isOpenableApp(bundleID: $0.appBundleID) } ?? false
+        lastSnapshot = snapshot
+        // A web page with cards switched off is refused here rather than
+        // hidden in the view, so nothing downstream has to know the
+        // difference: no activity means no card, no page dot, no selection,
+        // nothing to hand to the ears and no island opening for it. Published
+        // again, without a relaunch, the first time the switch is back on.
+        let policy = webMedia()
+        let isApp = snapshot.map { ownerIsApp($0.appBundleID) } ?? false
+        let refusedAsWebContent = snapshot.map { _ in !policy.allowsCard(ownerIsApp: isApp) } ?? false
         if DebugSwitches.tracing("media"), snapshot == nil {
             Self.log.notice("media: source reported nothing")
         }
@@ -384,10 +430,10 @@ public final class NowPlayingProvider: ActivityProvider {
                 artworkData: cached?.data,
                 kind: snapshot.kind,
                 showsInCompact: Self.showsInCompact(
-                    snapshot, showsVideo: showsVideo(), appsOnly: appsOnly()
+                    snapshot, showsVideo: showsVideo(), webMedia: policy, ownerIsApp: isApp
                 ),
                 isLive: snapshot.isLive,
-                ownerIsApp: MediaOwner.isOpenableApp(bundleID: snapshot.appBundleID)
+                ownerIsApp: isApp
             ))
         )))
 

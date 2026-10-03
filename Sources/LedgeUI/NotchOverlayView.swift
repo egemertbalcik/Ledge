@@ -75,11 +75,6 @@ public final class NotchPresentation {
     /// standing tenant.
     public var privacyActive: Activity?
 
-    /// The dictation card while it lasts, so the companion seat can carry it
-    /// while music holds the island — and so the ears have something to draw
-    /// on a quiet one.
-    public var dictationActive: Activity?
-
     /// A paused track *while its linger is still running*, which is a
     /// different fact from "a paused track exists".
     ///
@@ -246,11 +241,6 @@ public final class NotchPresentation {
                   case .privacy(let payload) = activity.payload,
                   payload.cameraActive || payload.micActive
             else { return nil }
-            // Dictation is drawn as itself, in the island or in this seat, and
-            // must not also appear here as a bare microphone: one microphone,
-            // one indicator, and the user asked for the one that says what it
-            // is actually doing.
-            if payload.isSystemSpeech, !payload.cameraActive { return nil }
             return .privacy(camera: payload.cameraActive, microphone: payload.micActive)
         }()
         return SatelliteArbiter.resolve(
@@ -258,7 +248,6 @@ public final class NotchPresentation {
             privacy: privacyContent,
             timer: timerContent,
             timerIsMainIsland: playingNowPlaying == nil,
-            dictation: dictationActive == nil ? nil : .dictation
         )
     }
 
@@ -713,8 +702,7 @@ public struct NotchOverlayView: View {
                     runningTimer: presentation.runningTimerSession,
                     closeEvent: presentation.closeEvent,
                     nowPlaying: presentation.lingeringNowPlaying,
-                    selected: presentation.selected,
-                    standing: presentation.dictationActive
+                    selected: presentation.selected
                   )
                 // A peek is explicit news and shows whatever it announces; with
                 // nothing announced the same resting rule applies, so a timer

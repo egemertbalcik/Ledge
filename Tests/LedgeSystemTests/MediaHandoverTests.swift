@@ -119,6 +119,94 @@ struct MediaHandoverTests {
         #expect(answer?.appBundleID == Self.chrome, "nothing is holding the seat")
     }
 
+    /// The case reported from a real session: Spotify playing and holding the
+    /// compact view, a video autoplaying in a browser tab, and the browser's
+    /// card arriving anyway. Persistence is what the corroboration window
+    /// measures, and an autoplaying video is nothing but persistent — so it
+    /// kept qualifying and took the seat. A page may not do that to an app.
+    @Test("A page never corroborates its way past a playing app")
+    func pageCannotTakeSeatFromPlayingApp() async {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "Song"))
+        let scripting = Source(identifier: "scripting", value: track(Self.spotify, title: "Song"))
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        _ = await source.snapshot()
+
+        // The page keeps playing, poll after poll — exactly what defeated the
+        // corroboration window before.
+        adapter.value = track(Self.safari, title: "Video")
+        var answer: NowPlayingSnapshot?
+        for _ in 0..<20 {
+            clock.now += 1
+            answer = await source.snapshot()
+        }
+        #expect(answer?.appBundleID == Self.spotify, "the music keeps the notch while it plays")
+    }
+
+    /// And the hold is not a trap: once the player is actually paused, the page
+    /// is welcome to the seat. Known from the scripting fallback, which is the
+    /// one source that can still see a player the system has stopped naming —
+    /// and asked on its own cadence, so the handover lands within ten seconds
+    /// of the pause rather than on the next poll.
+    @Test("Pausing the app hands the seat to the page")
+    func pausingReleasesTheSeatToThePage() async {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "Song"))
+        let scripting = Source(identifier: "scripting", value: track(Self.spotify, title: "Song"))
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        _ = await source.snapshot()
+
+        adapter.value = track(Self.safari, title: "Video")
+        clock.now += 1
+        #expect(await source.snapshot()?.appBundleID == Self.spotify)
+
+        scripting.value = track(Self.spotify, title: "Song", playing: false)
+        // The cached scripting answer is good for `scriptingCadenceWhilePlaying`,
+        // so the pause is seen at the next question rather than at the next poll.
+        clock.now += CompositeNowPlayingSource.scriptingCadenceWhilePlaying + 1
+        #expect(await source.snapshot()?.appBundleID == Self.safari)
+    }
+
+    /// Without Automation permission there is no way to ask whether the player
+    /// is still going, so the hold is bounded rather than indefinite: a minute
+    /// with no sighting of the app at all, and the page is let through.
+    @Test("With nothing able to confirm the app, the hold expires")
+    func holdIsBoundedWhenNothingCanConfirm() async {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "Song"))
+        // No scripting at all — Automation not granted.
+        let scripting = Source(identifier: "scripting", value: nil)
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        _ = await source.snapshot()
+
+        adapter.value = track(Self.safari, title: "Video", elapsed: 0)
+        clock.now += 30
+        #expect(await source.snapshot()?.appBundleID == Self.spotify, "still held at thirty seconds")
+
+        clock.now += CompositeNowPlayingSource.appHoldAgainstPage
+        #expect(await source.snapshot()?.appBundleID == Self.safari, "and released after the window")
+    }
+
+    /// An app taking over from an app is somebody pressing play, and still
+    /// goes through the corroboration window it always did.
+    @Test("An app still corroborates its way past another app")
+    func appStillTakesSeatFromApp() async {
+        let clock = Clock()
+        let music = "com.apple.Music"
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "Song"))
+        let scripting = Source(identifier: "scripting", value: track(Self.spotify, title: "Song"))
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        _ = await source.snapshot()
+
+        adapter.value = track(music, title: "Other")
+        var answer: NowPlayingSnapshot?
+        for _ in 0..<8 {
+            clock.now += 1
+            answer = await source.snapshot()
+        }
+        #expect(answer?.appBundleID == music)
+    }
+
     @Test("One page does not hold the notch against another page")
     func pageYieldsToPage() async {
         let clock = Clock()

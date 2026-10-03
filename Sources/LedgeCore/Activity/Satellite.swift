@@ -17,10 +17,6 @@ public enum SatelliteContent: Equatable, Sendable {
     /// The recording indicator: camera and/or microphone in use.
     case privacy(camera: Bool, microphone: Bool)
 
-    /// Dictation, listening. Standing while it lasts, so a glance says
-    /// whether the key press took.
-    case dictation
-
     /// A transient device announcement — AirPods connected — shown for the
     /// card's own lifetime instead of a peek.
     case device(symbolName: String, tint: DeviceTint)
@@ -72,16 +68,11 @@ public enum SatelliteArbiter {
         transient: SatelliteContent?,
         privacy: SatelliteContent?,
         timer: SatelliteContent?,
-        timerIsMainIsland: Bool,
-        dictation: SatelliteContent? = nil
+        timerIsMainIsland: Bool
     ) -> SatelliteContent? {
         if let transient { return transient }
         if let timer, !timerIsMainIsland { return timer }
         if let privacy { return privacy }
-        // Last of the standing tenants. A recording light is urgent and a
-        // countdown is running out; dictation is a few seconds of the user's
-        // own doing, so it yields the seat to either.
-        if let dictation { return dictation }
         return nil
     }
 }

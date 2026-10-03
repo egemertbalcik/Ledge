@@ -144,43 +144,75 @@ public final class VolumeController {
         guard let device = Self.defaultOutputDevice(),
               let level = Self.level(of: device)
         else { return nil }
-        return HUDReadout(kind: .volume, level: level, isMuted: Self.isMuted(device), deviceName: Self.deviceName(device))
+        return HUDReadout(
+            kind: .volume,
+            level: level,
+            isMuted: Self.showsMuted(device, level: level),
+            deviceName: Self.deviceName(device)
+        )
     }
 
     // MARK: - Writing
 
-    @discardableResult
-    public nonisolated static func setLevel(_ level: Double, on device: AudioObjectID) -> Bool {
-        // NaN passes min/max unchanged; never hand it to CoreAudio.
-        guard level.isFinite else { return false }
-        var value = Float32(min(max(level, 0), 1))
-        var wroteAny = false
+    /// The one write path, for every caller. See `VolumeWriter`: volume and
+    /// mute are separate controls in CoreAudio, a scalar of zero is not
+    /// silence, and the order the two go out in is audible.
+    public nonisolated static let writer = VolumeWriter(hardware: SystemVolumeHardware())
 
-        for element in [kAudioObjectPropertyElementMain, UInt32(1), UInt32(2)] {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyVolumeScalar,
-                mScope: kAudioDevicePropertyScopeOutput,
-                mElement: element
-            )
-            guard AudioObjectHasProperty(device, &address) else { continue }
+    /// Whether the user has asked for mute.
+    ///
+    /// Held here because CoreAudio cannot answer it: the device has one mute
+    /// property, and Ledge sets it for two different reasons — the mute key,
+    /// and silence at a level of zero, where the scalar alone leaves the
+    /// output playing at −63.5 dB. Only the first of those is red on screen.
+    /// See `VolumeMuteState`.
+    ///
+    /// A latch rather than a stored preference: it describes what is happening
+    /// now, and a Mac that starts up muted by the system is not a Mac whose
+    /// user just pressed mute.
+    private nonisolated static let userMutedLatch = OSAllocatedUnfairLock(initialState: false)
 
-            var settable: DarwinBoolean = false
-            guard AudioObjectIsPropertySettable(device, &address, &settable) == noErr,
-                  settable.boolValue
-            else { continue }
+    public nonisolated static var userMuted: Bool {
+        userMutedLatch.withLock { $0 }
+    }
 
-            let status = AudioObjectSetPropertyData(
-                device, &address, 0, nil,
-                UInt32(MemoryLayout<Float32>.size), &value
-            )
-            if status == noErr {
-                wroteAny = true
-                // The main element controls everything; writing channels after
-                // it would be redundant.
-                if element == kAudioObjectPropertyElementMain { break }
-            }
-        }
-        return wroteAny
+    /// Adopts an outside mute as the user's own.
+    ///
+    /// Control Centre, a headset button, another app: any of those can mute
+    /// the output while Ledge is only watching, and above a level of zero a
+    /// muted output means somebody muted it. Below zero it means nothing —
+    /// the silence could as easily be ours.
+    public nonisolated static func noteObservedMute(_ muted: Bool, level: Double) {
+        userMutedLatch.withLock { $0 = muted && level > 0 }
+    }
+
+    /// Applies a level, keeping the device's mute consistent with it, and
+    /// reports what the hardware says afterwards — which is what the interface
+    /// should draw.
+    public nonisolated static func apply(
+        level: Double,
+        on device: AudioObjectID
+    ) -> VolumeWriteResult? {
+        let wanted = userMuted && level <= 0
+        let result = writer.apply(level: level, to: device, userMuted: userMuted)
+        userMutedLatch.withLock { $0 = wanted }
+        return result
+    }
+
+    /// Sets the user's own mute, leaving the level where it is.
+    public nonisolated static func apply(
+        muted: Bool,
+        on device: AudioObjectID
+    ) -> VolumeWriteResult {
+        let was = userMuted
+        let result = writer.apply(userMuted: muted, to: device, wasUserMuted: was)
+        userMutedLatch.withLock { $0 = muted }
+        return result
+    }
+
+    /// Whether a readout for this device should show the muted state.
+    public nonisolated static func showsMuted(_ device: AudioObjectID, level: Double) -> Bool {
+        isMuted(device) && VolumeMuteState(userMuted: userMuted, level: level).showsMuted
     }
 
     /// One selectable audio output.
@@ -291,29 +323,6 @@ public final class VolumeController {
         guard status == noErr else { return nil }
         let text = name as String
         return text.isEmpty ? nil : text
-    }
-
-    /// Sets the device mute flag. Returns whether it took.
-    @discardableResult
-    public nonisolated static func setMuted(_ muted: Bool, on device: AudioObjectID) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectHasProperty(device, &address) else { return false }
-
-        var settable: DarwinBoolean = false
-        guard AudioObjectIsPropertySettable(device, &address, &settable) == noErr,
-              settable.boolValue
-        else { return false }
-
-        var value: UInt32 = muted ? 1 : 0
-        let status = AudioObjectSetPropertyData(
-            device, &address, 0, nil,
-            UInt32(MemoryLayout<UInt32>.size), &value
-        )
-        return status == noErr
     }
 
     // MARK: - Watching

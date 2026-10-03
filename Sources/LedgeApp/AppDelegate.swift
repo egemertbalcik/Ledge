@@ -248,11 +248,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// exiting anyway — but the event tap and the CoreAudio listeners are
     /// registered with system services, and unwinding them deliberately is the
     /// difference between a clean exit and relying on the kernel to tidy up.
+    /// Holds the quit open while what is owed to the disk is written.
+    ///
+    /// `applicationWillTerminate` is the wrong place for this: a detached task
+    /// started there is not guaranteed to finish before the process goes, and
+    /// waiting for it on the main thread stalls the quit. AppKit's own answer
+    /// is the asynchronous reply — say "not yet", do the work, then say yes.
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        // Nothing was started, so nothing is owed. Touching `coordinator` here
+        // would build one in a secondary instance, whose teardown writes an
+        // empty brightness table over the running instance's saved levels.
+        guard started else { return .terminateNow }
+        // A second request while the first flush is still running must wait
+        // for it too — answering `.terminateNow` here would exit underneath
+        // the write it was waiting for.
+        guard !isFlushing else { return .terminateLater }
+        isFlushing = true
+
+        Task { @MainActor in
+            await coordinator.flushPendingWork()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    private var isFlushing = false
+
     func applicationWillTerminate(_ notification: Notification) {
         // Only tear down what was actually started. The single-instance exit
-        // terminates *before* start(): `coordinator` is lazy, so stopping here
-        // would build a fresh coordinator whose HUD teardown writes an empty
-        // brightness table over the running instance's saved levels and
+        // terminates *before* start(): `coordinator` is lazy, so touching it
+        // here would build a fresh coordinator whose HUD teardown writes an
+        // empty brightness table over the running instance's saved levels and
         // restores gamma system-wide — launching a second copy un-dimmed the
         // first copy's external display.
         guard started else { return }

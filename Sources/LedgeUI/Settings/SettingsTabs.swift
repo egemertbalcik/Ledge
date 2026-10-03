@@ -264,6 +264,11 @@ struct ProviderDetailPane: View {
         model.providers.first { $0.id == id }
     }
 
+    /// How far a switch that depends on the one above it sits in. The system
+    /// indent for a dependent checkbox, so the hierarchy is read rather than
+    /// explained.
+    private static let dependentInset: CGFloat = 20
+
     var body: some View {
         Form {
             if let descriptor {
@@ -318,29 +323,31 @@ struct ProviderDetailPane: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Section("Where it comes from") {
-                        Toggle("Keep web pages out of the compact view", isOn: $preferences.appMediaOnly)
-                        Text(preferences.appMediaOnly
-                             ? "Only players rest in the notch — Music, Spotify, Podcasts and the like. A page's media still has a card; it just does not sit there uninvited."
-                             : "Anything playing rests in the notch, including a web page. A browser hands its now-playing slot between tabs, so that can be a video you did not choose.")
+                    Section("Web media") {
+                        Toggle("Show web media cards", isOn: $preferences.showWebMediaCards)
+                        Text("Anything playing in a browser gets a card. Off by default: a browser hands its now-playing slot between tabs, so what arrives can be a video you did not choose.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
 
-                        // The larger wish, and only offered once the smaller
-                        // one has been made: refusing a card to something that
-                        // is welcome in the ears is not a state anyone means
-                        // to be in.
-                        Toggle("Hide their card as well", isOn: $preferences.hideWebMediaCard)
-                            .disabled(!preferences.appMediaOnly)
-                        Text("A page's media disappears entirely — no card to cycle to, and nothing announced when it starts.")
+                        // The second switch is the larger wish and depends on
+                        // the first: the compact view is the part that sits
+                        // there uninvited, where a card waits to be looked at.
+                        // Indented and dimmed, so the dependency is visible
+                        // before it is discovered.
+                        Toggle("Show web media in the compact view", isOn: $preferences.showWebMediaInCompact)
+                            .disabled(!preferences.showWebMediaCards)
+                            .padding(.leading, Self.dependentInset)
+                            .accessibilityHint("Available when Show web media cards is on.")
+                        Text("Browser media rests in the notch the way a track does, whatever the video setting below says.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
-                            .opacity(preferences.appMediaOnly ? 1 : 0.5)
+                            .padding(.leading, Self.dependentInset)
+                            .opacity(preferences.showWebMediaCards ? 1 : 0.5)
                     }
 
                     Section("Video") {
                         Toggle("Show video in the compact view", isOn: $preferences.showVideoInCompact)
-                        Text("What you are watching sits in the notch the way a track does. Switch it off to keep the notch still while the screen is busy — the card stays either way, so hovering still reaches the controls. Video shorter than two minutes is not shown at all.")
+                        Text("What you are watching sits in the notch the way a track does. Switch it off to keep the notch still while the screen is busy — the card stays either way, so hovering still reaches the controls. Video shorter than two minutes is not shown at all. Applies to apps; browser media follows the web media settings above.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
@@ -414,7 +421,7 @@ struct ProviderDetailPane: View {
         case "weather": "Current conditions for your location, or a city you choose."
         case "timer": "A focus timer and pomodoro cycle, counted down in the notch."
         case "shelf": "Drop files on the notch to park them, then drag them out anywhere."
-        case "privacy": "A dot while the camera or microphone is in use, and a word while you are dictating."
+        case "privacy": "A dot while the camera or microphone is in use by an app."
         case "levels": "Sliders for sound and brightness, for a keyboard or mouse with no keys for them."
         case "airpods-proximity": "A card when an AirPods case opens nearby."
         case "keyboard": "A brief note when the keyboard layout switches."

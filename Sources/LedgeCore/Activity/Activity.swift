@@ -195,18 +195,13 @@ extension Activity {
 /// last looked at — and only if that card has any business resting.
 public enum CompactRest {
 
-    /// - Parameter standing: a fact that is simply true until it stops being
-    ///   true — VoiceOver running. It sits below everything with a clock on
-    ///   it, because those are the ones that will be gone in a moment and this
-    ///   one will still be here afterwards.
     public static func resolve(
         farewell: Activity?,
         playingNowPlaying: Activity?,
         runningTimer: Activity?,
         closeEvent: Activity?,
         nowPlaying: Activity?,
-        selected: Activity?,
-        standing: Activity? = nil
+        selected: Activity?
     ) -> Activity? {
         // Media the compact view will not draw is turned away wherever it is
         // offered, and whatever the caller believes. Enforced here rather than
@@ -222,7 +217,6 @@ public enum CompactRest {
         if let runningTimer { return runningTimer }
         if let closeEvent { return closeEvent }
         if let nowPlaying = restable(nowPlaying) { return nowPlaying }
-        if let standing { return standing }
         // The last resort is the only one that is not already a live fact, so
         // it is the only one that has to earn its place.
         if let selected, selected.restsInEars { return selected }

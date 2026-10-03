@@ -4,6 +4,7 @@ import Testing
 @testable import LedgeUI
 
 @Suite("Stopwatch digits")
+@MainActor
 struct StopwatchClockTests {
 
     @Test("m:ss with centiseconds a size down; hours join past sixty minutes")

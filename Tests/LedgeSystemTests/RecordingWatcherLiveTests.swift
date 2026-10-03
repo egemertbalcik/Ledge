@@ -56,3 +56,56 @@ final class Counter: @unchecked Sendable {
     func bump() { lock.withLock { $0 += 1 } }
     var count: Int { lock.withLock { $0 } }
 }
+
+/// Dictation has no interface in Ledge and no indicator either: the system
+/// transcribing at the user's own keystroke, with the menu bar already saying
+/// so, is not an app listening to them. The exclusion is internal — nothing
+/// downstream knows it exists — so this is where it is held in place.
+@Suite("The system's own speech input is not an indicator")
+struct SystemSpeechExclusionTests {
+
+    @Test("Apple's speech processes are recognised", arguments: [
+        "com.apple.SpeechRecognitionCore",
+        "com.apple.speech.recognitionserver",
+        "com.apple.corespeechd",
+        "com.apple.DictationIM",
+        "com.apple.siri.embeddedspeech",
+        "com.apple.assistantd",
+    ])
+    func speechProcesses(bundleID: String) {
+        #expect(SystemRecordingSource.isSystemSpeech(bundleID))
+    }
+
+    /// Apple's own identifiers only. An app with "speech" in its name is an
+    /// app recording you, and gets the dot it has earned.
+    @Test("Everything else is an app recording you", arguments: [
+        "com.apple.Music",
+        "com.apple.FaceTime",
+        "us.zoom.xos",
+        "com.hegenberg.BetterSpeech",
+        "org.speech.recorder",
+        "(unnamed)",
+        "",
+    ])
+    func otherProcesses(bundleID: String) {
+        #expect(SystemRecordingSource.isSystemSpeech(bundleID) == false)
+    }
+
+    @Test("Dictation alone lights nothing")
+    func dictationAloneIsSilent() {
+        #expect(SystemRecordingSource.microphoneHeld(by: []) == false)
+        #expect(SystemRecordingSource.microphoneHeld(by: ["com.apple.corespeechd"]) == false)
+        #expect(SystemRecordingSource.microphoneHeld(
+            by: ["com.apple.corespeechd", "com.apple.SpeechRecognitionCore"]
+        ) == false)
+    }
+
+    /// A filter, not a short circuit: dictation running is no excuse for
+    /// missing the call that is recording at the same time.
+    @Test("An app recording alongside dictation still lights the dot")
+    func appAlongsideDictation() {
+        #expect(SystemRecordingSource.microphoneHeld(by: ["us.zoom.xos"]))
+        #expect(SystemRecordingSource.microphoneHeld(by: ["com.apple.corespeechd", "us.zoom.xos"]))
+        #expect(SystemRecordingSource.microphoneHeld(by: ["(unnamed)"]))
+    }
+}

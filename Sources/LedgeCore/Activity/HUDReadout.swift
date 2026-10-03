@@ -44,6 +44,9 @@ public struct HUDReadout: Equatable, Sendable {
         // converting NaN to `Int`, taking the whole app down over a bad reading
         // from an audio device. Check finiteness explicitly.
         self.level = level.isFinite ? min(max(level, 0), 1) : 0
+        // Whatever it is given. Whether a silent output counts as *muted* is
+        // not something a readout can work out from the level — see
+        // `VolumeMuteState`, which is where the two intents behind it live.
         self.isMuted = isMuted
     }
 

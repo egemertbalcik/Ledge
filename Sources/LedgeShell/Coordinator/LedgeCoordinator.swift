@@ -89,6 +89,74 @@ public final class LedgeCoordinator {
     /// own; see `ScreenDormancy` for what one shared flag got wrong.
     private var dormancy = ScreenDormancy()
 
+    /// Everything that owes the disk something, drained in order.
+    ///
+    /// Rule edits sit in the Settings model's own write mailbox, and the
+    /// catalogue's writes are debounced — so quitting straight after changing
+    /// a rule lost it. Both are asked to finish here, and the caller waits.
+    public func flushPendingWork() async {
+        await settingsModel.drainPendingWrites()
+        await deviceCatalogue.flush()
+    }
+
+    /// Builds the Devices pane's model once, handing it closures that reach
+    /// the catalogue actor. The pane never touches the store directly, so no
+    /// filesystem work is ever asked for on the main actor.
+    private func installDevicesModelIfNeeded() {
+        guard settingsModel.devices == nil else { return }
+        let store = deviceCatalogue
+        let notifier = alertNotifier
+        settingsModel.devices = DevicesSettingsModel(
+            actions: DevicesSettingsModel.Actions(
+                load: { await store.snapshot() },
+                history: { id in await store.history(for: id) },
+                setPinned: { id, pinned in await store.setPinned(pinned, for: id) },
+                setHidden: { id, hidden in await store.setHidden(hidden, for: id) },
+                setAlerts: { id, configuration in await store.setAlerts(configuration, for: id) },
+                forget: { [weak self] id, keep in
+                    await store.forget(id, keepingHistory: keep)
+                    // The mailbox remembers what it last forwarded per device.
+                    // Left alone, a forgotten device that is still around
+                    // would not be reported again until the heartbeat came
+                    // round — so it would reappear minutes later rather than
+                    // on its next sighting.
+                    await MainActor.run { self?.deviceObservations.forget(id) }
+                },
+                deleteAllHistory: { await store.deleteAllHistory() },
+                // The one place notification permission is ever requested.
+                requestNotificationAuthorization: { await notifier.requestAuthorization() },
+                // Routed through the store's own consumer, which is the same
+                // path a real alert takes. An earlier version held a weak
+                // reference to the provider that was never assigned, so every
+                // Preview button silently did nothing.
+                preview: { rule, name in
+                    Task { await store.deliverPreview(of: rule, deviceName: name) }
+                }
+            )
+        )
+    }
+
+    /// Shows notifications for alerts that asked for them. Never requests
+    /// authorisation of its own accord.
+    private let alertNotifier: any AlertNotifying = SystemAlertNotifier()
+
+
+    /// The device catalogue: what Ledge remembers about the hardware around
+    /// it, and the one place battery alerts are decided.
+    ///
+    /// Owned here because the providers that feed it and the provider that
+    /// delivers from it are both built here. An actor, so the disk work it
+    /// does never lands on the main thread.
+    public let deviceCatalogue = DeviceCatalogueStore()
+
+    /// Coalesces what the providers see before it reaches the catalogue.
+    ///
+    /// Without this, an unchanged set of AirPods in range produced a
+    /// catalogue write on roughly every scan window, for as long as they sat
+    /// on the desk — the scanner's six seconds and the write debounce's five
+    /// simply lined up.
+    public lazy var deviceObservations = ObservationMailbox(store: deviceCatalogue)
+
     /// "Reset all settings" rewrites every preference at once, and three
     /// things hold their own copy of one: the shelf store its items, the
     /// timer provider its recents, the provider hub its running set. Left
@@ -868,16 +936,16 @@ public final class LedgeCoordinator {
                 self.setRestingHold(false)
                 self.linger.nothingRests()
             } else if playing {
-                // Something is a live resident: playing music, a ticking timer,
-                // a close event, dictation. None of them is a paused track, and
+                // Something is a live resident: playing music, a ticking
+                // timer, a close event. None of them is a paused track, and
                 // this is where a paused track used to come back from the dead.
                 //
                 // `present` is true whenever *anything* rests, so setting the
                 // lingering card from it re-lingered a video paused hours ago
-                // every time something unrelated took the island — start
-                // dictation, and a film from the morning claimed the ears two
-                // seconds later. The linger belongs to the pause that started
-                // it and to nothing else.
+                // every time something unrelated took the island — a film
+                // from the morning claimed the ears two seconds after an
+                // unrelated resident appeared. The linger belongs to the pause
+                // that started it and to nothing else.
                 self.presentation.lingeringNowPlaying = nil
                 self.setRestingHold(true)
                 self.linger.nowResting(Self.mediaKey(self.presentation.nowPlaying))
@@ -958,6 +1026,8 @@ public final class LedgeCoordinator {
     /// else is constructed synchronously on demand.
     private func registerProviders() {
         let registrations = ProviderRegistry.all(
+            observations: deviceObservations,
+            catalogue: deviceCatalogue,
             nowPlayingProvider: { [weak self] in
                 guard let self else {
                     return NowPlayingProvider(
@@ -971,12 +1041,8 @@ public final class LedgeCoordinator {
                     showsVideo: { [weak self] in
                         self?.preferences.showVideoInCompact ?? Prefs.showVideoInCompact.defaultValue
                     },
-                    appsOnly: { [weak self] in
-                        self?.preferences.appMediaOnly ?? Prefs.appMediaOnly.defaultValue
-                    },
-                    hidesWebCard: { [weak self] in
-                        self?.preferences.hideWebMediaCard ?? Prefs.hideWebMediaCard.defaultValue
-                    }
+                    webMedia: { [weak self] in self?.preferences.webMedia ?? .hidden },
+                    ownerIsApp: { BrowserCatalogue.shared.isOpenableApp(bundleID: $0) }
                 )
                 self.nowPlayingProviderRef = provider
                 return provider
@@ -1442,16 +1508,13 @@ public final class LedgeCoordinator {
             setOutputVolume: { id, level in
                 // Any device, not just the current route — CoreAudio can set a
                 // level on an output that is not the default.
-                let wanted = min(max(level, 0), 1)
+                //
+                // Scalar and mute together: moving the bar up is a request to
+                // hear something, and dragging it to the bottom is a request
+                // to hear nothing. Half the operation is a control that lies
+                // about what it did.
                 VolumeController.noteSelfWrite()
-                _ = VolumeController.setLevel(wanted, on: id)
-                // And unmute, which is what makes the drag do anything at all.
-                // macOS keeps the scalar at its pre-mute value, so on a muted
-                // output the write succeeded, the bar moved, and the Mac stayed
-                // silent — the control appeared broken because half of it was.
-                // Every system slider behaves this way: moving it up is a
-                // request to hear something.
-                if wanted > 0 { _ = VolumeController.setMuted(false, on: id) }
+                _ = VolumeController.apply(level: level, on: id)
             },
             openOwningApp: { [weak self] in self?.bringMediaAppForward() }
         )
@@ -1466,15 +1529,9 @@ public final class LedgeCoordinator {
             outputs: { [weak self] in self?.currentOutputs() ?? [] },
             displays: { [weak self] in self?.hud.brightnessDisplays() ?? [] },
             setOutputVolume: { id, level in
-                let clamped = min(max(level, 0), 1)
-                // Dragging a muted bar has to unmute, exactly as the hardware
-                // keys do: without this the bar moved, the scalar moved, and
-                // the Mac stayed silent — the control lying about what it did.
-                if clamped > 0, VolumeController.isMuted(id) {
-                    VolumeController.setMuted(false, on: id)
-                }
+                // The same one operation the HUD bar and the keys use.
                 VolumeController.noteSelfWrite()
-                _ = VolumeController.setLevel(clamped, on: id)
+                _ = VolumeController.apply(level: level, on: id)
             },
             setDisplayBrightness: { [weak self] id, level in
                 self?.hud.adjustBrightness(of: id, to: level)
@@ -1519,12 +1576,15 @@ public final class LedgeCoordinator {
     private func currentOutputs() -> [AudioOutputOption] {
         let current = VolumeController.defaultOutputDevice()
         return VolumeController.outputDevices().map {
-            AudioOutputOption(
+            let level = VolumeController.outputLevel(of: $0.id)
+            return AudioOutputOption(
                 id: $0.id,
                 name: $0.name,
                 isCurrent: $0.id == current,
-                level: VolumeController.outputLevel(of: $0.id),
-                isMuted: VolumeController.isMuted($0.id)
+                level: level,
+                // The same rule the HUD draws by: silence at zero is an empty
+                // bar, and only the user's own mute is the muted state.
+                isMuted: VolumeController.showsMuted($0.id, level: level ?? 0)
             )
         }
     }
@@ -1715,7 +1775,7 @@ public final class LedgeCoordinator {
     /// card was drawn should not be started by a click on empty space.
     private func bringMediaAppForward() {
         guard let bundleID = activeMediaBundleID,
-              MediaOwner.isOpenableApp(bundleID: bundleID)
+              BrowserCatalogue.shared.isOpenableApp(bundleID: bundleID)
         else { return }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
         else { return }
@@ -1754,6 +1814,7 @@ public final class LedgeCoordinator {
         gestures.start()
         observeInteractionPreferences()
         observeLiveEffectPreferences()
+        observeMediaPreferences()
     }
 
     /// Re-applies interaction settings when they change.
@@ -1778,6 +1839,25 @@ public final class LedgeCoordinator {
                     controller.applyCapturePreference()
                 }
                 self.observeLiveEffectPreferences()
+            }
+        }
+    }
+
+    /// The media switches decide what the player that is *already* playing is
+    /// allowed to do, so they have to be answered now: a card switched off has
+    /// to go away while the same track keeps playing, and one switched on has
+    /// to appear without waiting for the next track. The provider re-decides
+    /// from the snapshot it already holds — no second read of the player.
+    private func observeMediaPreferences() {
+        withObservationTracking {
+            _ = preferences.showWebMediaCards
+            _ = preferences.showWebMediaInCompact
+            _ = preferences.showVideoInCompact
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.nowPlayingProviderRef?.reconsider()
+                self.observeMediaPreferences()
             }
         }
     }
@@ -1831,6 +1911,7 @@ public final class LedgeCoordinator {
     ///
     /// Only ever *checks* — nothing here can prompt, so it is safe on a timer.
     private func refreshSettingsModel() {
+        installDevicesModelIfNeeded()
         settingsModel.isSuppressingSystemHUD = hud.isSuppressing
         settingsModel.focusFolderGranted = focusFolder.isReadable
         // Deliberately does *not* re-read the permissions: this runs from many
@@ -1882,6 +1963,8 @@ public final class LedgeCoordinator {
         focusBaseline = nil
         dormancy.clear()
         presentation.screensAreDark = false
+        // Nothing queued may arrive after this.
+        deviceObservations.invalidate()
         satelliteDismiss?.cancel()
         satelliteDismiss = nil
         parkedSatellite = nil
@@ -2367,8 +2450,7 @@ public final class LedgeCoordinator {
             runningTimer: runningTimer,
             closeEvent: presentation.closeEvent,
             nowPlaying: presentation.lingeringNowPlaying,
-            selected: presentation.selected,
-            standing: presentation.dictationActive
+            selected: presentation.selected
         )
     }
 
@@ -2415,8 +2497,6 @@ public final class LedgeCoordinator {
                   case .privacy(let payload) = privacy.payload,
                   payload.cameraActive || payload.micActive {
             candidate = privacy.id
-        } else if let dictation = presentation.dictationActive {
-            candidate = dictation.id
         } else {
             candidate = nil
         }

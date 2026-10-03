@@ -14,6 +14,18 @@ public final class SettingsModel {
     public var permissions: [PermissionRow] = []
     public var providers: [ProviderDescriptor] = []
 
+    /// The Devices pane's own model, when the shell has a catalogue to back
+    /// it. nil in the preview and in tests that do not exercise devices, and
+    /// the pane says so rather than rendering an empty list as if it were an
+    /// answer.
+    public var devices: DevicesSettingsModel?
+
+    /// Waits for anything the Settings panes still owe the disk. Called on
+    /// the way out.
+    public func drainPendingWrites() async {
+        await devices?.drainPendingWrites()
+    }
+
     /// What the app can currently see playing, and why. Follows a demotion
     /// live, so a settings window left open tells the truth.
     public var mediaSource: MediaSourceStatus = .playersOnly

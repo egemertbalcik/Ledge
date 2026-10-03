@@ -244,12 +244,17 @@ public final class HUDCoordinator {
         switch kind {
         case .volume:
             guard let device = VolumeController.defaultOutputDevice() else { return }
-            if clamped > 0, VolumeController.isMuted(device) {
-                VolumeController.setMuted(false, on: device)
-            }
             VolumeController.noteSelfWrite()
-            guard VolumeController.setLevel(clamped, on: device) else { return }
-            show(HUDReadout(kind: .volume, level: clamped, isMuted: false, deviceName: VolumeController.defaultOutputName()))
+            // One operation: scalar and mute together, in the order that makes
+            // no sound, and the readout comes from what the hardware says
+            // afterwards rather than from what was asked for.
+            guard let result = VolumeController.apply(level: clamped, on: device),
+                  result.didSomething
+            else { return }
+            show(HUDReadout(
+                kind: .volume, level: result.level, isMuted: result.showsMuted,
+                deviceName: VolumeController.defaultOutputName()
+            ))
         case .brightness:
             // No display named: the one the pointer is on, matching the keys.
             guard let display = displayBrightness.displayUnderCursor() else { return }
@@ -347,41 +352,51 @@ public final class HUDCoordinator {
               let current = VolumeController.level(of: device)
         else { return false }
 
-        let wasMuted = VolumeController.isMuted(device)
-
         if key == .mute {
             // Toggle mute ourselves so the native mute OSD stays suppressed and
             // only Ledge's red pill shows. If the device has no settable mute
             // (some digital outputs), fall through untouched so the key still
             // does whatever it always did.
+            //
+            // Toggles the *user's* mute, which is the thing the red pill
+            // follows. The device's own property is not the state here: an
+            // output turned all the way down is muted underneath to make it
+            // genuinely silent, and pressing mute down there has nothing left
+            // to silence — but it still has something to say, and the result
+            // reports that as a change even when no write went out.
             VolumeController.noteSelfWrite()
-            guard VolumeController.setMuted(!wasMuted, on: device) else { return false }
-            show(HUDReadout(kind: .volume, level: current, isMuted: !wasMuted, deviceName: VolumeController.defaultOutputName()))
+            let result = VolumeController.apply(muted: !VolumeController.userMuted, on: device)
+            guard result.didSomething else { return false }
+            show(HUDReadout(
+                kind: .volume, level: result.level, isMuted: result.showsMuted,
+                deviceName: VolumeController.defaultOutputName()
+            ))
             return true
         }
 
-        // Volume up/down while muted must unmute first — otherwise setting the
-        // scalar changes nothing audible and, with the key swallowed, the volume
-        // keys look dead. This is exactly what the native keys do.
-        if wasMuted {
-            VolumeController.setMuted(false, on: device)
-        }
-
+        // Volume up/down while muted has to unmute, or the scalar moves and
+        // nothing is audible — with the key swallowed, the volume keys look
+        // dead. Down to zero has to *mute*, or the output may stay audible at
+        // the device's lowest step. Both live in `VolumeWriter` now, in the
+        // order that makes no sound on the way.
+        //
         // min/max pass NaN straight through (`min(max(nan,0),1)` is NaN),
         // and a NaN target would be written into CoreAudio verbatim.
         let step = preferences.hudVolumeStep.isFinite ? preferences.hudVolumeStep : 0.0625
         let target = min(max(current + Double(key.delta) * step, 0), 1)
         VolumeController.noteSelfWrite()
-        let didSet = VolumeController.setLevel(target, on: device)
+        guard let result = VolumeController.apply(level: target, on: device) else { return false }
 
-        // Swallow (and show) whenever we could act — either we changed the level
-        // or we at least unmuted. Only a device whose volume is genuinely not
-        // settable falls through, so the native "locked" indicator can appear
-        // rather than the keys silently dying. This is what stops the native
-        // sound OSD flickering in intermittently.
-        guard didSet || wasMuted else { return false }
+        // Swallow (and show) whenever we could act — the level moved, or the
+        // mute did. Only a device that answered neither falls through, so the
+        // native "locked" indicator can appear rather than the keys silently
+        // dying. This is what stops the native sound OSD flickering in.
+        guard result.didSomething else { return false }
 
-        show(HUDReadout(kind: .volume, level: target, isMuted: false, deviceName: VolumeController.defaultOutputName()))
+        show(HUDReadout(
+            kind: .volume, level: result.level, isMuted: result.showsMuted,
+            deviceName: VolumeController.defaultOutputName()
+        ))
         return true
     }
 

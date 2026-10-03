@@ -26,27 +26,15 @@ public struct PrivacyPayload: Equatable, Sendable, Codable {
     public var cameraActive: Bool
     public var micActive: Bool
 
-    /// The microphone is held by macOS's own speech input — dictation —
-    /// rather than by an app.
-    ///
-    /// Same microphone, same hardware, different sentence. An app listening to
-    /// you is a privacy fact and earns the dot. Dictation is something you
-    /// started a moment ago by pressing a key, and being told "Microphone" for
-    /// it answers a question nobody asked while leaving the obvious one — did
-    /// it start? — unanswered.
-    public var isSystemSpeech: Bool
-
-    public init(cameraActive: Bool = false, micActive: Bool = false, isSystemSpeech: Bool = false) {
+    public init(cameraActive: Bool = false, micActive: Bool = false) {
         self.cameraActive = cameraActive
         self.micActive = micActive
-        self.isSystemSpeech = isSystemSpeech
     }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         cameraActive = try c.decodeIfPresent(Bool.self, forKey: .cameraActive) ?? false
         micActive = try c.decodeIfPresent(Bool.self, forKey: .micActive) ?? false
-        isSystemSpeech = try c.decodeIfPresent(Bool.self, forKey: .isSystemSpeech) ?? false
     }
 
     /// What to call it, given what is on.
@@ -54,7 +42,7 @@ public struct PrivacyPayload: Equatable, Sendable, Codable {
         switch (cameraActive, micActive) {
         case (true, true): "Camera & Mic"
         case (true, false): "Camera"
-        case (false, true): isSystemSpeech ? "Dictation" : "Microphone"
+        case (false, true): "Microphone"
         case (false, false): "Idle"
         }
     }

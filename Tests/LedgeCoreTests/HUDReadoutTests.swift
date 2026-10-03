@@ -92,3 +92,62 @@ struct LevelGlyphTests {
         #expect(HUDReadout(kind: .volume, level: 0.8).symbolName == "speaker.wave.3.fill")
     }
 }
+
+/// Turning the sound all the way down has to silence the output through the
+/// mute control — a scalar of zero is only the quietest gain a device has,
+/// measured at −63.5 dB on this Mac's speakers. But the red muted state is an
+/// answer to the mute key, not to the volume keys. Two intents, one CoreAudio
+/// property.
+@Suite("Why an output is silent")
+struct VolumeMuteStateTests {
+
+    @Test("Zero silences the device without showing the muted state")
+    func zeroSilencesQuietly() {
+        let state = VolumeMuteState(userMuted: false, level: 0)
+        #expect(state.deviceMuted, "or 'all the way down' is not down")
+        #expect(state.showsMuted == false, "nobody pressed mute")
+    }
+
+    /// The reported case: the mute key at a level of zero. The device is
+    /// already silent, and the indicator still has to turn red.
+    @Test("A mute pressed at zero shows the muted state")
+    func mutePressedAtZeroShows() {
+        let state = VolumeMuteState(userMuted: true, level: 0)
+        #expect(state.deviceMuted)
+        #expect(state.showsMuted)
+    }
+
+    @Test("Above zero, the user's mute is the only thing that mutes")
+    func aboveZeroFollowsTheUser() {
+        #expect(VolumeMuteState(userMuted: false, level: 0.4).deviceMuted == false)
+        #expect(VolumeMuteState(userMuted: false, level: 0.4).showsMuted == false)
+        #expect(VolumeMuteState(userMuted: true, level: 0.4).deviceMuted)
+        #expect(VolumeMuteState(userMuted: true, level: 0.4).showsMuted)
+    }
+
+    @Test("A nonsense level reads as zero rather than passing through")
+    func nonFiniteLevelClamps() {
+        #expect(VolumeMuteState(userMuted: false, level: .nan).level == 0)
+        #expect(VolumeMuteState(userMuted: false, level: .nan).deviceMuted)
+        #expect(VolumeMuteState(userMuted: false, level: 4).level == 1)
+    }
+
+    /// The readout itself no longer second-guesses any of this: it draws what
+    /// it is given, and the decision above is made once, where both intents
+    /// are known.
+    @Test("The readout presents what it is handed")
+    func readoutDoesNotGuess() {
+        #expect(HUDReadout(kind: .volume, level: 0, isMuted: true).isMuted)
+        #expect(HUDReadout(kind: .volume, level: 0, isMuted: false).isMuted == false)
+    }
+
+    /// Still the crossed-out speaker at zero either way — which is what macOS
+    /// shows too, and is honest: there is no sound. Only the red pill differs.
+    @Test("The glyph says silent at zero whatever the mute state")
+    func glyphIsSilentAtZero() {
+        #expect(
+            HUDReadout.volumeSymbol(level: 0, isMuted: false)
+                == HUDReadout.volumeSymbol(level: 0, isMuted: true)
+        )
+    }
+}

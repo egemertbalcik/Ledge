@@ -152,15 +152,24 @@ public enum Prefs {
 
     /// Whether a web page's media may have a card at all.
     ///
-    /// A browser holds one now-playing slot for every tab and hands it around,
-    /// so the card can be a video nobody chose. Off by default: the card is
-    /// most useful for exactly the YouTube tab people watch. On, only real
-    /// players — Music, Spotify, Podcasts — reach the notch.
-    public static let appMediaOnly = PrefKey<Bool>("nowplaying.appMediaOnly", default: false)
+    /// Off by default. A browser holds one now-playing slot for every tab and
+    /// hands it around, so what arrives is often a video nobody chose — and an
+    /// autoplaying advertisement in a background tab registers exactly as a
+    /// track does. Native players say what they are playing; a page does not.
+    ///
+    /// Replaces `nowplaying.appMediaOnly` and `nowplaying.hideWebMediaCard`,
+    /// which expressed the same thing as two overlapping negatives and
+    /// defaulted to showing web media. An explicit setting of either is
+    /// carried over by `WebMediaMigration`; an installation that never
+    /// touched them gets this default instead.
+    public static let showWebMediaCards = PrefKey<Bool>("nowplaying.showWebMediaCards", default: false)
 
-    /// Whether a web page's media is refused a card as well as the compact
-    /// view. Only meaningful while `appMediaOnly` is on.
-    public static let hideWebMediaCard = PrefKey<Bool>("nowplaying.hideWebMediaCard", default: false)
+    /// Whether a web page's media may also hold the compact view.
+    ///
+    /// Off by default, and meaningless without `showWebMediaCards` — see
+    /// `WebMediaPolicy`, which is where that dependency is enforced rather
+    /// than trusted to each reader.
+    public static let showWebMediaInCompact = PrefKey<Bool>("nowplaying.showWebMediaInCompact", default: false)
 
     // General
     public static let launchAtLogin = PrefKey<Bool>("general.launchAtLogin", default: false)
@@ -229,6 +238,13 @@ public enum Prefs {
         "behavior.companionOverFullscreen",
         // The equaliser just moves now.
         "nowplaying.equalizerEnabled",
+        // Two negatives that together said what `showWebMediaCards` and
+        // `showWebMediaInCompact` now say as two positives. Retired *after*
+        // `WebMediaMigration` has read them: a choice somebody actually made
+        // is carried over, while an installation that never touched them
+        // takes the new default. See that type for the mapping.
+        "nowplaying.appMediaOnly",
+        "nowplaying.hideWebMediaCard",
     ]
 
     /// Every key name, for reset-to-defaults.
@@ -249,7 +265,7 @@ public enum Prefs {
         hudEnabled.name, hudBrightnessEnabled.name, suppressSystemHUD.name,
         hudVolumeStep.name, hudBrightnessStep.name, hudContentOffset.name, hudGlowBar.name,
         externalBrightness.name,
-        showVideoInCompact.name, appMediaOnly.name, hideWebMediaCard.name,
+        showVideoInCompact.name, showWebMediaCards.name, showWebMediaInCompact.name,
         launchAtLogin.name, hideFromScreenCapture.name, advanced.name,
         debugTint.name,
     ]
@@ -319,8 +335,26 @@ public final class Preferences {
     public var shelfAutoScreenshots: Bool { didSet { persist(shelfAutoScreenshots, Prefs.shelfAutoScreenshots) } }
 
     public var showVideoInCompact: Bool { didSet { persist(showVideoInCompact, Prefs.showVideoInCompact) } }
-    public var appMediaOnly: Bool { didSet { persist(appMediaOnly, Prefs.appMediaOnly) } }
-    public var hideWebMediaCard: Bool { didSet { persist(hideWebMediaCard, Prefs.hideWebMediaCard) } }
+    public var showWebMediaCards: Bool {
+        didSet {
+            persist(showWebMediaCards, Prefs.showWebMediaCards)
+            // Cards off takes the compact switch down with it, rather than
+            // leaving it set and waiting. Otherwise turning cards back on
+            // months later would also bring back a compact presence nobody
+            // asked for twice — and the stored pair would sit in the state
+            // `WebMediaPolicy` reads as invalid.
+            if !showWebMediaCards, showWebMediaInCompact { showWebMediaInCompact = false }
+        }
+    }
+
+    public var showWebMediaInCompact: Bool {
+        didSet { persist(showWebMediaInCompact, Prefs.showWebMediaInCompact) }
+    }
+
+    /// The two switches as the one decision everything downstream asks.
+    public var webMedia: WebMediaPolicy {
+        WebMediaPolicy(showsCards: showWebMediaCards, showsInCompact: showWebMediaInCompact)
+    }
 
     public var launchAtLogin: Bool { didSet { persist(launchAtLogin, Prefs.launchAtLogin) } }
     public var hideFromScreenCapture: Bool { didSet { persist(hideFromScreenCapture, Prefs.hideFromScreenCapture) } }
@@ -334,6 +368,7 @@ public final class Preferences {
 
     public init(store: PreferenceStoring) {
         self.store = store
+        WebMediaMigration.run(store: store)
         store.removeAll(named: Prefs.retiredNames)
         bottomRadius = store.value(for: Prefs.bottomRadius)
         closedBottomRadius = store.value(for: Prefs.closedBottomRadius)
@@ -377,8 +412,8 @@ public final class Preferences {
         outlineEnabled = store.value(for: Prefs.outlineEnabled)
         shelfAutoScreenshots = store.value(for: Prefs.shelfAutoScreenshots)
         showVideoInCompact = store.value(for: Prefs.showVideoInCompact)
-        appMediaOnly = store.value(for: Prefs.appMediaOnly)
-        hideWebMediaCard = store.value(for: Prefs.hideWebMediaCard)
+        showWebMediaCards = store.value(for: Prefs.showWebMediaCards)
+        showWebMediaInCompact = store.value(for: Prefs.showWebMediaInCompact)
         launchAtLogin = store.value(for: Prefs.launchAtLogin)
         hideFromScreenCapture = store.value(for: Prefs.hideFromScreenCapture)
         advanced = store.value(for: Prefs.advanced)
@@ -454,8 +489,8 @@ public final class Preferences {
         outlineEnabled = Prefs.outlineEnabled.defaultValue
         shelfAutoScreenshots = Prefs.shelfAutoScreenshots.defaultValue
         showVideoInCompact = Prefs.showVideoInCompact.defaultValue
-        appMediaOnly = Prefs.appMediaOnly.defaultValue
-        hideWebMediaCard = Prefs.hideWebMediaCard.defaultValue
+        showWebMediaCards = Prefs.showWebMediaCards.defaultValue
+        showWebMediaInCompact = Prefs.showWebMediaInCompact.defaultValue
         launchAtLogin = Prefs.launchAtLogin.defaultValue
         hideFromScreenCapture = Prefs.hideFromScreenCapture.defaultValue
         advanced = Prefs.advanced.defaultValue
