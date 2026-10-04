@@ -40,18 +40,6 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
     /// Spotify) are audio by definition; the adapter path resolves it.
     public var kind: MediaKind
 
-    /// What is known about where this media came from — and how reliably.
-    ///
-    /// Never a bare host: an asset URL is usually a CDN, and only a blob
-    /// origin stands for a website. `MediaOriginEvidence` holds the two apart
-    /// so a rule can never be matched against the wrong one. `.none` for a
-    /// native player, which has no website and does not need one.
-    public var origin: MediaOriginEvidence = .none
-
-    /// The website a user's rule may be matched against, or nil when Ledge
-    /// does not reliably know it.
-    public var verifiedWebsite: WebsiteHost? { origin.verifiedWebsite }
-
     public init(
         title: String,
         artist: String,
@@ -66,8 +54,7 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
         artworkID: String? = nil,
         artworkData: Data? = nil,
         isLive: Bool = false,
-        kind: MediaKind = .audio,
-        origin: MediaOriginEvidence = .none
+        kind: MediaKind = .audio
     ) {
         self.title = title
         self.artist = artist
@@ -83,7 +70,6 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
         self.artworkData = artworkData
         self.isLive = isLive
         self.kind = kind
-        self.origin = origin
     }
 
     /// Compares artwork by identity, never by bytes.
@@ -104,12 +90,6 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
             && lhs.artworkURL == rhs.artworkURL
             && lhs.artworkID == rhs.artworkID
             && lhs.kind == rhs.kind
-            // The *verified* website, not the whole origin. An adaptive stream
-            // changes CDN host mid-track — one segment from one edge server,
-            // the next from another — and none of that changes what the user
-            // sees or what any rule matches. Comparing the raw evidence made
-            // every such switch look like a different track.
-            && lhs.verifiedWebsite == rhs.verifiedWebsite
             && lhs.isLive == rhs.isLive
             && (lhs.artworkData == nil) == (rhs.artworkData == nil)
     }

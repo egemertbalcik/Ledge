@@ -1128,16 +1128,15 @@ public final class LedgeCoordinator {
             let choice = await NowPlayingSourceSelector.choose(
                 forceStub: DebugSwitches.isOn("LEDGE_STUB_MEDIA"),
                 mayQueryPlayers: { [weak self] in self?.permissions.mayAskAboutPlayers ?? false },
-                // The same website rules the provider reads, so the source
-                // layer does not hold the notch for a page the provider will
-                // refuse to publish.
+                // The same switch the provider reads, so the source layer does
+                // not hold the notch for a page the provider will refuse to
+                // publish.
                 allowsMedia: { [weak self] snapshot in
                     guard let self else { return false }
                     return self.preferences.webMedia.allowsCard(
                         ownerIsApp: BrowserCatalogue.shared.isOpenableApp(
                             bundleID: snapshot.appBundleID
-                        ),
-                        origin: snapshot.origin
+                        )
                     )
                 }
             )
@@ -1895,9 +1894,8 @@ public final class LedgeCoordinator {
     /// of the player, and no relaunch.
     private func observeMediaPreferences() {
         withObservationTracking {
-            // The stored form, which is what changes when a rule is added,
-            // edited or removed.
-            _ = preferences.websiteRules
+            _ = preferences.showWebMediaCards
+            _ = preferences.showWebMediaInCompact
             _ = preferences.showVideoInCompact
         } onChange: { [weak self] in
             Task { @MainActor in

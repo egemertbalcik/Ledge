@@ -400,7 +400,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // are watching arrives under the same identity, is honoured at once,
         // and is what then lets something else through.
         if let held = heldPlaying,
-           Self.isDifferentItem(held.snapshot, answered),
+           held.snapshot.trackKey != answered.trackKey,
            !Self.hasFinished(held.snapshot, at: now, since: held.at),
            // A page the user cannot see must not hold the notch against
            // anything: nothing is drawn for it, so holding meant the notch
@@ -579,26 +579,11 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
             // Only something that may actually appear is worth holding the
             // seat for.
             heldPlaying = allowsMedia(snapshot) ? (snapshot, now) : nil
-        } else if heldPlaying.map({ !Self.isDifferentItem($0.snapshot, snapshot) }) == true {
+        } else if heldPlaying?.snapshot.trackKey == snapshot.trackKey {
             heldPlaying = nil
         }
     }
 
-    /// Whether two snapshots are different things to show.
-    ///
-    /// The track key, and the *verified* website. A tab navigating from an
-    /// allowed site to an unlisted one is a different thing even when the
-    /// title has not caught up — whether Ledge may show it at all has just
-    /// changed, which cannot go unnoticed.
-    ///
-    /// Deliberately **not** the whole origin. An unverified asset host changes
-    /// freely during one track — adaptive streaming moves between edge servers
-    /// mid-playback — and it matches no rule, so none of that is a new item.
-    /// Treating it as one reset the pause clock, disturbed handover and
-    /// republished a card that had not changed.
-    static func isDifferentItem(_ a: NowPlayingSnapshot, _ b: NowPlayingSnapshot) -> Bool {
-        a.trackKey != b.trackKey || a.verifiedWebsite != b.verifiedWebsite
-    }
 
     /// A held snapshot with its position moved forward, so the scrub bar keeps
     /// running while the system is looking somewhere else.

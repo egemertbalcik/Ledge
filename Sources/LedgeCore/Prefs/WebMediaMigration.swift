@@ -1,84 +1,53 @@
 import Foundation
 
-/// Retires the global web-media switches, deliberately granting nothing.
+/// Carries an existing web-media choice onto the two switches that express it.
 ///
-/// Three generations of the same setting have existed:
+/// Three shapes of this setting have existed:
 ///
 /// 1. `nowplaying.appMediaOnly` + `nowplaying.hideWebMediaCard` — two
 ///    negatives, defaulting to showing every website.
 /// 2. `nowplaying.showWebMediaCards` + `nowplaying.showWebMediaInCompact` —
-///    two positives, defaulting to hiding every website.
-/// 3. `nowplaying.websiteRules` — a rule per website, defaulting to none.
+///    the two switches in force now, defaulting to off.
+/// 3. `nowplaying.websiteRules` — a rule per website, shipped in 1.0.9 and
+///    withdrawn. macOS does not report which site browser media came from, so
+///    the list could never match anything; there is nothing in it to carry.
 ///
-/// **Nothing is carried forward, and that is the decision, not an omission.**
-/// The old settings could only say "all websites" or "none". "None" is already
-/// the new default, so it needs no rule. "All websites" cannot be expressed as
-/// rules without inventing a list of sites the user never named — which would
-/// take a single switch they flipped once and turn it into standing permission
-/// for every site they ever visit. The safe reading of an unrepresentable
-/// choice is the narrower one.
+/// The first pair maps onto the second exactly, so a choice somebody made is
+/// kept rather than reset:
 ///
-/// So the old keys are read, a notice is raised, and they are retired. A user
-/// who had web media on finds it off, with a line in Settings saying why and a
-/// list they can add to in seconds — rather than a hidden set of permissions
-/// nobody chose.
+/// | appMediaOnly | hideWebMediaCard | cards | compact |
+/// |---|---|---|---|
+/// | false        | either           | on    | on      |
+/// | true         | false            | on    | off     |
+/// | true         | true             | off   | off     |
+///
+/// An installation that never touched the setting gets the new default, which
+/// is off. That is the only behaviour change: somebody who had web media on
+/// keeps it, and somebody who never chose starts from quiet.
 public enum WebMediaMigration {
 
     static let appMediaOnly = PrefKey<Bool>("nowplaying.appMediaOnly", default: false)
     static let hideWebMediaCard = PrefKey<Bool>("nowplaying.hideWebMediaCard", default: false)
-    static let showWebMediaCards = PrefKey<Bool>("nowplaying.showWebMediaCards", default: false)
-    static let showWebMediaInCompact = PrefKey<Bool>("nowplaying.showWebMediaInCompact", default: false)
 
-    /// Whether a stored installation had web media *showing*, in either of the
-    /// older shapes.
-    ///
-    /// The first generation's truth table, in full — the thing a partial
-    /// reading got wrong:
-    ///
-    /// | appMediaOnly | hideWebMediaCard | cards | compact |
-    /// |---|---|---|---|
-    /// | false        | either           | yes   | yes     |
-    /// | true         | false            | yes   | no      |
-    /// | true         | true             | no    | no      |
-    ///
-    /// So web media was showing unless *both* were on. Reading only
-    /// `!appMediaOnly` missed the middle row, where cards were showing all
-    /// along — and that user would have been told nothing about why they
-    /// stopped.
-    public static func hadWebMediaEnabled(store: PreferenceStoring) -> Bool {
-        // The newer pair is authoritative when present: it replaced the older
-        // one, so an installation carrying both has already been migrated once.
-        if store.hasValue(named: showWebMediaCards.name) {
-            return store.value(for: showWebMediaCards)
-        }
+    /// 1.0.9's website list. Read only to know it was there; it holds nothing
+    /// worth carrying, since no rule in it could ever have matched.
+    static let websiteRules = PrefKey<String>("nowplaying.websiteRules", default: "")
+
+    public static func run(store: PreferenceStoring) {
+        // Already answered in the current language — an ordinary launch.
+        guard !store.hasValue(named: Prefs.showWebMediaCards.name) else { return }
+
+        // Came through 1.0.9: the old pair was swept then, so there is nothing
+        // left to read. The defaults are what 1.0.9 already gave them.
+        guard !store.hasValue(named: websiteRules.name) else { return }
+
         let hasOldPair = store.hasValue(named: appMediaOnly.name)
             || store.hasValue(named: hideWebMediaCard.name)
-        guard hasOldPair else { return false }
+        guard hasOldPair else { return }
+
         let keptOutOfCompact = store.value(for: appMediaOnly)
-        let hidTheCard = store.value(for: hideWebMediaCard)
-        return !(keptOutOfCompact && hidTheCard)
-    }
-
-    /// Reads the old keys once, leaves no rules behind, and raises the notice
-    /// if there is something to explain.
-    public static func run(store: PreferenceStoring) {
-        // Already using rules — a second launch. Nothing to retire.
-        guard !store.hasValue(named: Prefs.websiteRules.name) else { return }
-        let hasAnyOldKey = [
-            appMediaOnly.name, hideWebMediaCard.name,
-            showWebMediaCards.name, showWebMediaInCompact.name,
-        ].contains { store.hasValue(named: $0) }
-        guard hasAnyOldKey else { return }
-
-        // Persisted, not held in memory: the explanation has to survive the
-        // relaunch that follows an update, or somebody who did not open
-        // Settings that afternoon never learns why their web media went away.
-        if hadWebMediaEnabled(store: store) {
-            store.set(true, for: Prefs.webMediaNoticePending)
-        }
-
-        // Deliberately empty: see the note on this type. The old keys
-        // themselves are swept by `Prefs.retiredNames` immediately after this.
-        store.set("", for: Prefs.websiteRules)
+        let hidTheCard = keptOutOfCompact && store.value(for: hideWebMediaCard)
+        store.set(!hidTheCard, for: Prefs.showWebMediaCards)
+        store.set(!keptOutOfCompact, for: Prefs.showWebMediaInCompact)
     }
 }

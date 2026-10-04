@@ -82,14 +82,7 @@ public final class NowPlayingProvider: ActivityProvider {
     /// The player and the track — the same thing across republishes, unlike
     /// the activity, which is rebuilt each time.
     private static func pauseKey(_ snapshot: NowPlayingSnapshot) -> String {
-        // The *verified* website is part of the identity: a tab navigating
-        // elsewhere is a different thing, and must not inherit the pause clock
-        // of the page that was there before it.
-        //
-        // An unverified asset host is not, because it changes on its own: an
-        // adaptive stream moves between edge servers mid-track, and keying on
-        // that restarted the fifteen-minute pause clock each time.
-        "\(snapshot.appBundleID)|\(snapshot.verifiedWebsite?.value ?? "-")|\(snapshot.trackKey)"
+        "\(snapshot.appBundleID)|\(snapshot.trackKey)"
     }
 
     /// The track the card last showed, so a skip made while paused reads as
@@ -138,11 +131,11 @@ public final class NowPlayingProvider: ActivityProvider {
     /// without a system to ask.
     private let ownerIsApp: @MainActor (String) -> Bool
 
-    /// Which websites may appear, and how far. Read fresh on every poll for
-    /// the same reason as `showsVideo`: a rule added, changed or removed takes
-    /// effect on the next tick, with no relaunch and no waiting for the track
-    /// to change.
-    private let webMedia: () -> WebsitePolicy
+    /// Whether a web page's media may have a card, the ears, or neither.
+    /// Read fresh on every poll for the same reason as `showsVideo`: turning
+    /// either switch takes effect on the next tick, with no relaunch and no
+    /// waiting for the track to change.
+    private let webMedia: () -> WebMediaPolicy
 
     /// Whether the notch should carry this at all.
     ///
@@ -185,7 +178,7 @@ public final class NowPlayingProvider: ActivityProvider {
     static func showsInCompact(
         _ snapshot: NowPlayingSnapshot,
         showsVideo: Bool,
-        webMedia: WebsitePolicy = .hidden,
+        webMedia: WebMediaPolicy = .hidden,
         ownerIsApp: Bool? = nil
     ) -> Bool {
         // A website's media can have a card and still be kept out of the
@@ -193,7 +186,7 @@ public final class NowPlayingProvider: ActivityProvider {
         // a card only appears when someone goes looking for it. Which of the
         // two a site gets is the user's rule for it.
         let isApp = ownerIsApp ?? MediaOwner.isOpenableApp(bundleID: snapshot.appBundleID)
-        guard webMedia.allowsCompact(ownerIsApp: isApp, origin: snapshot.origin)
+        guard webMedia.allowsCompact(ownerIsApp: isApp)
         else { return false }
         // Said yes to browser media in the ears: that is the answer. The
         // length floor below still applies, and refuses nothing a card was
@@ -217,7 +210,7 @@ public final class NowPlayingProvider: ActivityProvider {
         idleInterval: TimeInterval = 4.0,
         playbackWatcher: PlaybackChangeWatcher? = PlaybackChangeWatcher(),
         showsVideo: @escaping () -> Bool = { true },
-        webMedia: @escaping () -> WebsitePolicy = { .hidden },
+        webMedia: @escaping () -> WebMediaPolicy = { .hidden },
         ownerIsApp: @escaping @MainActor (String) -> Bool = {
             MediaOwner.isOpenableApp(bundleID: $0)
         },
@@ -386,9 +379,7 @@ public final class NowPlayingProvider: ActivityProvider {
         /// Whether what we are about to publish came from the source this poll,
         /// rather than being the native card we are holding on its behalf.
         var isReported = true
-        if let reported, !policy.allowsCard(
-            ownerIsApp: ownerIsApp(reported.appBundleID), origin: reported.origin
-        ) {
+        if let reported, !policy.allowsCard(ownerIsApp: ownerIsApp(reported.appBundleID)) {
             // Hidden, so it gets no card — but it does not get to take the
             // music's card away either. The player that was playing keeps it
             // while that is still credible; see `heldNative`.

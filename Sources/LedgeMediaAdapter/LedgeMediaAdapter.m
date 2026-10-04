@@ -46,7 +46,6 @@ static MRRegisterNotifications gRegister;
 static NSString *gKeyTitle, *gKeyArtist, *gKeyAlbum, *gKeyDuration, *gKeyElapsed,
     *gKeyTimestamp, *gKeyRate, *gKeyUniqueID, *gKeyArtworkData, *gKeyArtworkMIME,
     *gKeyMediaType,
-    *gKeyAssetURL,
     *gKeyIsAlwaysLive;
 static NSString *gNoteInfoChanged, *gNotePlayingChanged, *gNoteClientChanged;
 
@@ -90,15 +89,6 @@ static BOOL LoadMediaRemote(NSString **failure) {
     // Audio or video, straight from the system. It is the only honest way to
     // tell an album from a film — durations and bundle ids are guesswork.
     gKeyMediaType = MRStringSymbol("kMRMediaRemoteNowPlayingInfoMediaType");
-    // The only key in this dictionary that can name a *website*. There is no
-    // page-URL or origin key: the full set was probed on macOS 26 and nothing
-    // of the kind exists, so this is the one candidate — and it is absent for
-    // most players, which is why the Swift side treats a missing host as
-    // "unknown website" and hides the media rather than guessing.
-    //
-    // Only the host ever leaves this helper. A path, a query or a fragment is
-    // somebody's browsing history and has no business in a media card.
-    gKeyAssetURL = MRStringSymbol("kMRMediaRemoteNowPlayingInfoAssetURL");
     // Live streams have no end to count down to. The system says so itself
     // rather than leaving it to be guessed from a missing duration.
     gKeyIsAlwaysLive = MRStringSymbol("kMRMediaRemoteNowPlayingInfoIsAlwaysLive");
@@ -127,70 +117,6 @@ static double NumberOrZero(id value);
 
 /// The last payload sent, minus the fields that move on their own.
 static NSDictionary *gLastSent = nil;
-
-/// Whether this payload says anything the last one did not.
-///
-/// The position advances on every reading and the reader extrapolates between
-/// them, so it is not news by itself — but a jump the previous line could not
-/// have led to is a seek, and that is. Everything else is a plain comparison.
-/// The host of a media asset, and whether it came from inside a `blob:` URL.
-///
-/// Only the host ever leaves this helper: a path, a query or a fragment is
-/// somebody's browsing history and has no business in a media card.
-///
-/// The blob distinction matters because the two mean completely different
-/// things. A `blob:` URL's inner origin is the document that created it — the
-/// page's own script, for media-source playback. An ordinary https asset URL
-/// is a CDN: YouTube's video comes from `googlevideo.com`, which is not the
-/// website anybody has a rule about. The Swift side keeps them apart and lets
-/// only the first match a rule.
-///
-/// - Parameter fromBlob: set to YES when the host came from a blob's inner
-///   URL.
-NSString *ledge_media_adapter_host_of_asset(NSString *text, BOOL *fromBlob) {
-    if (fromBlob) { *fromBlob = NO; }
-    if (text.length == 0) { return nil; }
-
-    // One level of blob: unwrapping, which is where WebKit puts the creating
-    // document's origin. Deliberately not recursive — a nested blob is not a
-    // thing, and a loop here would be a loop on attacker-shaped input.
-    //
-    // Case-insensitive: a scheme is case-insensitive by RFC, and `BLOB:` from
-    // some future source must not read as an ordinary asset URL.
-    if (text.length >= 5 &&
-        [[text substringToIndex:5] caseInsensitiveCompare:@"blob:"] == NSOrderedSame) {
-        text = [text substringFromIndex:5];
-        if (fromBlob) { *fromBlob = YES; }
-    }
-
-    NSURL *url = [NSURL URLWithString:text];
-    NSString *scheme = url.scheme.lowercaseString;
-    if (!([scheme isEqualToString:@"https"] || [scheme isEqualToString:@"http"])) {
-        if (fromBlob) { *fromBlob = NO; }
-        return nil;
-    }
-    // Credentials are not a website, and a URL carrying them is not one Ledge
-    // will take an origin from.
-    if (url.user.length > 0 || url.password.length > 0) {
-        if (fromBlob) { *fromBlob = NO; }
-        return nil;
-    }
-    // The host alone. Everything else — path, query, fragment, port — is left
-    // behind here and never travels any further.
-    return url.host;
-}
-
-/// What the now-playing dictionary hands over: an `NSURL` or an `NSString`.
-static NSString *HostOfAsset(id value, BOOL *fromBlob) {
-    NSString *text = nil;
-    if ([value isKindOfClass:[NSURL class]]) {
-        text = [(NSURL *)value absoluteString];
-    } else if ([value isKindOfClass:[NSString class]]) {
-        text = (NSString *)value;
-    }
-    return ledge_media_adapter_host_of_asset(text, fromBlob);
-}
-
 static BOOL IsNews(NSDictionary *payload) {
     if (!gLastSent) { return YES; }
 
@@ -200,7 +126,6 @@ static BOOL IsNews(NSDictionary *payload) {
         // A tab navigating from one site to another is news even when the
         // title has not caught up: the website decides whether Ledge may show
         // this at all.
-        @"assetHost", @"assetHostFromBlob",
     ];
     for (NSString *key in keys) {
         id a = gLastSent[key], b = payload[key];
@@ -284,17 +209,6 @@ static NSDictionary *BuildPayload(NSDictionary *info, BOOL playing, NSDictionary
     }
     if (gKeyIsAlwaysLive && info[gKeyIsAlwaysLive]) {
         out[@"live"] = @([info[gKeyIsAlwaysLive] boolValue]);
-    }
-    if (gKeyAssetURL && info[gKeyAssetURL]) {
-        BOOL fromBlob = NO;
-        NSString *host = HostOfAsset(info[gKeyAssetURL], &fromBlob);
-        if (host.length > 0) {
-            // The host *and* how it was learned. An asset host on its own
-            // cannot be trusted to name the website — see
-            // `MediaOriginEvidence` — so the two always travel together.
-            out[@"assetHost"] = host;
-            out[@"assetHostFromBlob"] = @(fromBlob);
-        }
     }
     if (gKeyMediaType && info[gKeyMediaType]) {
         // The values read kMRMediaRemoteNowPlayingInfoTypeAudio / …TypeVideo;

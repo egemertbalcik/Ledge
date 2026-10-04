@@ -323,11 +323,36 @@ struct ProviderDetailPane: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    WebsiteRulesSection(preferences: preferences)
+                    Section("Web media") {
+                        Toggle("Show web media cards", isOn: $preferences.showWebMediaCards)
+                        Text("Anything playing in a browser gets a card. Off by default: a browser hands its now-playing slot between tabs, so what arrives can be a video you did not choose.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                        // The second switch is the larger wish and depends on
+                        // the first: the compact view is the part that sits
+                        // there uninvited, where a card waits to be looked at.
+                        // Indented and dimmed, so the dependency is visible
+                        // before it is discovered.
+                        Toggle("Show web media in the compact view", isOn: $preferences.showWebMediaInCompact)
+                            .disabled(!preferences.showWebMediaCards)
+                            .padding(.leading, Self.dependentInset)
+                            .accessibilityHint("Available when Show web media cards is on.")
+                        Text("Browser media rests in the notch the way a track does, whatever the video setting below says.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.leading, Self.dependentInset)
+                            .opacity(preferences.showWebMediaCards ? 1 : 0.5)
+
+                        Text("Ledge cannot tell which website a browser is playing — macOS does not say — so this is one choice for all of them.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
                     Section("Video") {
                         Toggle("Show video in the compact view", isOn: $preferences.showVideoInCompact)
-                        Text("What you are watching sits in the notch the way a track does. Switch it off to keep the notch still while the screen is busy — the card stays either way, so hovering still reaches the controls. Video shorter than two minutes is not shown at all. Applies to apps; a website's media follows its own rule above.")
+                        Text("What you are watching sits in the notch the way a track does. Switch it off to keep the notch still while the screen is busy — the card stays either way, so hovering still reaches the controls. Video shorter than two minutes is not shown at all. Applies to apps; browser media follows the web media settings above.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                     }
