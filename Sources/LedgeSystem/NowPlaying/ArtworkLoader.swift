@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 import LedgeCore
 import os
 
@@ -77,7 +78,12 @@ public final class ArtworkLoader {
                 failed.insert(key)
                 return nil
             }
-            guard let accent = Self.dominantColor(of: data) else {
+            // Off the main actor: this one already has an await either side of
+            // it, so there is no reason to decode where the card is drawing.
+            let decoded = await Task.detached(priority: .utility) {
+                Self.dominantColor(of: data)
+            }.value
+            guard let accent = decoded else {
                 // Fetched but undecodable — asking again would fetch the same
                 // bytes and fail the same way.
                 failed.insert(key)
@@ -155,8 +161,21 @@ public final class ArtworkLoader {
     /// a person would actually name. The result is then floored for brightness
     /// so it stays legible against the black card.
     nonisolated static func dominantColor(of data: Data) -> AccentColor? {
-        guard let image = NSImage(data: data),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        // Decoded straight to the size this actually needs. `NSImage(data:)`
+        // followed by `cgImage(forProposedRect:)` decodes the cover at full
+        // resolution first — up to the adapter's four-megabyte ceiling — and
+        // then throws all of it away to average a 32-pixel square. ImageIO
+        // subsamples on the way in, and will use an embedded thumbnail when
+        // the file carries one, so the same answer costs a fraction of the
+        // work. It matters because this runs at the first publish of every new
+        // track, while the card is animating in.
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 32,
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary)
         else { return nil }
 
         let side = 32

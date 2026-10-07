@@ -28,7 +28,18 @@ public final class ScreenshotWatcher {
         startedAt = Date()
 
         let query = NSMetadataQuery()
-        query.predicate = NSPredicate(format: "kMDItemIsScreenCapture == 1")
+        // Bounded to this session, so Spotlight does the filtering. Unbounded,
+        // the first result set is every screenshot the machine has ever taken
+        // and `harvest` walks all of them on the main actor — once at launch
+        // and again on every update, which is every time the user presses
+        // ⌘⇧4. Thirty-five files on this Mac costs nothing; twenty thousand on
+        // somebody else's is a visible stall and a `seen` set the size of their
+        // whole history. The creation-date check in `harvest` stays as the
+        // belt to this predicate's braces.
+        query.predicate = NSPredicate(
+            format: "kMDItemIsScreenCapture == 1 && kMDItemFSCreationDate >= %@",
+            startedAt as NSDate
+        )
         query.searchScopes = [NSMetadataQueryLocalComputerScope]
 
         let center = NotificationCenter.default
