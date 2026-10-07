@@ -175,7 +175,12 @@ public enum Prefs {
 
     // General
     public static let launchAtLogin = PrefKey<Bool>("general.launchAtLogin", default: false)
-    public static let hideFromScreenCapture = PrefKey<Bool>("general.hideFromScreenCapture", default: false)
+    /// On by default. Nobody wants the track they are playing, the title of
+    /// their next meeting, or the Focus they are in turning up in a screenshot
+    /// of their work or on the screen they are sharing in a meeting. The switch
+    /// exists for showing Ledge off, which is the rarer thing to want — and the
+    /// README has always said this is how it behaves.
+    public static let hideFromScreenCapture = PrefKey<Bool>("general.hideFromScreenCapture", default: true)
 
     /// Reveals the fine-tuning panes — shape, motion, ear geometry, timings.
     /// Deliberately has no control of its own: they exist for tuning the app,

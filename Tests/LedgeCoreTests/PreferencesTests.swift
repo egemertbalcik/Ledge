@@ -94,3 +94,38 @@ struct PreferencesTests {
         #expect(preferences.earWidth == NotchLayout.defaultEarWidth)
     }
 }
+
+/// The overlay's presence in screen captures.
+///
+/// The README has always promised Ledge stays out of screenshots, recordings
+/// and a shared screen, with a switch for showing it off. The default said the
+/// opposite, so the card — the track playing, the next meeting's title, the
+/// Focus in force — went into every screen share until somebody found the
+/// switch.
+@Suite("Staying out of screen captures")
+@MainActor
+struct ScreenCaptureDefaultTests {
+
+    @Test("A fresh install is hidden from capture")
+    func hiddenByDefault() {
+        let preferences = Preferences(store: MemoryPreferenceStore())
+        #expect(preferences.hideFromScreenCapture, "the overlay would be in the user's screen share")
+    }
+
+    @Test("Resetting returns to hidden")
+    func resetIsHidden() {
+        let store = MemoryPreferenceStore()
+        let preferences = Preferences(store: store)
+        preferences.hideFromScreenCapture = false
+        preferences.resetToDefaults()
+        #expect(preferences.hideFromScreenCapture)
+        #expect(Preferences(store: store).hideFromScreenCapture)
+    }
+
+    @Test("Choosing to show it off survives a relaunch")
+    func optingInIsDurable() {
+        let store = MemoryPreferenceStore()
+        Preferences(store: store).hideFromScreenCapture = false
+        #expect(Preferences(store: store).hideFromScreenCapture == false)
+    }
+}
