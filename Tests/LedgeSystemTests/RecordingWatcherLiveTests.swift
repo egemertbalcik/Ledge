@@ -293,3 +293,72 @@ private final class ChangeCount: @unchecked Sendable {
     func bump() { state.withLock { $0 += 1 } }
     var value: Int { state.withLock { $0 } }
 }
+
+/// How often the hardware may be swept.
+///
+/// Each sweep walks every audio process object and makes two round trips to
+/// coreaudiod for each — measured at 6.3ms with 32 objects live and 19.5ms with
+/// 57, so the cost grows faster than the count. A browser with several tabs
+/// making noise churns those objects a few times a second, and each of those
+/// events used to buy its own sweep, because the only thing holding them back
+/// was a 50ms wait that had always elapsed by the time the next one arrived.
+/// That is a steady five percent of a core with nobody touching the machine.
+///
+/// Asserted as the *gap between sweeps* rather than a count in a period. A
+/// count is a statement about the machine's speed as much as the code's
+/// behaviour — under a loaded test run the events spread out, each one lands in
+/// its own window, and the test fails for being right. The minimum gap only
+/// ever grows on a slow machine, so it says the same thing everywhere.
+@Suite("How often the hardware is swept", .serialized)
+@MainActor
+struct SweepRateTests {
+
+    /// Records when each sweep ran.
+    private final class SweepLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var times: [Date] = []
+        func sweep() -> RecordingState {
+            lock.lock(); times.append(Date()); lock.unlock()
+            return RecordingState()
+        }
+        func reset() { lock.lock(); times = []; lock.unlock() }
+        var stamps: [Date] { lock.lock(); defer { lock.unlock() }; return times }
+        /// The closest two consecutive sweeps came, or nil for fewer than two.
+        var shortestGap: TimeInterval? {
+            let t = stamps
+            guard t.count >= 2 else { return nil }
+            return zip(t.dropFirst(), t).map { $0.timeIntervalSince($1) }.min()
+        }
+    }
+
+    /// `pollInterval` 1.0 puts the coalescing window at half a second.
+    private func watcher(_ log: SweepLog) -> SystemRecordingSource {
+        SystemRecordingSource(pollInterval: 1.0, sweep: { log.sweep() })
+    }
+
+    @Test("Two sweeps are never closer together than the window")
+    func sweepsAreRateLimited() async throws {
+        let log = SweepLog()
+        let source = watcher(log)
+        source.startWatching {}
+        defer { source.stopWatching() }
+
+        // Let the opening sweep land, then start counting from clean.
+        try await Task.sleep(for: .milliseconds(250))
+        log.reset()
+
+        // Events at 60ms apart: slower than the old 50ms wait, so each one
+        // would have bought its own sweep, and faster than the half-second
+        // window that now governs them.
+        for _ in 0..<25 {
+            source.notifyChangedForTesting()
+            try await Task.sleep(for: .milliseconds(60))
+        }
+        try await Task.sleep(for: .milliseconds(700))
+
+        let gap = try #require(log.shortestGap, "fewer than two sweeps ran — nothing was measured")
+        // The window is 0.5s; allow for the timer's own slack. Without the
+        // rate limit these land ~60ms apart.
+        #expect(gap > 0.3, "two sweeps ran \(Int(gap * 1000))ms apart — the rate limit is not holding")
+    }
+}

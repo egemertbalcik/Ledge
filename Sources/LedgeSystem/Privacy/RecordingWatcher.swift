@@ -80,6 +80,30 @@ public final class SystemRecordingSource: RecordingSource {
     private nonisolated(unsafe) var reconcilePending = false
     private nonisolated(unsafe) var notifyPending = false
 
+    /// When the last sweep ran, and whether anything waiting for the next one
+    /// needs the camera re-read.
+    ///
+    /// The window below is a *rate limit*, not a delay: the first event after a
+    /// quiet spell sweeps immediately, and only a burst is collapsed into one
+    /// pass at the end of the window. Trailing-edge-only coalescing at 50ms
+    /// meant a machine churning audio process objects — a browser with several
+    /// tabs making noise will do a few a second — could ask for twenty sweeps a
+    /// second, each one a full enumeration with two round-trips to coreaudiod
+    /// per object. Measured at 6.3ms a sweep with 32 objects live and 19.5ms
+    /// with 57, which is how an idle app came to sit at five percent of a core.
+    private nonisolated(unsafe) var lastSweepAt: DispatchTime?
+    private nonisolated(unsafe) var pendingNeedsCamera = false
+
+    /// The shortest gap between two sweeps. A microphone indicator does not
+    /// need twenty readings a second; it needs the first one quickly, which
+    /// the leading edge gives it.
+    ///
+    /// Derived from `pollInterval` rather than fixed, for the same reason that
+    /// is injectable: a test that shortens the poll so the timer path can
+    /// actually be exercised would otherwise find its ticks swallowed by a
+    /// window longer than the interval it chose. Half a second in the app.
+    private nonisolated let coalesceWindow: TimeInterval
+
     /// One outstanding main-actor delivery, with the session re-checked there.
     private struct Tick: Sendable, Equatable {}
     private let mailbox = MainMailbox<Tick>(isEqual: { _, _ in false })
@@ -94,6 +118,7 @@ public final class SystemRecordingSource: RecordingSource {
 
     init(pollInterval: TimeInterval, sweep: (@Sendable () -> RecordingState)? = nil) {
         self.pollInterval = pollInterval
+        self.coalesceWindow = min(0.5, pollInterval / 2)
         self.injectedSweep = sweep
     }
 
@@ -155,6 +180,15 @@ public final class SystemRecordingSource: RecordingSource {
     /// Tests: which session may publish, if any.
     var activeCacheSessionForTesting: Int? { cache.withLock { $0.activeSession } }
 
+    /// Tests: posts the notification an audio property listener would, so the
+    /// coalescing can be driven without a machine busy enough to churn audio
+    /// process objects.
+    func notifyChangedForTesting(includeCamera: Bool = false) {
+        queue.async { [self] in
+            notifyChanged(session: generation, includeCamera: includeCamera)
+        }
+    }
+
     /// Sweeps the hardware and publishes the result, if the session that asked
     /// for it is still the live one.
     ///
@@ -162,8 +196,21 @@ public final class SystemRecordingSource: RecordingSource {
     ///   ended while the sweep was running, and nothing — not the cache, not a
     ///   callback — may carry it any further.
     @discardableResult
-    nonisolated func reconcileState(session: Int) -> Bool {
-        let state = sweepHardware()
+    nonisolated func reconcileState(session: Int, includeCamera: Bool = true) -> Bool {
+        // An audio-only pass keeps the camera reading it already has. A process
+        // starting to capture says nothing about the webcam, and the CMIO
+        // enumeration is the slower half of a sweep — paying for it on every
+        // audio event is most of what made a busy Mac expensive. A session with
+        // nothing cached yet still reads both: a missing answer is not an answer.
+        let knownCamera: Bool? = includeCamera ? nil : cache.withLock { c in
+            c.activeSession == session ? c.value?.camera : nil
+        }
+        let state = sweepHardware(knownCamera: knownCamera)
+        // Recorded here rather than at the one call site that coalesces, so
+        // every sweep counts towards the rate limit however it was reached.
+        // The opening reading of a session is taken directly, and leaving it
+        // unrecorded let the first event after it sweep again immediately.
+        lastSweepAt = DispatchTime.now()
         // The session is checked *with* the write, under one lock. Checking it
         // first and writing after leaves exactly the window this closes.
         return cache.withLock { c in
@@ -175,12 +222,12 @@ public final class SystemRecordingSource: RecordingSource {
 
     /// The reading itself. Injectable so a test can hold a sweep open across a
     /// stop without a camera or a microphone in use.
-    private nonisolated func sweepHardware() -> RecordingState {
+    private nonisolated func sweepHardware(knownCamera: Bool? = nil) -> RecordingState {
         if let injectedSweep { return injectedSweep() }
         let holders = Self.inputHolders()
         logHoldersIfChanged(holders)
         return RecordingState(
-            camera: Self.isAnyCameraRunning(),
+            camera: knownCamera ?? Self.isAnyCameraRunning(),
             microphone: Self.microphoneHeld(by: holders)
         )
     }
@@ -525,22 +572,40 @@ public final class SystemRecordingSource: RecordingSource {
         guard session == generation, onChange != nil else { return }
         guard !reconcilePending else { return }
         reconcilePending = true
-        queue.asyncAfter(deadline: .now() + 0.05) { [self] in
+        // The same window as a sweep. The process list churns hardest exactly
+        // when it is least informative — objects that arrive and vanish before
+        // a listener can be attached to them — and re-walking it twenty times a
+        // second to learn that costs more than the answer is worth.
+        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(coalesceWindow * 1_000_000_000))) { [self] in
             reconcilePending = false
             guard session == generation, onChange != nil else { return }
             reconcileProcessListeners()
-            notifyChanged(session: session)
+            // A process list change is an audio fact; the camera is unaffected.
+            notifyChanged(session: session, includeCamera: false)
         }
     }
 
     /// Tells the caller something happened, at most once per coalescing window
     /// and at most one delivery outstanding on the main actor.
-    private nonisolated func notifyChanged(session: Int) {
+    private nonisolated func notifyChanged(session: Int, includeCamera: Bool = true) {
         guard session == generation, onChange != nil else { return }
+        // Asked for by anything in this window, honoured by the one sweep that
+        // serves it: an audio event arriving behind a camera event must not
+        // downgrade the pass that was already going to re-read the camera.
+        if includeCamera { pendingNeedsCamera = true }
         guard !notifyPending else { return }
+        // Leading edge when the last sweep is older than the window, so the
+        // first event after a quiet spell is answered at once; otherwise at the
+        // end of the window, which is what bounds a storm.
+        let now = DispatchTime.now()
+        let window = UInt64(coalesceWindow * 1_000_000_000)
+        let since = lastSweepAt.map { now.uptimeNanoseconds &- $0.uptimeNanoseconds }
+        let delay = (since.map { $0 < window ? window &- $0 : 0 }) ?? 0
         notifyPending = true
-        queue.asyncAfter(deadline: .now() + 0.05) { [self] in
+        queue.asyncAfter(deadline: now + .nanoseconds(Int(delay))) { [self] in
             notifyPending = false
+            let needsCamera = pendingNeedsCamera
+            pendingNeedsCamera = false
             guard session == generation, onChange != nil else { return }
             // The expensive part happens here, on this queue, and the main
             // actor is handed a finished answer. One reconcile per coalescing
@@ -549,7 +614,7 @@ public final class SystemRecordingSource: RecordingSource {
             // A reading from a session that ended while the sweep ran is
             // discarded, and announces nothing: it is neither the truth nor
             // this watch's business any more.
-            guard reconcileState(session: session) else { return }
+            guard reconcileState(session: session, includeCamera: needsCamera) else { return }
             // The session is checked again at the far end: a stop cannot reach
             // a hop already enqueued on the main queue.
             mailbox.post(Tick(), generation: session)
@@ -576,7 +641,9 @@ public final class SystemRecordingSource: RecordingSource {
             let listener = AudioListener(
                 object: object, address: address, queue: queue
             ) { [weak self] in
-                self?.notifyChanged(session: session)
+                // An audio process starting or stopping capture cannot have
+                // changed the webcam, so this pass does not re-enumerate it.
+                self?.notifyChanged(session: session, includeCamera: false)
             }
             if let listener { processListeners[object] = listener }
         }
@@ -625,6 +692,8 @@ public final class SystemRecordingSource: RecordingSource {
             cmioListeners.removeAll()
             reconcilePending = false
             notifyPending = false
+            lastSweepAt = nil
+            pendingNeedsCamera = false
             onChange = nil
         }
     }
