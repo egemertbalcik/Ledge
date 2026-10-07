@@ -31,29 +31,48 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
     /// The manager created purely to raise the Bluetooth prompt, and the
     /// delegate that resolves it. Retained until the state settles or the
     /// user has had 15 seconds to answer.
-    private var bluetoothPrompt: (manager: CBCentralManager, delegate: BluetoothPromptDelegate)?
+    private var bluetoothPrompt: (
+        manager: CBCentralManager,
+        delegate: BluetoothPromptDelegate,
+        generation: Int
+    )?
+
+    /// Which request a settled prompt belongs to. A callback cannot be
+    /// cancelled once CoreBluetooth or the timer queue holds it, so the
+    /// generation is what disqualifies a stale one.
+    private var bluetoothPromptGeneration = 0
 
     private func promptForBluetooth() async {
         guard bluetoothPrompt == nil else { return }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let delegate = BluetoothPromptDelegate { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self, self.bluetoothPrompt != nil else { return }
-                    self.bluetoothPrompt = nil
-                    continuation.resume()
-                }
+            // Both the delegate and the failsafe below must resume this call's
+            // continuation exactly once, and never another call's. Guarding on
+            // `bluetoothPrompt` being non-nil cannot tell those apart, and the
+            // difference is a crash: the delegate answers early (a Mac with
+            // Bluetooth off settles immediately), the field is cleared, a
+            // second request passes the guard above and installs its own pair —
+            // and then the first request's failsafe fires, sees a non-nil field
+            // that belongs to the second request, and resumes the first
+            // continuation again. `centralManagerDidUpdateState` firing twice
+            // for one manager reaches the same end. Identity is the question
+            // being asked, so ask it: is the prompt still mine?
+            bluetoothPromptGeneration &+= 1
+            let generation = bluetoothPromptGeneration
+            let settle: @MainActor () -> Void = { [weak self] in
+                guard let self, self.bluetoothPrompt?.generation == generation else { return }
+                self.bluetoothPrompt = nil
+                continuation.resume()
+            }
+            let delegate = BluetoothPromptDelegate {
+                MainActor.assumeIsolated { settle() }
             }
             let manager = CBCentralManager(delegate: delegate, queue: .main)
-            bluetoothPrompt = (manager, delegate)
+            bluetoothPrompt = (manager, delegate, generation)
             // Failsafe: a dialog left unanswered must not hold the caller
             // forever. The manager keeps prompting on its own timetable; the
             // status is simply re-read whenever the pane refreshes.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self, self.bluetoothPrompt != nil else { return }
-                    self.bluetoothPrompt = nil
-                    continuation.resume()
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                MainActor.assumeIsolated { settle() }
             }
         }
     }
