@@ -57,6 +57,19 @@ public struct MuteIntentLedger: Equatable, Sendable {
 
     public init() {}
 
+    /// The level below which a muted output is taken to be Ledge's own silence
+    /// rather than the user's mute.
+    ///
+    /// Hardware that clamps a zero scalar reports an audible-looking number for
+    /// a level nobody chose — this Mac's speakers read back 0.062, measured at
+    /// −47.6 dB, which is silence by any honest reading. A literal `level > 0`
+    /// test calls that the user's mute, and on the first observation of a
+    /// session there is no earlier reason on file to contradict it. The visible
+    /// cost: quit with the sound all the way down, come back after a relaunch —
+    /// a login, a Sparkle update, a crash — and a red pill is on screen for a
+    /// mute the user never pressed, over a bar reading six percent.
+    public static let clampedFloor = 0.1
+
     public func reasons(for device: UInt32) -> MuteReasons {
         reasons[device] ?? .none
     }
@@ -81,6 +94,9 @@ public struct MuteIntentLedger: Equatable, Sendable {
     ///     case the reading is our own echo and says nothing about intent. The
     ///     case that needs it: a device that clamps zero reports 0.062 while
     ///     muted, which looks exactly like somebody muting at an audible level.
+    ///     The self-write window closes after a moment, though, and a reading
+    ///     that arrives later — or first, in a fresh process — has no echo to
+    ///     be recognised by. `clampedFloor` is what covers that.
     public mutating func observed(
         muted: Bool,
         level: Double,
@@ -95,11 +111,12 @@ public struct MuteIntentLedger: Equatable, Sendable {
             set(.none, for: device)
             return
         }
-        // Muted, and nothing of ours explains it. Above zero that is somebody
-        // muting; at or near zero it could as easily be our own silence, and
-        // claiming it as the user's would put a red pill on the volume keys.
+        // Muted, and nothing of ours explains it. Clear of the clamped floor
+        // that is somebody muting; at or below it this could as easily be our
+        // own silence, and claiming it as the user's would put a red pill on
+        // the volume keys.
         if current.isEmpty {
-            if level > 0 {
+            if level > Self.clampedFloor {
                 current.userMuted = true
             } else {
                 current.zeroSilence = true

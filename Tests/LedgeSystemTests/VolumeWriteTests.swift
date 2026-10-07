@@ -1173,3 +1173,59 @@ struct OutputCapabilityTests {
         #expect(ledger.count == 0)
     }
 }
+
+/// What a fresh process makes of an output it finds already muted.
+///
+/// The ledger lives in memory, so every relaunch — a login, a Sparkle update,
+/// a crash — starts with no reason on file for a mute that is already there.
+@Suite("A mute that was already there")
+struct FirstSightingOfMuteTests {
+
+    /// The regression. On hardware that clamps a zero scalar, the first reading
+    /// of a session is `muted: true, level: 0.0625`, and judging it by `level >
+    /// 0` claimed it as the user's — a red pill for a key nobody pressed.
+    @Test("A clamped minimum is not read as somebody pressing mute")
+    func clampedMinimumIsNotTheUsersMute() {
+        var ledger = MuteIntentLedger()
+        ledger.observed(muted: true, level: 0.0625, for: 1, isSelfWrite: false)
+
+        #expect(ledger.showsMuted(for: 1) == false, "a red pill for a mute nobody pressed")
+        #expect(ledger.reasons(for: 1).zeroSilence)
+        #expect(ledger.reasons(for: 1).deviceMuted, "the device is still silent")
+    }
+
+    @Test("An exact zero is still our own silence")
+    func zeroIsOurs() {
+        var ledger = MuteIntentLedger()
+        ledger.observed(muted: true, level: 0, for: 1, isSelfWrite: false)
+        #expect(ledger.showsMuted(for: 1) == false)
+        #expect(ledger.reasons(for: 1).zeroSilence)
+    }
+
+    /// The other half: a mute at a level the user can actually hear is theirs,
+    /// and must still light the pill. Muting at 70% is the ordinary case.
+    @Test("A mute well clear of the floor is the user's", arguments: [0.2, 0.5, 0.7, 1.0])
+    func audibleMuteIsTheUsers(level: Double) {
+        var ledger = MuteIntentLedger()
+        ledger.observed(muted: true, level: level, for: 1, isSelfWrite: false)
+        #expect(ledger.showsMuted(for: 1), "the user's own mute lost its pill")
+        #expect(ledger.reasons(for: 1).userMuted)
+    }
+
+    @Test("The floor is where the measurement put it")
+    func floorSitsAboveTheClamp() {
+        // 0.0625 is this Mac's clamped minimum, measured at −47.6 dB.
+        #expect(MuteIntentLedger.clampedFloor > 0.0625)
+        #expect(MuteIntentLedger.clampedFloor < 0.2, "a level a user would choose must stay theirs")
+    }
+
+    /// Unmuting from outside clears whatever was assumed, so a wrong guess
+    /// cannot outlive the state that prompted it.
+    @Test("Unmuting clears an assumed reason")
+    func unmuteClears() {
+        var ledger = MuteIntentLedger()
+        ledger.observed(muted: true, level: 0.0625, for: 1, isSelfWrite: false)
+        ledger.observed(muted: false, level: 0.0625, for: 1, isSelfWrite: false)
+        #expect(ledger.reasons(for: 1).isEmpty)
+    }
+}
