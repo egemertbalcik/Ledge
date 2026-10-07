@@ -400,7 +400,11 @@ public final class LedgeCoordinator {
     private let commander = NowPlayingCommander()
     private lazy var hud = HUDCoordinator(
         preferences: preferences,
-        presentation: presentation
+        presentation: presentation,
+        hasNotchPanel: { [weak self] in
+            guard let self else { return false }
+            return !self.displayPanels.order.isEmpty
+        }
     )
 
     /// Which player the transport buttons talk to.
@@ -425,7 +429,15 @@ public final class LedgeCoordinator {
         // prune too: a hover owner that just unplugged left every surviving
         // panel demoting its drawn phase and the sticky hit test with a dead
         // key — an open card nobody could see or click.
-        displayPanels.onPanelsChanged = { [weak self] in self?.pruneHoveredDisplay() }
+        displayPanels.onPanelsChanged = { [weak self] in
+            guard let self else { return }
+            self.pruneHoveredDisplay()
+            // Whether there is a notch to draw the HUD in is the question
+            // `hud.apply()` asks first, and closing the lid or unplugging the
+            // built-in display changes the answer. Without this the keys stay
+            // swallowed on a Mac that no longer has anywhere to show them.
+            self.hud.apply()
+        }
 
         let geometry = displayPanels.primary?.geometry
             ?? NSScreen.main.map(ScreenGeometry.measure)

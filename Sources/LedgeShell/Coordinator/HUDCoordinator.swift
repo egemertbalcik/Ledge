@@ -45,9 +45,26 @@ public final class HUDCoordinator {
     /// Asks the shell to show the HUD phase.
     public var onReadout: (HUDReadout) -> Void = { _ in }
 
-    public init(preferences: Preferences, presentation: NotchPresentation) {
+    /// Whether there is a notch to draw the HUD in.
+    ///
+    /// Suppressing the system OSD means swallowing the key, and swallowing a
+    /// key Ledge cannot answer leaves the user pressing a volume key that does
+    /// nothing visible at all — on a clamshell MacBook or a Mac with no notched
+    /// display, where `targetScreens()` yields no panel. Brightness is worse
+    /// than invisible there: it resolves the external display and scales its
+    /// gamma ramp, quietly replacing the monitor's own calibration. Ledge does
+    /// not support those Macs, and not supporting them has to mean doing
+    /// nothing on them rather than doing that.
+    private let hasNotchPanel: () -> Bool
+
+    public init(
+        preferences: Preferences,
+        presentation: NotchPresentation,
+        hasNotchPanel: @escaping () -> Bool = { true }
+    ) {
         self.preferences = preferences
         self.presentation = presentation
+        self.hasNotchPanel = hasNotchPanel
     }
 
     public func start() {
@@ -160,6 +177,19 @@ public final class HUDCoordinator {
             let trustPath = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-hud-trust")
             try? "suppress=\(preferences.suppressSystemHUD) trusted=\(MediaKeyInterceptor.isTrusted)"
                 .write(toFile: trustPath, atomically: true, encoding: .utf8)
+        }
+
+        guard hasNotchPanel() else {
+            // No surface to answer the key with, so leave the key alone and let
+            // macOS show its own OSD. Re-checked whenever the panels change, so
+            // opening the lid or plugging in the notched display takes it back.
+            interceptor.stop()
+            applyBrightnessWatching()
+            onSuppressionChanged?(false)
+            trustRetry?.cancel()
+            trustRetry = nil
+            Self.log.notice("no notched display — leaving the media keys to macOS")
+            return
         }
 
         if preferences.suppressSystemHUD, MediaKeyInterceptor.isTrusted {
