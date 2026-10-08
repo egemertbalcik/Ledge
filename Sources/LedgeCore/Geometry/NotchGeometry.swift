@@ -733,9 +733,17 @@ public struct NotchLayout: Sendable, Equatable {
         }.max() ?? 0
         let routes = (geometry.notchSize.height + routePickerHeight(rows: 3)
             + routePickerPadding) * geometry.displayScale
+        let notes = cardSize(kind: .notes, phase: .expanded, base: .zero,
+                             cardContentHeight: .greatestFiniteMagnitude,
+                             geometry: geometry, routePickerRows: 0, hasSelection: true)
+        let notesFlight = notes.height + NotesBirthGeometry.editorSize.height
+            + 32 * NotesBirthGeometry.scale(geometry.displayScale)
         return CGSize(
             width: geometry.screenSize.width,
-            height: min(geometry.screenSize.height, max(tallest, routes) + 32)
+            // A note lands below the Notes card. Reserve its flight as well as
+            // ordinary cards, otherwise the lower half is clipped by NSPanel.
+            height: min(geometry.screenSize.height,
+                        max(max(tallest, routes), notesFlight) + 32)
         )
     }
 
@@ -773,7 +781,7 @@ public struct NotchLayout: Sendable, Equatable {
             // is kept narrower (iOS-Island-like) but the height keeps its full
             // padding so the transport row is not cramped against the edge.
             return CGSize(width: base.width, height: max(base.height, 164))
-        case .device, .focus, .privacy, .keyboard, .power, .message, .shelf:
+        case .device, .focus, .privacy, .keyboard, .power, .message, .shelf, .notes:
             // The simple cards: a glyph and a line or two, sometimes a row of
             // cells. They used to take the *height preference* as a floor like
             // everything else, which is how a Focus card that needs 66pt came

@@ -21,6 +21,7 @@ public struct ActivityCardView: View {
     private let nowPlayingActions: NowPlayingActions
     private let timerActions: TimerActions
     private let shelfActions: ShelfActions
+    private let notesActions: NotesActions
     private let levelsActions: LevelsActions
     private let liveLevel: HUDReadout?
 
@@ -40,6 +41,7 @@ public struct ActivityCardView: View {
         nowPlayingActions: NowPlayingActions = NowPlayingActions(),
         timerActions: TimerActions = TimerActions(),
         shelfActions: ShelfActions = ShelfActions(),
+        notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
         liveLevel: HUDReadout? = nil,
         onTimerHeight: @escaping (CGFloat) -> Void = { _ in },
@@ -60,6 +62,7 @@ public struct ActivityCardView: View {
         self.nowPlayingActions = nowPlayingActions
         self.timerActions = timerActions
         self.shelfActions = shelfActions
+        self.notesActions = notesActions
         self.levelsActions = levelsActions
         self.liveLevel = liveLevel
         self.onTimerHeight = onTimerHeight
@@ -91,6 +94,9 @@ public struct ActivityCardView: View {
             LevelsCardView(actions: levelsActions, isCompactWidth: isCompactWidth, liveLevel: liveLevel)
         case .shelf(let payload):
             ShelfCardView(payload: payload, actions: shelfActions, isCompactWidth: isCompactWidth)
+                .measuredContent(activity.id, onContentHeight)
+        case .notes(let payload):
+            NotesCardView(payload: payload, actions: notesActions, isCompactWidth: isCompactWidth)
                 .measuredContent(activity.id, onContentHeight)
         case .device(let payload) where !isCompactWidth:
             // Bluetooth gear gets its own card for the same reason weather does:
@@ -189,7 +195,7 @@ public struct ActivityCardView: View {
                 .frame(height: 3)
                 .padding(.top, 2)
 
-        case .focus, .event, .message, .weather, .timer, .shelf, .privacy, .keyboard, .levels:
+        case .focus, .event, .message, .weather, .timer, .shelf, .privacy, .keyboard, .levels, .notes:
             EmptyView()
         }
     }
@@ -211,6 +217,8 @@ public struct ActivityCardView: View {
         case .privacy(let payload): payload.title
         case .keyboard(let payload): payload.name
         case .levels: "Levels"
+        case .notes(let payload):
+            payload.notes.count == 1 ? "1 note" : "\(payload.notes.count) notes"
         }
     }
 
@@ -229,6 +237,8 @@ public struct ActivityCardView: View {
         case .privacy: "In use"
         case .keyboard: "Input source"
         case .levels: "Sound & display"
+        case .notes(let payload):
+            payload.notes.first?.title ?? "Nothing written down"
         }
     }
 
@@ -247,7 +257,7 @@ public struct ActivityCardView: View {
             payload.lowestLevel.map { "\(Int(($0 * 100).rounded()))%" }
         case .keyboard(let payload):
             payload.code.isEmpty ? nil : payload.code
-        case .focus, .message, .weather, .shelf, .privacy, .levels:
+        case .focus, .message, .weather, .shelf, .privacy, .levels, .notes:
             nil
         }
     }
@@ -269,6 +279,7 @@ public struct ActivityCardView: View {
         case .privacy(let payload): payload.cameraActive ? "video.fill" : "mic.fill"
         case .keyboard(let payload): payload.symbolName ?? "keyboard"
         case .levels: "slider.horizontal.3"
+        case .notes: "note.text"
         }
     }
 
@@ -287,6 +298,7 @@ public struct ActivityCardView: View {
         case .privacy(let payload): payload.cameraActive ? .green : .orange
         case .keyboard: .white
         case .levels: .white
+        case .notes: .yellow
         }
     }
 

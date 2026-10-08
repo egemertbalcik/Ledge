@@ -134,6 +134,8 @@ public struct CompactEarsView: View {
             return "Keyboard layout, \(payload.name)"
         case .levels(let payload):
             return payload.isMuted ? "Levels, muted" : "Levels, volume \(percent(payload.volume))"
+        case .notes(let payload):
+            return payload.notes.count == 1 ? "1 note" : "\(payload.notes.count) notes"
         }
     }
 
@@ -355,6 +357,15 @@ public struct CompactEarsView: View {
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
             }
+        case .notes(let payload):
+            // Notes never rest in the ears, so this is only ever reached while a
+            // card is on its way out. The count is the one thing that reads at
+            // this size.
+            Text("\(payload.notes.count)")
+                .font(.cardCaption)
+                .monospacedDigit()
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
         case .levels(let payload):
             // The volume at last publish — a snapshot, like the glyph itself.
             // Muted reads as a slash, not as the level it would return to.
@@ -413,6 +424,7 @@ public struct CompactEarsView: View {
             payload.cameraActive ? "video.fill" : "mic.fill"
         case .keyboard(let payload): payload.symbolName ?? "keyboard"
         case .levels: "slider.horizontal.3"
+        case .notes: "note.text"
         }
     }
 
@@ -431,6 +443,7 @@ public struct CompactEarsView: View {
             payload.cameraActive ? .green : .orange
         case .keyboard: .white
         case .levels: .white
+        case .notes: .yellow
         }
     }
 }

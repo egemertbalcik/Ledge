@@ -81,6 +81,7 @@ public struct ScenarioActivity: Codable, Sendable {
     public var privacy: PrivacyPayload?
     public var keyboard: KeyboardLayoutPayload?
     public var levels: LevelsPayload?
+    public var notes: NotesPayload?
 
     public init(
         kind: ActivityKind,
@@ -98,7 +99,8 @@ public struct ScenarioActivity: Codable, Sendable {
         shelf: ShelfPayload? = nil,
         privacy: PrivacyPayload? = nil,
         keyboard: KeyboardLayoutPayload? = nil,
-        levels: LevelsPayload? = nil
+        levels: LevelsPayload? = nil,
+        notes: NotesPayload? = nil
     ) {
         self.kind = kind
         self.source = source
@@ -116,6 +118,7 @@ public struct ScenarioActivity: Codable, Sendable {
         self.privacy = privacy
         self.keyboard = keyboard
         self.levels = levels
+        self.notes = notes
     }
 
     public func activity(createdAt: TimeInterval) throws -> Activity {
@@ -156,6 +159,8 @@ public struct ScenarioActivity: Codable, Sendable {
             payload = .keyboard(keyboard)
         case .levels:
             payload = .levels(levels ?? LevelsPayload())
+        case .notes:
+            payload = .notes(notes ?? NotesPayload())
         }
 
         return Activity(

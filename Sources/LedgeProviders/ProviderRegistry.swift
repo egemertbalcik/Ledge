@@ -85,6 +85,13 @@ public enum ProviderRegistry {
         shelfProvider: @escaping @MainActor () -> any ActivityProvider = {
             ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in }))
         },
+        // Defaults to a store in a scratch directory, for the same reason.
+        notesProvider: @escaping @MainActor () -> any ActivityProvider = {
+            NotesProvider(store: NotesStore(
+                directory: URL(fileURLWithPath: NSTemporaryDirectory())
+                    .appendingPathComponent("ledge-notes-ephemeral", isDirectory: true)
+            ))
+        },
         // The shell keeps its own Focus source for the quiet-during-Focus
         // rule, which has to work whether or not the *card* is switched on.
         // It passes that same source in here rather than letting a second one
@@ -284,6 +291,16 @@ public enum ProviderRegistry {
                 // there is nothing to ask for.
                 permission: nil,
                 make: shelfProvider
+            ),
+
+            ProviderRegistration(
+                id: "notes",
+                displayName: "Notes",
+                kind: .notes,
+                // Notes are written to Application Support directly; the app is
+                // not sandboxed, so there is nothing to ask for.
+                permission: nil,
+                make: notesProvider
             ),
 
             ProviderRegistration(
