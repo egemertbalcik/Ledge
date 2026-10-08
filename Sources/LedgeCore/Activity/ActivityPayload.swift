@@ -19,6 +19,7 @@ public enum ActivityPayload: Equatable, Sendable {
     case privacy(PrivacyPayload)
     case keyboard(KeyboardLayoutPayload)
     case levels(LevelsPayload)
+    case notes(NotesPayload)
 }
 
 /// Which recording hardware is live right now.
@@ -124,6 +125,67 @@ public struct ShelfPayload: Equatable, Sendable, Codable {
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         items = try c.decodeIfPresent([ShelfItem].self, forKey: .items) ?? []
+    }
+}
+
+/// One note, as the card needs to know it.
+///
+/// Deliberately not the note itself: the body never crosses into a payload.
+/// The queue diffs payloads on every republish and the gallery writes them to
+/// fixtures, so putting a user's prose in here would mean comparing it on
+/// every change and spilling it into files meant for review. The window reads
+/// bodies straight from the store; the card only ever draws what is here.
+public struct NoteSummary: Equatable, Sendable, Codable, Identifiable {
+    public let id: String
+
+    /// The note's first line, which is the only title a note has.
+    ///
+    /// Derived rather than entered, so writing begins with the cursor already
+    /// in the text and nothing to fill in first. Empty for a note whose first
+    /// line is still blank — the card draws its own placeholder rather than
+    /// inventing a name.
+    public var title: String
+
+    /// A short run of the body after the first line, for the tile to show.
+    /// Trimmed in the store, never here: this type does no work.
+    public var preview: String
+
+    /// When the body last changed, for ordering.
+    public var editedAt: TimeInterval
+
+    public init(id: String, title: String = "", preview: String = "", editedAt: TimeInterval = 0) {
+        self.id = id
+        self.title = title
+        self.preview = preview
+        self.editedAt = editedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        preview = try c.decodeIfPresent(String.self, forKey: .preview) ?? ""
+        editedAt = try c.decodeIfPresent(TimeInterval.self, forKey: .editedAt) ?? 0
+    }
+}
+
+/// The notes the card lists, newest first.
+public struct NotesPayload: Equatable, Sendable, Codable {
+    public var notes: [NoteSummary]
+
+    /// Which note the window currently has open, if any, so the card can show
+    /// it as the one being written rather than as one of the rest.
+    public var openNoteID: String?
+
+    public init(notes: [NoteSummary] = [], openNoteID: String? = nil) {
+        self.notes = notes
+        self.openNoteID = openNoteID
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        notes = try c.decodeIfPresent([NoteSummary].self, forKey: .notes) ?? []
+        openNoteID = try c.decodeIfPresent(String.self, forKey: .openNoteID)
     }
 }
 

@@ -15,6 +15,7 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
     case privacy
     case keyboard
     case levels
+    case notes
 
     /// Default ordering weight. Higher wins a place nearer the front.
     ///
@@ -46,6 +47,10 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
         // A control surface, not information: sound and brightness sliders
         // for the mouse. Behind weather, ahead of the timer launcher.
         case .levels: 8
+        // A standing container like the shelf, and quieter still: notes are
+        // only ever news to the person who went looking for them. Nothing
+        // here arrives on its own, so it never competes for the front.
+        case .notes: 6
         }
     }
 }
@@ -135,7 +140,7 @@ extension Activity {
             return !payload.isIdle
         case .event(let payload):
             return payload.hasEvent && payload.startsIn <= 60 * 60 && payload.startsIn >= -60
-        case .levels, .shelf:
+        case .levels, .shelf, .notes:
             return false
         default:
             return true
@@ -171,6 +176,12 @@ extension Activity {
             // had been stopped for hours. Announcing is for something that
             // started.
             return payload.isPlaying && payload.showsInCompact
+        case .notes:
+            // Saving a note is not an event. The card republishes on every
+            // keystroke's worth of debounce, and announcing any of that would
+            // flash the island while the user is typing into a window in
+            // front of it.
+            return false
         case .levels:
             // A control surface, not news — the same reason it never rests in
             // the ears. Its card arrives the first time a level is touched,
