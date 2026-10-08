@@ -120,6 +120,8 @@ public final class LedgeCoordinator {
             await self.deviceObservations.close()
             await self.settingsModel.drainPendingWrites()
             await self.deviceCatalogue.flush()
+            self.notesWindow.close()
+            await self.notes.flush()
         }
         quiesceWork = work
         await work.value
@@ -358,6 +360,7 @@ public final class LedgeCoordinator {
         guard dormancy.set(reason, active) else { return }
         presentation.screensAreDark = dormancy.isDark
         if dormancy.isDark {
+            notesWindow.cancelPendingOpening()
             hoverTracker?.stop()
             hud.setDormant(true)
             Self.log.notice("screens dark — pointer and brightness polling paused")
@@ -394,6 +397,20 @@ public final class LedgeCoordinator {
         load: { [weak self] in self?.preferences.shelfPaths ?? "" },
         save: { [weak self] paths in self?.preferences.shelfPaths = paths }
     )
+    /// The user's notes. Owned here, not by the provider, so the editor window
+    /// keeps working while the card is switched off — the same reason the shelf
+    /// store lives here.
+    private let notes = NotesStore()
+
+    /// The one editor window.
+    private lazy var notesWindow = NotesWindowController(
+        store: notes,
+        preferences: preferences
+    )
+
+    /// Held so the card can be told which note is being written.
+    private weak var notesProviderRef: NotesProvider?
+
     private let screenshots = ScreenshotWatcher()
     private let permissions = PermissionCenter()
     private let settingsModel = SettingsModel()
@@ -421,7 +438,27 @@ public final class LedgeCoordinator {
         self.preferences = preferences
     }
 
+    /// Opens a note on its own a few seconds after launch, when asked to.
+    ///
+    /// Diagnostics only, behind `~/.ledge-notes-selftest`. An animation that
+    /// plays for half a second inside a notch cannot be checked by reasoning
+    /// about it, and this is the only way to drive it without a hand on the
+    /// trackpad.
+    private var notesSelfTest: Task<Void, Never>?
+    private var notesCapture: Task<Void, Never>?
+
+    private func runNotesSelfTestIfRequested() {
+        let marker = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-notes-selftest")
+        guard FileManager.default.fileExists(atPath: marker) else { return }
+        notesSelfTest?.cancel()
+        notesSelfTest = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(4)) } catch { return }
+            self?.notesWindow.create()
+        }
+    }
+
     public func start() {
+        runNotesSelfTestIfRequested()
         presentation.audioLevels = { [weak self] in self?.simulatedLevels() ?? [] }
         displayPanels.reconcile()
         pruneHoveredDisplay()
@@ -429,9 +466,30 @@ public final class LedgeCoordinator {
         // prune too: a hover owner that just unplugged left every surviving
         // panel demoting its drawn phase and the sticky hit test with a dead
         // key — an open card nobody could see or click.
+        // The island's hand-off animation. Wired here rather than inside the
+        // notes provider's factory: that closure only runs if the card is
+        // switched on and built, and the window can be opened regardless — so
+        // the animation went missing exactly when the provider had not been
+        // constructed.
+        notesWindow.notchScreen = { [weak self] in self?.notesBirthPanel?.currentScreen }
+        notesWindow.sourceIsland = { [weak self] in
+            guard let self, let panel = self.notesBirthPanel else { return nil }
+            return panel.shapeRect(for: self.presentation.phase)
+        }
+        notesWindow.displayScale = { [weak self] in self?.notesBirthPanel?.geometry.displayScale ?? 1 }
+        notesWindow.playBirth = { [weak self] landing in
+            self?.beginNotesBirth(landing: landing) ?? false
+        }
+        notesWindow.endBirth = { [weak self] in
+            self?.presentation.notesBirth = nil
+        }
+
         displayPanels.onPanelsChanged = { [weak self] in
             guard let self else { return }
             self.pruneHoveredDisplay()
+            if self.presentation.notesBirth != nil {
+                self.notesWindow.finishBirthAfterDisplayChange()
+            }
             // Whether there is a notch to draw the HUD in is the question
             // `hud.apply()` asks first, and closing the lid or unplugging the
             // built-in display changes the answer. Without this the keys stay
@@ -563,6 +621,7 @@ public final class LedgeCoordinator {
             nowPlayingActions: makeNowPlayingActions(),
             timerActions: makeTimerActions(),
             shelfActions: makeShelfActions(),
+            notesActions: makeNotesActions(),
             levelsActions: makeLevelsActions(),
             onDropFiles: { [weak self] urls in self?.acceptDroppedFiles(urls) ?? false },
             onHUDAdjust: { [weak self] kind, level in self?.hud.adjust(kind, to: level) },
@@ -1121,6 +1180,17 @@ public final class LedgeCoordinator {
             shelfProvider: { [weak self] in
                 guard let self else { return ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in })) }
                 return ShelfProvider(store: self.shelf)
+            },
+            notesProvider: { [weak self] in
+                guard let self else { return NotesProvider(store: NotesStore()) }
+                let provider = NotesProvider(store: self.notes)
+                self.notesProviderRef = provider
+                // The card marks whichever note the window has open, so the two
+                // never disagree about what is being written.
+                self.notesWindow.onOpenNoteChanged = { [weak provider] id in
+                    provider?.setOpenNote(id)
+                }
+                return provider
             },
             // The same source the quiet-during-Focus rule reads, not a second
             // one. See the parameter's own note: two of them argued.
@@ -1729,6 +1799,101 @@ public final class LedgeCoordinator {
         )
     }
 
+    /// Starts the island's hand-off animation for a note.
+    ///
+    /// The landing rect arrives in screen coordinates and the animation is
+    /// drawn inside the notch panel, so it has to be expressed in the panel's
+    /// own space. Screen coordinates run bottom-up and the panel's content runs
+    /// top-down, which is where the flip comes from. With no panel there is
+    /// nothing to animate in, so the window simply appears — which is also what
+    /// happens under Reduce Motion.
+    @discardableResult
+    private func beginNotesBirth(landing: CGRect) -> Bool {
+        guard !presentation.screensAreDark,
+              let controller = notesBirthPanel,
+              let panelFrame = controller.currentPanelFrame else {
+            Self.log.notice("notes: no panel — nothing to animate in")
+            presentation.notesBirth = nil
+            return false
+        }
+        let local = NotesBirthGeometry.local(landing, in: panelFrame)
+        let layout = presentation.layout(preferences: preferences, geometry: controller.geometry,
+                                         phase: presentation.phase)
+        let island = CGRect(x: (panelFrame.width - layout.bodySize.width) / 2, y: 0,
+                            width: layout.bodySize.width, height: layout.bodySize.height)
+        // The flight is drawn inside the panel, so a landing rect that does not
+        // fit in it would be clipped — the blob would fly off the panel's
+        // bottom edge and simply vanish. Better no animation than half of one.
+        guard local.minY >= 0, local.maxY <= panelFrame.height,
+              local.minX >= 0, local.maxX <= panelFrame.width else {
+            Self.log.notice("notes: the window lands outside the panel — no flight")
+            presentation.notesBirth = nil
+            return false
+        }
+        notesBirthToken &+= 1
+        presentation.notesBirth = NotesBirth(
+            to: local,
+            cornerRadius: NotesWindowController.windowCornerRadius,
+            token: notesBirthToken,
+            displayScale: controller.geometry.displayScale,
+            displayID: controller.displayID,
+            islandRect: island,
+            sourceLayout: layout
+        )
+        Self.log.notice("notes: birth local=\(local.debugDescription, privacy: .public) panel=\(panelFrame.debugDescription, privacy: .public)")
+        captureBirthFrames()
+        return true
+    }
+
+    private var notesBirthPanel: LedgePanelController? {
+        if let id = presentation.hoveredDisplayID, let panel = displayPanels.controller(for: id) { return panel }
+        return displayPanels.primary
+    }
+
+    private var notesBirthToken = 0
+
+    /// Writes a few frames of the birth animation to disk, when asked to.
+    ///
+    /// Only runs if `~/.ledge-notes-diag` exists, so it costs a stat and
+    /// nothing else for everybody who has not asked for it. The panel draws
+    /// itself into a bitmap, which is the one way to see what the notch is
+    /// doing without standing in front of the machine.
+    private func captureBirthFrames() {
+        let marker = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-notes-diag")
+        guard FileManager.default.fileExists(atPath: marker) else { return }
+        notesCapture?.cancel()
+        let token = notesBirthToken
+        let controller = notesBirthPanel
+        notesCapture = Task { @MainActor [weak self] in
+            let start = ContinuousClock.now
+            for ms in [40, 90, 150, 220, 320] {
+                do { try await ContinuousClock().sleep(until: start.advanced(by: .milliseconds(ms))) }
+                catch { return }
+                guard let self, self.presentation.notesBirth?.token == token else { return }
+                if let png = controller?.capturedContentPNG() {
+                    let out = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-notes-diag-\(ms).png")
+                    try? png.write(to: URL(fileURLWithPath: out))
+                }
+            }
+        }
+    }
+
+
+    private func makeNotesActions() -> NotesActions {
+        NotesActions(
+            open: { [weak self] id in self?.notesWindow.open(noteID: id) },
+            create: { [weak self] in self?.notesWindow.create() },
+            delete: { [weak self] id in
+                guard let self else { return }
+                let store = self.notes
+                Task { await store.delete(id) }
+            },
+            hovering: { [weak self] over in
+                self?.presentation.notesTileHovered = over
+            }
+        )
+    }
+
     private func makeShelfActions() -> ShelfActions {
         ShelfActions(
             remove: { [weak self] path in self?.shelf.remove(path: path) },
@@ -1999,6 +2164,11 @@ public final class LedgeCoordinator {
     /// simply dropping this object, so there has to be an explicit path — and
     /// something has to call it.
     public func stop() {
+        notesSelfTest?.cancel()
+        notesSelfTest = nil
+        notesCapture?.cancel()
+        notesCapture = nil
+        notesWindow.tearDown()
         greeting?.cancel()
         greeting = nil
         presentation.greeting = false

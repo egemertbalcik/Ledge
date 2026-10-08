@@ -130,6 +130,7 @@ public final class LedgePanelController {
     private let nowPlayingActions: NowPlayingActions
     private let timerActions: TimerActions
     private let shelfActions: ShelfActions
+    private let notesActions: NotesActions
     private let levelsActions: LevelsActions
     private let onDropFiles: ([URL]) -> Bool
     private let onHUDAdjust: (HUDReadout.Kind, Double) -> Void
@@ -156,6 +157,7 @@ public final class LedgePanelController {
         nowPlayingActions: NowPlayingActions = NowPlayingActions(),
         timerActions: TimerActions = TimerActions(),
         shelfActions: ShelfActions = ShelfActions(),
+        notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
         onDropFiles: @escaping ([URL]) -> Bool = { _ in false },
         onHUDAdjust: @escaping (HUDReadout.Kind, Double) -> Void = { _, _ in },
@@ -168,6 +170,7 @@ public final class LedgePanelController {
         self.nowPlayingActions = nowPlayingActions
         self.timerActions = timerActions
         self.shelfActions = shelfActions
+        self.notesActions = notesActions
         self.levelsActions = levelsActions
         self.onDropFiles = onDropFiles
         self.onHUDAdjust = onHUDAdjust
@@ -203,6 +206,7 @@ public final class LedgePanelController {
             nowPlayingActions: nowPlayingActions,
             timerActions: timerActions,
             shelfActions: shelfActions,
+            notesActions: notesActions,
             levelsActions: levelsActions,
             onDropFiles: onDropFiles,
             onHUDAdjust: onHUDAdjust,
@@ -332,6 +336,27 @@ public final class LedgePanelController {
         Self.log.debug("interactive=\(interactive, privacy: .public)")
     }
 
+    /// The panel's own frame in screen coordinates, so the shell can express a
+    /// window's position in the panel's space — the birth animation is drawn
+    /// inside the panel and has to know where it will land.
+    public var currentPanelFrame: CGRect? { panel?.frame }
+
+    /// Which display this panel is on.
+    public var currentScreen: NSScreen? { screen }
+
+    /// Diagnostics: the panel's own drawn content, as PNG bytes.
+    ///
+    /// Drawn by the view into its own backing store, so this needs no
+    /// screen-recording permission and sees exactly what the panel is putting
+    /// on screen — which is the only way to check an animation without a pair
+    /// of eyes in front of the Mac.
+    public func capturedContentPNG() -> Data? {
+        guard let view = panel?.contentView else { return nil }
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        return rep.representation(using: .png, properties: [:])
+    }
+
     /// The panel's CG window number, for excluding the overlay from a screen
     /// capture of what lies behind it.
     public var windowNumber: UInt32? {
@@ -345,7 +370,10 @@ public final class LedgePanelController {
             preferences: preferences, geometry: geometry, phase: phase,
             hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
         )
-        let size = layout.boundingSize
+        let frozen = presentation.notesBirth.flatMap { birth in
+            birth.displayID == displayID ? birth.sourceLayout : nil
+        }
+        let size = (frozen ?? layout).boundingSize
         let rect = CGRect(
             x: screen.frame.minX + geometry.notchCenterX - size.width / 2,
             y: screen.frame.maxY - size.height,
