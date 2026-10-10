@@ -16,9 +16,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Sparkle. The standard controller owns the whole flow — scheduled checks,
     /// the update window, install-on-quit — so the app's only job is to expose
     /// "Check for Updates…" in the menu.
-    private let updater = SPUStandardUpdaterController(
+    /// Tells the coordinator when a termination is Sparkle relaunching us.
+    ///
+    /// Its own object rather than the delegate on this class: `AppDelegate` is
+    /// created before the coordinator is, and the only thing Sparkle is asked
+    /// for here is that one fact.
+    private lazy var updaterDelegate = UpdateRelaunchWatcher { [weak self] in
+        self?.coordinator.willRelaunchForUpdate()
+    }
+
+    private lazy var updater = SPUStandardUpdaterController(
         startingUpdater: true,
-        updaterDelegate: nil,
+        updaterDelegate: updaterDelegate,
         userDriverDelegate: nil
     )
 
@@ -285,5 +294,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // first copy's external display.
         guard started else { return }
         coordinator.stop()
+    }
+}
+
+
+/// Notices that the next termination is an update relaunch, not a quit.
+///
+/// Without this they are the same event from inside `applicationShouldTerminate`,
+/// and Keep Awake would end a session every time Ledge updated itself — which
+/// is the one case where the user has not asked for anything to stop.
+private final class UpdateRelaunchWatcher: NSObject, SPUUpdaterDelegate {
+
+    private let willRelaunch: @MainActor () -> Void
+
+    init(willRelaunch: @escaping @MainActor () -> Void) {
+        self.willRelaunch = willRelaunch
+    }
+
+    func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        MainActor.assumeIsolated { willRelaunch() }
     }
 }

@@ -34,6 +34,41 @@ public final class NowPlayingProvider: ActivityProvider {
     /// track does not cancel its own download.
     private var artworkFetchKey: String?
 
+    /// Which run of this provider is current.
+    ///
+    /// A stream's termination handler stops the provider, and it reaches the
+    /// main actor a turn after the stream ends. A provider stopped and started
+    /// again inside that turn — what switching the media source does — was
+    /// then stopped by the *old* stream's handler: the restarted run had its
+    /// poll cancelled before it published anything, and media updates simply
+    /// ceased until the next relaunch. Every piece of work that outlives a
+    /// turn carries the run it belongs to and gives up when that run is over.
+    private var run = 0
+
+    /// How many reads this run has begun, and the number of the newest one
+    /// whose answer reached the card.
+    ///
+    /// Three paths read the source and they overlap by design: the steady
+    /// poll, the burst after a transport press, and the immediate refresh. A
+    /// read is an `osascript` away, so the answers come back out of order —
+    /// and a slow one landing after a fresh one put the previous track and
+    /// play state back on screen, visibly undoing the button the user had
+    /// just pressed.
+    private var reads = 0
+    private var publishedRead = 0
+
+    /// A read in progress: the run that asked for it, and its place in that
+    /// run's order.
+    private struct Read {
+        var run: Int
+        var number: Int
+    }
+
+    private func beginRead() -> Read {
+        reads += 1
+        return Read(run: run, number: reads)
+    }
+
     private let playingInterval: TimeInterval
     private let idleInterval: TimeInterval
 
@@ -88,6 +123,16 @@ public final class NowPlayingProvider: ActivityProvider {
     /// The track the card last showed, so a skip made while paused reads as
     /// somebody at the keyboard rather than more idle time.
     private var lastTrackKey: String?
+
+    /// The cover key of the card on screen — the item, and which cover it is
+    /// carrying — exactly as the artwork cache files it.
+    ///
+    /// Separate from `lastTrackKey`, which is a pause-clock identity (the
+    /// player *and* the track) and so never equalled a bare key. A finished
+    /// cover fetch compared itself against that one and always lost, which is
+    /// why artwork landed in the cache and the card went on showing the
+    /// placeholder until some later poll happened to redraw it.
+    private var shownCoverKey: String?
 
     /// The last native snapshot we published while it was playing, and when.
     ///
@@ -228,13 +273,15 @@ public final class NowPlayingProvider: ActivityProvider {
     }
 
     public func start() -> AsyncStream<ProviderEvent> {
-        AsyncStream { continuation in
+        run += 1
+        let token = run
+        return AsyncStream { continuation in
             self.continuation = continuation
             continuation.onTermination = { _ in
-                Task { @MainActor [weak self] in self?.stop() }
+                Task { @MainActor [weak self] in self?.stop(run: token) }
             }
             self.task = Task { @MainActor [weak self] in
-                await self?.poll()
+                await self?.poll(run: token)
             }
             // Same burst the transport buttons use: the players answer
             // AppleScript with their new state a moment after announcing it, so
@@ -261,15 +308,20 @@ public final class NowPlayingProvider: ActivityProvider {
     /// waiting. Exposed so the paused-card lifetime can be driven against an
     /// injected clock instead of three quarters of an hour of real seconds.
     func refreshNow() async {
+        let read = beginRead()
         let snapshot = await source.snapshot()
-        guard continuation != nil else { return }
-        publish(snapshot)
+        publish(snapshot, from: read)
     }
 
     /// The user pressed something. Told to the source before the re-read, so a
     /// source that resists track changes knows this one was asked for.
     public func expectChange() {
         source.expectChange()
+        // A press is the one unambiguous sign that somebody is at the
+        // keyboard, so whatever was retired for sitting paused is back in
+        // play. A transport that could not bring a card back would read as a
+        // transport that does nothing.
+        pauses.userAsked()
         refreshSoon()
     }
 
@@ -281,25 +333,40 @@ public final class NowPlayingProvider: ActivityProvider {
     /// compact switch republishes the same card with the ears released.
     public func reconsider() {
         guard continuation != nil else { return }
-        publish(lastSnapshot)
+        publish(lastSnapshot, from: beginRead())
     }
 
     public func refreshSoon() {
+        // Nothing to refresh into. The watcher and the source's own notifier
+        // are unhooked by `stop`, but the shell can still call this through
+        // `expectChange` after the provider has gone, and a stopped provider
+        // must not start spawning reads again.
+        guard continuation != nil else { return }
+        let token = run
         boostTask?.cancel()
         boostTask = Task { @MainActor [weak self] in
             // Cumulative ~120ms, ~380ms, ~880ms — brackets how long Music and
             // Spotify take to reflect a playpause over their scripting bridge.
             for delayMs in [120, 260, 500] {
                 try? await Task.sleep(for: .milliseconds(delayMs))
-                guard let self, !Task.isCancelled else { return }
+                guard let self, !Task.isCancelled, self.run == token else { return }
+                let read = self.beginRead()
                 let snapshot = await self.source.snapshot()
                 guard !Task.isCancelled else { return }
-                self.publish(snapshot)
+                self.publish(snapshot, from: read)
             }
         }
     }
 
-    public func stop() {
+    public func stop() { stop(run: run) }
+
+    /// Stops the run that asked for it.
+    ///
+    /// The stream's termination handler arrives a turn late, by which time the
+    /// provider may already have been started again — and the run it is
+    /// talking about is not the one now going.
+    private func stop(run token: Int) {
+        guard token == run else { return }
         playbackWatcher?.stopWatching()
         (source as? any NowPlayingChangePublishing)?.onChange = nil
         task?.cancel()
@@ -318,6 +385,7 @@ public final class NowPlayingProvider: ActivityProvider {
         // switched off and on again is the user asking for the card back.
         pauses.cardWentAway()
         lastTrackKey = nil
+        shownCoverKey = nil
         lastSnapshot = nil
         heldNative = nil
     }
@@ -348,14 +416,15 @@ public final class NowPlayingProvider: ActivityProvider {
         return moved
     }
 
-    private func poll() async {
+    private func poll(run token: Int) async {
         while !Task.isCancelled {
+            let read = beginRead()
             let snapshot = await source.snapshot()
-            // The provider may have been stopped during the (seconds-long)
-            // osascript wait; publishing then would plant a stale publishedID
-            // into the next start of this same instance.
-            guard continuation != nil, !Task.isCancelled else { return }
-            publish(snapshot)
+            // The provider may have been stopped — or stopped and started
+            // again — during the (seconds-long) osascript wait. Publishing
+            // then would plant a stale publishedID into the run that followed.
+            guard continuation != nil, !Task.isCancelled, token == run else { return }
+            publish(snapshot, from: read)
 
             let interval = self.interval(playing: snapshot?.isPlaying ?? false)
             do {
@@ -364,6 +433,22 @@ public final class NowPlayingProvider: ActivityProvider {
                 return  // cancelled
             }
         }
+    }
+
+    /// Publishes an answer unless the provider has moved on since it was asked
+    /// for.
+    ///
+    /// Two ways it can have. The run the read belongs to may be over — stopped,
+    /// or stopped and started again — in which case this answer describes a
+    /// provider that no longer exists. Or a later read may already have
+    /// published, in which case this one is describing a past the card has left
+    /// behind: letting it through is how a button press appeared to be undone a
+    /// second after it was made.
+    private func publish(_ snapshot: NowPlayingSnapshot?, from read: Read) {
+        guard read.run == run, continuation != nil, read.number > publishedRead
+        else { return }
+        publishedRead = read.number
+        publish(snapshot)
     }
 
     private func publish(_ reported: NowPlayingSnapshot?) {
@@ -405,6 +490,7 @@ public final class NowPlayingProvider: ActivityProvider {
             }
             pauses.cardWentAway()
             lastTrackKey = nil
+            shownCoverKey = nil
             return
         }
 
@@ -423,6 +509,21 @@ public final class NowPlayingProvider: ActivityProvider {
             // still be in the cycle at lunch as long as something kept
             // interrupting it. The pause happened once; it is dated once.
             let key = Self.pauseKey(snapshot)
+            // Retired already, and nothing since has said otherwise. This
+            // reading is the same paused track it has been all along, so it
+            // does not buy its card back: clearing the clock on retirement
+            // used to leave the very next poll with nothing to measure, so it
+            // started a fresh quarter of an hour and put the card the user had
+            // just watched expire straight back on screen.
+            guard !pauses.isRetired(key) else {
+                if let publishedID {
+                    continuation?.yield(.retract(publishedID))
+                    self.publishedID = nil
+                }
+                lastTrackKey = nil
+                shownCoverKey = nil
+                return
+            }
             // Three cases, and they are not interchangeable: the same track
             // still paused (the clock already running), a different track
             // (its own clock, from its own memory or from now), and this same
@@ -445,6 +546,8 @@ public final class NowPlayingProvider: ActivityProvider {
                 // its own fifteen minutes, because by then it will have been
                 // played again to get there.
                 pauses.retired(Self.pauseKey(snapshot))
+                lastTrackKey = nil
+                shownCoverKey = nil
                 return
             }
         }
@@ -482,13 +585,21 @@ public final class NowPlayingProvider: ActivityProvider {
             lastTrackKey = Self.pauseKey(snapshot)
         }
         publishedID = id
+        shownCoverKey = snapshot.coverKey
 
         // The adapter delivers artwork as bytes (there is no URL for a
         // browser tab); seed the cache from them so adapter-only players get
         // real covers instead of the placeholder forever.
-        var cached = artwork.cached(for: snapshot.trackKey)
+        //
+        // Filed under the *cover* key rather than the track key. Keyed on the
+        // song alone, a revised cover for a song already in the cache found
+        // the old image sitting there and stopped — the better art was handed
+        // over, ignored, and the card kept the first one for the length of the
+        // track.
+        let coverKey = snapshot.coverKey
+        var cached = artwork.cached(for: coverKey)
         if cached == nil, let data = snapshot.artworkData {
-            cached = artwork.load(key: snapshot.trackKey, data: data)
+            cached = artwork.load(key: coverKey, data: data)
         }
 
         continuation?.yield(.publish(Activity(
@@ -503,7 +614,8 @@ public final class NowPlayingProvider: ActivityProvider {
                 duration: snapshot.duration,
                 sourceName: snapshot.appName,
                 accent: cached?.accent ?? .neutral,
-                artworkKey: snapshot.trackKey,
+                itemKey: snapshot.trackKey,
+                artworkKey: coverKey,
                 artworkData: cached?.data,
                 kind: snapshot.kind,
                 showsInCompact: Self.showsInCompact(
@@ -524,8 +636,8 @@ public final class NowPlayingProvider: ActivityProvider {
         // every second anyway, so nothing downstream sees anything unusual.
         if cached == nil,
            let url = snapshot.artworkURL,
-           !artwork.hasFailed(for: snapshot.trackKey) {
-            let key = snapshot.trackKey
+           !artwork.hasFailed(for: coverKey) {
+            let key = coverKey
             // A fetch already running for *this* track is left alone. The card
             // publishes every second while the cover downloads, and cancelling
             // on each of those killed the download a second in — then the
@@ -534,15 +646,21 @@ public final class NowPlayingProvider: ActivityProvider {
             if artworkFetchKey != key {
                 artworkFetch?.cancel()
                 artworkFetchKey = key
+                let token = run
                 artworkFetch = Task { @MainActor [weak self] in
                     guard let self else { return }
                     let loaded = await self.artwork.load(key: key, url: url)
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, self.run == token else { return }
                     if self.artworkFetchKey == key { self.artworkFetchKey = nil }
                     guard loaded != nil, self.continuation != nil else { return }
-                    // Still the same track? A skip during the fetch has already
-                    // published its own card, and that one owns the screen.
-                    guard self.lastTrackKey == key else { return }
+                    // Still the cover the card is waiting for? A skip during
+                    // the fetch has already published its own card, and that
+                    // one owns the screen. Compared against the key the cover
+                    // is filed under: `lastTrackKey` is a pause-clock identity
+                    // — the player and the track together — so this test could
+                    // never pass, and a cover that arrived while a track sat
+                    // paused waited in the cache for a poll minutes away.
+                    guard self.shownCoverKey == key else { return }
                     await self.refreshNow()
                 }
             }

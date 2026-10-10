@@ -362,7 +362,18 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
     public var sourceName: String
     public var accent: AccentColor
 
-    /// Identity of the artwork, used both for caching and for equality.
+    /// Which song this is.
+    ///
+    /// Separate from `artworkKey`, which says which *cover* it is carrying.
+    /// One field used to do both jobs and did neither: a late or replaced
+    /// cover read as a new song — turning the art and clearing the transport's
+    /// optimistic state for a song that had not moved — while two songs from
+    /// one album, sharing a cover, read as the same song.
+    public var itemKey: String?
+
+    /// Identity of the artwork revision — the item and the cover it has — used
+    /// for caching and for equality, so a replaced cover redraws the face
+    /// without anything believing the song changed.
     public var artworkKey: String?
 
     /// Encoded artwork bytes. Not part of `Codable`: fixtures reference no
@@ -404,6 +415,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
         duration: TimeInterval = 0,
         sourceName: String = "",
         accent: AccentColor = .neutral,
+        itemKey: String? = nil,
         artworkKey: String? = nil,
         artworkData: Data? = nil,
         kind: MediaKind = .audio,
@@ -420,6 +432,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
         self.duration = duration
         self.sourceName = sourceName
         self.accent = accent
+        self.itemKey = itemKey
         self.artworkKey = artworkKey
         self.artworkData = artworkData
         self.kind = kind
@@ -441,6 +454,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
             && lhs.duration == rhs.duration
             && lhs.sourceName == rhs.sourceName
             && lhs.accent == rhs.accent
+            && lhs.itemKey == rhs.itemKey
             && lhs.artworkKey == rhs.artworkKey
             && lhs.kind == rhs.kind
             && lhs.showsInCompact == rhs.showsInCompact
@@ -450,8 +464,8 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case title, artist, album, isPlaying, elapsed, duration, sourceName, accent, artworkKey,
-             kind, showsInCompact, isLive, ownerIsApp
+        case title, artist, album, isPlaying, elapsed, duration, sourceName, accent, itemKey,
+             artworkKey, kind, showsInCompact, isLive, ownerIsApp
     }
 
     /// 0...1, guarded against a zero or unknown duration so the bar never
@@ -471,6 +485,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
         duration = try c.decodeIfPresent(TimeInterval.self, forKey: .duration) ?? 0
         sourceName = try c.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
         accent = try c.decodeIfPresent(AccentColor.self, forKey: .accent) ?? .neutral
+        itemKey = try c.decodeIfPresent(String.self, forKey: .itemKey)
         artworkKey = try c.decodeIfPresent(String.self, forKey: .artworkKey)
         artworkData = nil
         kind = try c.decodeIfPresent(MediaKind.self, forKey: .kind) ?? .audio

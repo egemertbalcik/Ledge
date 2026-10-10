@@ -221,7 +221,195 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         adapter.isAvailable || scripting.isAvailable
     }
 
+    // MARK: - Who the system is pointing at
+
+    /// What the system itself last said was playing, and when it said it.
+    private var systemOwner: (bundleID: String?, at: TimeInterval)?
+
+    /// How recently the system must have been read for its answer to be worth
+    /// aiming an unaddressed command by.
+    ///
+    /// The card is read every one to four seconds while it is up, so a reading
+    /// older than this means the media machinery is not running — and a guess
+    /// about who owns the slot is exactly what must not be acted on.
+    public static let systemOwnerFreshness: TimeInterval = 10
+
+    /// Which player the system considers now-playing, as last actually read —
+    /// raw, with none of this type's holding rules applied.
+    ///
+    /// Those rules exist to keep the card still while a browser shuffles its
+    /// now-playing slot around, and they are right for a card and wrong for a
+    /// command. A command with no address goes wherever the system is
+    /// pointing, not where the card is, so the transport has to ask this
+    /// question rather than the card's one.
+    ///
+    /// Nil means "not known", which covers nothing playing, no adapter, an
+    /// adapter set aside, and a reading too old to stand behind.
+    public var systemOwnerBundleID: String? {
+        guard let systemOwner, now() - systemOwner.at < Self.systemOwnerFreshness
+        else { return nil }
+        return systemOwner.bundleID
+    }
+
+    private func noteSystemOwner(_ bundleID: String?, at now: TimeInterval) {
+        systemOwner = (bundleID, now)
+    }
+
+    // MARK: - Reading, one pass at a time
+
+    /// The pass reading right now, and the one pass waiting to read next.
+    ///
+    /// Two slots, never more. See `snapshot()`.
+    private var activePass: ReadPass?
+    private var pendingPass: ReadPass?
+    private var activeTask: Task<Void, Never>?
+
+    /// How many passes have run. The bound this queue exists to keep — a
+    /// burst of demand costing a fixed number of reads rather than one each —
+    /// cannot be seen in the answers, so it is counted here for the tests that
+    /// assert it.
+    private(set) var passesBegun = 0
+
+    /// Callers waiting for a pass that has not started yet. Never more than
+    /// one pass's worth, by construction.
+    var waitingForNextPass: Int { pendingPass?.waiterCount ?? 0 }
+
+    /// Reads are taken one pass at a time, and demand for a fresh one is
+    /// coalesced into a single waiting pass.
+    ///
+    /// A read is not one await but several — the adapter, then `osascript`,
+    /// then sometimes `osascript` again — and it reads, mutates and re-reads
+    /// the caches in between. The provider overlaps reads on purpose: the
+    /// steady poll, the burst after a transport press and an immediate refresh
+    /// all ask this same source. Overlapped, their steps interleaved, and the
+    /// one that started earlier could finish later and commit its older
+    /// answer — a cached position and play state from before the press — over
+    /// the newer one. The provider's own ordering cannot undo that: by then
+    /// the stale reading *is* the cache, and the next several polls project
+    /// from it. So passes take their turn, and ordering follows from that:
+    /// only one pass is ever inside `read`, and it commits before the next
+    /// begins.
+    ///
+    /// Taking turns is not enough on its own, though. A queue of callers each
+    /// waiting to start their own read is a backlog, and the thing filling it
+    /// is `refreshSoon`, which cancels and replaces its own work every time a
+    /// player announces something. Chained one-per-caller, those cancelled
+    /// replacements still had a read of their own waiting behind the slow one,
+    /// so fifty abandoned notifications meant fifty `osascript` runs after the
+    /// fact — reads nobody was waiting for any more, delaying the fresh state
+    /// behind obsolete work and carrying on past `stop`. Everyone who arrives
+    /// while a pass is running wants the same thing — the state after it — so
+    /// they share one pass, and a pass nobody is still waiting for is never
+    /// started at all.
     public func snapshot() async -> NowPlayingSnapshot? {
+        // Already given up before asking: no pass, no subprocess, nothing.
+        guard !Task.isCancelled else { return nil }
+        let (pass, ticket) = enlist()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                pass.attach(continuation, to: ticket)
+            }
+        } onCancel: {
+            // Deliberately synchronous: a waiter that has to hop to the main
+            // actor to take its name off the list is a waiter the queue can
+            // still decide to spawn an `osascript` for.
+            guard pass.leave(ticket) == .lastOneOut else { return }
+            Task { @MainActor [weak self] in self?.abandon(pass) }
+        }
+    }
+
+    /// Puts the caller on the pass whose answer it should get: the one running,
+    /// if nothing is running yet, and otherwise the one that will run next.
+    private func enlist() -> (pass: ReadPass, ticket: Int) {
+        if activePass == nil {
+            let pass = ReadPass()
+            let ticket = pass.reserve()
+            activePass = pass
+            begin(pass)
+            return (pass, ticket)
+        }
+        let pass = pendingPass ?? ReadPass()
+        pendingPass = pass
+        return (pass, pass.reserve())
+    }
+
+    private func begin(_ pass: ReadPass) {
+        passesBegun += 1
+        activeTask = Task { @MainActor [weak self] in
+            guard let self else { return pass.finish(with: nil) }
+            let answer = self.keepingOneNamePerSong(await self.read())
+            pass.finish(with: answer)
+            self.activePass = nil
+            self.activeTask = nil
+            self.advance()
+        }
+    }
+
+    /// Hands the turn to the waiting pass — unless everyone who asked for it
+    /// has gone, in which case there is nothing left to read for.
+    private func advance() {
+        guard activePass == nil, let next = pendingPass else { return }
+        pendingPass = nil
+        guard next.hasWaiters else { return next.finish(with: nil) }
+        activePass = next
+        begin(next)
+    }
+
+    /// Nobody is waiting on this pass any more.
+    ///
+    /// A pass still waiting its turn is simply dropped. A pass that is already
+    /// reading owns a subprocess exclusively at this point, so that is
+    /// cancelled too — but only once the *last* waiter has left. Several live
+    /// callers share one pass, and one of them losing interest is no reason to
+    /// take the answer away from the others.
+    private func abandon(_ pass: ReadPass) {
+        guard !pass.hasWaiters else { return }
+        if pendingPass === pass {
+            pendingPass = nil
+            pass.finish(with: nil)
+            return
+        }
+        if activePass === pass { activeTask?.cancel() }
+    }
+
+    /// What this composite last called each player's current song.
+    ///
+    /// One per player, and only the song that is playing now: this is a way of
+    /// keeping a name, not a history.
+    private var namedSongs: [String: (key: String, song: String)] = [:]
+
+    /// Keeps one name for one song.
+    ///
+    /// Two sources answer here and they name the same song differently. The
+    /// script knows the player's own track id; the adapter has only metadata,
+    /// and falls back to composing a name out of it. So the published name
+    /// changed whenever the *answer* came from the other one — a scripted read
+    /// that timed out, a track id the player did not give this time — and
+    /// everything downstream reads a changed name as a changed song. On the
+    /// card that is the cover turning over for a song that never changed.
+    ///
+    /// The song itself is what settles it: same title, artist and album from
+    /// the same player means the same song, whatever it has been called this
+    /// time, so the name already in use is kept. A real track change brings
+    /// different metadata and takes a new name with it.
+    private func keepingOneNamePerSong(_ snapshot: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
+        guard var snapshot else { return nil }
+        let song = "\(snapshot.title)\u{1F}\(snapshot.artist)\u{1F}\(snapshot.album)"
+        let player = snapshot.appBundleID
+        if let known = namedSongs[player], known.song == song {
+            snapshot.trackKey = known.key
+            return snapshot
+        }
+        namedSongs[player] = (snapshot.trackKey, song)
+        return snapshot
+    }
+
+    private func read() async -> NowPlayingSnapshot? {
+        // Nobody is waiting for this any more — see `abandon`. Checked again
+        // before each piece of real work below, because the expensive parts of
+        // a read are subprocesses and the point of cancelling is not to spawn
+        // them.
+        guard !Task.isCancelled else { return nil }
         let now = now()
         noteTransportCommands(at: now)
 
@@ -240,7 +428,9 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
                 Self.log.notice("now playing: adapter demotion expired — trying it again")
             } else if now - lastDemotedProbeAt >= Self.demotedProbeInterval {
                 lastDemotedProbeAt = now
-                if let fromAdapter = await adapter.snapshot() {
+                let probed = await adapter.snapshot()
+                noteSystemOwner(probed?.appBundleID, at: now)
+                if let fromAdapter = probed {
                     demotedUntil = nil
                     silentWhileScriptingPlaying = 0
                     onStatusChanged?()
@@ -253,7 +443,12 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
             }
         }
 
-        if let fromAdapter = await adapter.snapshot() {
+        let fromSystem = await adapter.snapshot()
+        // Who the *system* says owns playback, recorded raw, before any of the
+        // holding rules below get to disagree with it. See `systemOwnerBundleID`.
+        noteSystemOwner(fromSystem?.appBundleID, at: now)
+
+        if let fromAdapter = fromSystem {
             silentWhileScriptingPlaying = 0
             return await keepingIncumbent(over: answer(fromAdapter, at: now), at: now)
         }
@@ -628,6 +823,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
             return withAdapterArtwork(project(entry, to: now), from: fromAdapter)
         }
 
+        guard !Task.isCancelled else { return fromAdapter }
         if let scripted = await scriptedSnapshot(bundleID) {
             scriptedByPlayer[bundleID] = ScriptedEntry(
                 snapshot: scripted,
@@ -675,12 +871,38 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     private func withAdapterArtwork(_ scripted: NowPlayingSnapshot, from fromAdapter: NowPlayingSnapshot) -> NowPlayingSnapshot {
         guard scripted.artworkURL == nil,
               scripted.artworkData == nil,
-              let data = fromAdapter.artworkData
+              let data = fromAdapter.artworkData,
+              !Self.contradict(scripted, fromAdapter)
         else { return scripted }
         var merged = scripted
         merged.artworkData = data
         merged.artworkID = fromAdapter.artworkID
         return merged
+    }
+
+    /// Whether two readings are plainly about different things.
+    ///
+    /// Asked before one of them lends the other its cover. The two sides are
+    /// never in step for the moment after a skip — the script already names the
+    /// new song while the adapter still names the old one — and borrowing
+    /// across that gap produced exactly new metadata with the previous song's
+    /// art, which then got cached under the new song and stayed.
+    ///
+    /// Not "are these the same item": their ids come from unrelated
+    /// namespaces and would never match, so comparing them would refuse every
+    /// borrow including the ones that are the whole point. The question that
+    /// can be answered is the negative one — does the evidence *disagree* —
+    /// and a field one side has not filled in is not disagreement. Where it
+    /// does disagree, no cover at all is the honest answer.
+    static func contradict(_ a: NowPlayingSnapshot, _ b: NowPlayingSnapshot) -> Bool {
+        differ(a.title, b.title) || differ(a.artist, b.artist) || differ(a.album, b.album)
+    }
+
+    private static func differ(_ a: String, _ b: String) -> Bool {
+        let left = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = b.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !left.isEmpty, !right.isEmpty else { return false }
+        return left.caseInsensitiveCompare(right) != .orderedSame
     }
 
     // MARK: - The adapter is silent or set aside
@@ -697,6 +919,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
                 to: now
             )
         }
+        guard !Task.isCancelled else { return nil }
         let fresh = await scripting.snapshot()
         scriptedFallback = (fresh, now)
         return fresh
@@ -735,5 +958,95 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
 
     private func playbackChanged() {
         rescriptUntil = max(rescriptUntil, now() + Self.rescriptBurst)
+    }
+}
+
+/// One pass over the sources, and everybody waiting on its answer.
+///
+/// The waiter list is behind a lock rather than on the main actor on purpose.
+/// A cancelled task's handler runs wherever the cancellation happened, and if
+/// taking your name off the list costs a hop to the main actor then the queue
+/// can still decide, in the meantime, to spawn an `osascript` for a caller who
+/// has already gone. Under the lock the answer to "is anyone still waiting for
+/// this?" is true at the moment it is asked.
+///
+/// A ticket is reserved before the caller suspends, so a pass always knows it
+/// has someone waiting even in the turn between being chosen and being joined.
+private final class ReadPass: @unchecked Sendable {
+
+    typealias Waiter = CheckedContinuation<NowPlayingSnapshot?, Never>
+
+    /// What a departing waiter left behind.
+    enum Departure {
+        /// Others are still waiting: the read goes on for them.
+        case othersRemain
+        /// That was the last one. Whatever this pass owns is now owed to
+        /// nobody.
+        case lastOneOut
+    }
+
+    private struct State {
+        /// Tickets handed out and not yet answered — whether or not their
+        /// caller has suspended yet.
+        var waiting: Set<Int> = []
+        var attached: [Int: Waiter] = [:]
+        var nextTicket = 0
+        /// The answer, once there is one. Doubly optional: the outer layer is
+        /// "has this pass finished", the inner one "was anything playing".
+        var answer: NowPlayingSnapshot??
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var hasWaiters: Bool { state.withLock { !$0.waiting.isEmpty } }
+
+    var waiterCount: Int { state.withLock { $0.waiting.count } }
+
+    /// Claims a place on this pass.
+    func reserve() -> Int {
+        state.withLock { s in
+            let ticket = s.nextTicket
+            s.nextTicket += 1
+            s.waiting.insert(ticket)
+            return ticket
+        }
+    }
+
+    /// Hands over the continuation to resume when the pass is done — or
+    /// straight away, if the pass finished or the caller gave up first.
+    func attach(_ continuation: Waiter, to ticket: Int) {
+        let answerNow = state.withLock { s -> NowPlayingSnapshot?? in
+            if let answer = s.answer {
+                s.waiting.remove(ticket)
+                return .some(answer)
+            }
+            guard s.waiting.contains(ticket) else { return .some(nil) }
+            s.attached[ticket] = continuation
+            return nil
+        }
+        if let answerNow { continuation.resume(returning: answerNow) }
+    }
+
+    /// Takes one waiter off the pass, answering it with nothing.
+    @discardableResult
+    func leave(_ ticket: Int) -> Departure {
+        let (continuation, remaining) = state.withLock { s -> (Waiter?, Bool) in
+            s.waiting.remove(ticket)
+            return (s.attached.removeValue(forKey: ticket), !s.waiting.isEmpty)
+        }
+        continuation?.resume(returning: nil)
+        return remaining ? .othersRemain : .lastOneOut
+    }
+
+    /// The pass is over. Everyone still waiting gets the same answer, and
+    /// anyone who joins afterwards gets it immediately rather than hanging.
+    func finish(with answer: NowPlayingSnapshot?) {
+        let waiters = state.withLock { s -> [Waiter] in
+            s.answer = .some(answer)
+            s.waiting.removeAll()
+            defer { s.attached.removeAll() }
+            return Array(s.attached.values)
+        }
+        for waiter in waiters { waiter.resume(returning: answer) }
     }
 }

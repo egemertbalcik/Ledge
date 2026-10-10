@@ -914,19 +914,7 @@ public struct TimerCardView: View {
         height: CGFloat = 36,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.cardFigure)
-                .foregroundStyle(tint ?? .white.opacity(0.9))
-                .frame(maxWidth: .infinity)
-                .frame(height: height)
-                .background(Capsule().fill((tint ?? .white).opacity(tint == nil ? 0.13 : 0.24)))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(PressableCircleStyle())
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.4)
-        .accessibilityLabel(label)
+        CardCapsuleButton(label, tint: tint, enabled: enabled, height: height, action: action)
     }
 
 /// `m:ss`, or `h:mm:ss` past an hour.
@@ -942,6 +930,51 @@ public struct TimerCardView: View {
             return String(format: "%d:%02d:%02d", hours, minutes, secs)
         }
         return String(format: "%d:%02d", minutes, secs)
+    }
+}
+
+/// The Live Activity's button, extracted so a second card can wear the same
+/// one rather than redraw it.
+///
+/// Lifted out of `TimerCardView` unchanged — same font, same wash, same
+/// target — when Keep Awake needed Start, End, Done and Resume. Two hand-kept
+/// copies of a control is how two cards end up a point apart from each other.
+struct CardCapsuleButton: View {
+
+    private let label: String
+    private let tint: Color?
+    private let enabled: Bool
+    private let height: CGFloat
+    private let action: () -> Void
+
+    init(
+        _ label: String,
+        tint: Color?,
+        enabled: Bool = true,
+        height: CGFloat = 36,
+        action: @escaping () -> Void
+    ) {
+        self.label = label
+        self.tint = tint
+        self.enabled = enabled
+        self.height = height
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.cardFigure)
+                .foregroundStyle(tint ?? .white.opacity(0.9))
+                .frame(maxWidth: .infinity)
+                .frame(height: height)
+                .background(Capsule().fill((tint ?? .white).opacity(tint == nil ? 0.13 : 0.24)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(PressableCircleStyle())
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
     }
 }
 

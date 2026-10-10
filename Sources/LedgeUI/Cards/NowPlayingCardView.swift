@@ -48,11 +48,21 @@ public struct DisplayLevelOption: Identifiable, Equatable {
 /// Transport actions the card can invoke. Supplied by the shell so `LedgeUI`
 /// stays free of the system layer.
 public struct NowPlayingActions {
-    public var playPause: () -> Void
-    public var next: () -> Void
-    public var previous: () -> Void
+    /// Presses the transport. The card shows what was asked for only if this
+    /// says something actually left the app — a press the player's queue
+    /// refused changed nothing, and a card that moved anyway was telling the
+    /// user something had happened when nothing had.
+    ///
+    /// `Bool` rather than the system layer's own answer, because `LedgeUI`
+    /// takes values and knows nothing about how a command is sent.
+    public var playPause: () -> Bool
+    public var next: () -> Bool
+    public var previous: () -> Bool
     /// Seek to a fraction of the track, 0...1.
-    public var seek: (Double) -> Void
+    ///
+    /// - Returns: whether anything left the app. A refused seek must not move
+    ///   the bar: the player was never asked, so there is nothing coming.
+    public var seek: (Double) -> Bool
     /// Synthesized band levels for the equalizer — `LevelSimulator`'s musical
     /// motion seeded by the track, never a recording — and empty when the
     /// animation is switched off. Pulled by the equalizer's own frame timer so
@@ -66,9 +76,17 @@ public struct NowPlayingActions {
     public var selectOutput: (UInt32) -> Void
     /// Sets one output device's own volume, 0...1.
     public var setOutputVolume: (UInt32, Double) -> LevelFeedback?
-    /// Latches a drag in flight, so the overlay stays open while the pointer
-    /// wanders off the row being dragged.
-    public var setDragging: (Bool) -> Void
+    /// Takes the drag latch, so the overlay stays open while the pointer
+    /// wanders off the row being dragged, and hands back the drag's token.
+    ///
+    /// A token rather than a plain flag because the card is replaced on every
+    /// track change and a route row disappears with its device: the view that
+    /// goes away has to let go of the latch, and must not let go of a drag
+    /// that has meanwhile begun somewhere else. See `DragLatch`.
+    public var beginDrag: () -> Int
+
+    /// Lets go of the latch, if this is still the drag holding it.
+    public var endDrag: (Int) -> Void
     /// Reports how many destination rows the route menu is showing, or 0 when
     /// it closes. The shell sizes its hit region from this, so the clickable
     /// area grows with the card rather than clicks falling through the window.
@@ -79,10 +97,10 @@ public struct NowPlayingActions {
     public var openOwningApp: () -> Void
 
     public init(
-        playPause: @escaping () -> Void = {},
-        next: @escaping () -> Void = {},
-        previous: @escaping () -> Void = {},
-        seek: @escaping (Double) -> Void = { _ in },
+        playPause: @escaping () -> Bool = { true },
+        next: @escaping () -> Bool = { true },
+        previous: @escaping () -> Bool = { true },
+        seek: @escaping (Double) -> Bool = { _ in false },
         audioLevels: @escaping () -> [Double] = { [] },
         chooseOutput: @escaping () -> Void = {},
         outputs: @escaping () -> [AudioOutputOption] = { [] },
@@ -90,7 +108,8 @@ public struct NowPlayingActions {
         setOutputVolume: @escaping (UInt32, Double) -> LevelFeedback? = { _, _ in nil },
         setRoutePickerRows: @escaping (Int) -> Void = { _ in },
         openOwningApp: @escaping () -> Void = {},
-        setDragging: @escaping (Bool) -> Void = { _ in }
+        beginDrag: @escaping () -> Int = { 0 },
+        endDrag: @escaping (Int) -> Void = { _ in }
     ) {
         self.playPause = playPause
         self.next = next
@@ -103,7 +122,8 @@ public struct NowPlayingActions {
         self.setOutputVolume = setOutputVolume
         self.setRoutePickerRows = setRoutePickerRows
         self.openOwningApp = openOwningApp
-        self.setDragging = setDragging
+        self.beginDrag = beginDrag
+        self.endDrag = endDrag
     }
 }
 
@@ -119,15 +139,33 @@ public struct NowPlayingCardView: View {
 
     /// While a drag is in progress the bar follows the finger rather than the
     /// player, otherwise the next poll would yank the handle back mid-gesture.
-    @State private var scrubFraction: Double?
-    /// The song the scrub began on, so a seek cannot land on its successor.
-    @State private var scrubbingTrack: String?
+    /// The song it grabbed travels with it — see `ScrubGrip`.
+    @State private var grip = ScrubGrip()
+
+    /// Where the bar points between letting go and the player agreeing.
+    ///
+    /// It used to be a flat 600ms hold: the bar went where you put it, fell
+    /// back to the last reading — which for a player that had not acted yet
+    /// was the position *before* the drag — and arrived a second later. One
+    /// seek drawn as three movements, the middle one backwards. The rule now
+    /// waits for the player rather than for a clock; see `SeekIntent`.
+    @State private var seek = SeekIntent()
+
+    /// Wakes the bar when the seek's deadline passes, for the case where no
+    /// reading is coming to wake it — a paused player, asked to move, that
+    /// never answers.
+    @State private var seekDeadline: Task<Void, Never>?
+    @State private var seekTick = 0
 
     /// Which song is on, for the purpose of "is this still the same one".
-    /// Title and artist rather than the artwork key: a track with no cover has
-    /// no key, and two songs from one album share theirs.
-    private var songKey: String { "\(payload.title)\u{1F}\(payload.artist)" }
-    @State private var clearTask: Task<Void, Never>?
+    ///
+    /// The player's own identity for it where there is one. Title and artist
+    /// are the fallback and used to be the whole answer, which cannot tell two
+    /// recordings of the same piece apart — and for a while the *artwork* key
+    /// stood in here, which could not tell a late cover from a new song.
+    private var songKey: String {
+        payload.itemKey ?? "\(payload.title)\u{1F}\(payload.artist)"
+    }
 
     /// Optimistic favourite state: the button reflects the tap immediately, and
     /// the real state (if the player ever reports it) reconciles on the payload.
@@ -160,6 +198,10 @@ public struct NowPlayingCardView: View {
     /// Levels being dragged right now, by device. The poll re-reads the real
     /// level every second, which would otherwise yank the fill back mid-slide.
     @State private var draggedLevels: [UInt32: Double] = [:]
+
+    /// The drag this view is holding the latch for, if it is holding one.
+    /// Only the token taken here is ever given back — see `DragLatch`.
+    @State private var dragToken: Int?
     /// Snapshot of the route menu's destinations, taken when it opens.
     @State private var routeOptions: [AudioOutputOption] = []
 
@@ -211,9 +253,85 @@ public struct NowPlayingCardView: View {
     private func closeOutputs() {
         isShowingOutputs = false
         actions.setRoutePickerRows(0)
+        // The list going away takes its drags with it. A volume drag whose row
+        // is no longer on screen cannot end in `onEnded`, and the latch it
+        // took would otherwise be held until something unrelated cleared it.
+        draggedLevels.removeAll()
+        releaseDrag()
     }
 
-    private var displayedFraction: Double { scrubFraction ?? payload.progress }
+    /// Takes the drag latch, once, for whichever gesture asked first.
+    private func holdDrag() {
+        guard dragToken == nil else { return }
+        dragToken = actions.beginDrag()
+    }
+
+    /// Lets go of the latch this view took, and of nothing else. A view that
+    /// has already been replaced releasing whatever happens to be latched is
+    /// how an old card could end a drag that had just begun on its successor.
+    private func releaseDrag() {
+        _ = grip.released(on: songKey)
+        guard let token = dragToken else { return }
+        dragToken = nil
+        actions.endDrag(token)
+    }
+
+    /// Everything this view was holding on to, let go of together.
+    ///
+    /// The latch, the levels being dragged, the pending scrub position and the
+    /// two timers that would have cleared it — all of them outlive the view
+    /// otherwise, and the latch outliving it is what kept the notch open and
+    /// eating clicks.
+    private func letGoOfEverything() {
+        closeOutputs()
+        releaseDrag()
+        draggedLevels.removeAll()
+        overrideExpiry?.cancel()
+        overrideExpiry = nil
+        seekDeadline?.cancel()
+        seekDeadline = nil
+    }
+
+    private var displayedFraction: Double {
+        // The pointer is down on *this* song: the bar follows the finger and
+        // nothing else. A fraction measured against the song before this one
+        // is not shown at all — it was a position in a different length.
+        if let held = grip.displayed(on: songKey) { return held }
+        // `seekTick` is read so the deadline's wake-up redraws this.
+        _ = seekTick
+        guard payload.duration > 0 else { return payload.progress }
+        let shown = seek.displayed(
+            reported: payload.elapsed, on: songKey, at: Self.now()
+        )
+        return min(max(shown / payload.duration, 0), 1)
+    }
+
+    /// Asks the player to move, and holds the bar there until it agrees.
+    ///
+    /// Refused while a pointer is on the bar. The other way in is VoiceOver's
+    /// step, and the two running at once left them disagreeing about where the
+    /// bar was: the step seeks the player while the drag goes on drawing the
+    /// finger, and then the drag's own seek lands on top of it.
+    private func ask(toSeek fraction: Double) {
+        guard payload.duration > 0, !grip.isHeld else { return }
+        let position = payload.duration * fraction
+        seek.asked(for: position, from: payload.elapsed, on: songKey, at: Self.now())
+        // The answer first, the optimism second: a press the queue refused
+        // moved the bar anyway, to a place the player was never asked to go.
+        if !actions.seek(fraction) { seek.refused() }
+        armSeekDeadline()
+    }
+
+    /// Comes back when the hold would have expired, because the rule is
+    /// clockless and something has to look.
+    private func armSeekDeadline() {
+        seekDeadline?.cancel()
+        seekDeadline = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(SeekIntent.deadline))
+            guard !Task.isCancelled else { return }
+            seekTick &+= 1
+        }
+    }
     private var isPlayingDisplayed: Bool {
         // `intentTick` is read so the deadline's wake-up redraws this.
         _ = intentTick
@@ -302,7 +420,11 @@ public struct NowPlayingCardView: View {
         // The card outlives a collapse, so without this it would reopen straight
         // back into the picker rather than the player — and the shell would keep
         // sizing its hit region for a menu that is not on screen.
-        .onDisappear { closeOutputs() }
+        // The card outlives a collapse, and it is also replaced outright on
+        // every track change — which is not a phase change, so nothing else
+        // cleans up after it. A gesture only lets go in `onEnded`, and a view
+        // taken off screen mid-drag never gets one.
+        .onDisappear { letGoOfEverything() }
     }
 
     /// Wraps content in the doorway to the owning app, or leaves it alone.
@@ -358,8 +480,23 @@ public struct NowPlayingCardView: View {
                 // play/pause override belonged to the old one. The activity id
                 // is the *player*, not the track, so it does not reset on its
                 // own.
-                .onChange(of: payload.artworkKey ?? "\(payload.title)|\(payload.artist)") { _, _ in
+                .onChange(of: songKey) { _, _ in
                     clearOverride()
+                    // Both the position asked for and the one under the
+                    // pointer belonged to the song before this one. A fraction
+                    // measured against that song's length says nothing about
+                    // this one, so the bar goes back to showing the player at
+                    // once rather than drawing a borrowed position until the
+                    // finger lifts.
+                    seek.itemChanged()
+                    grip.itemChanged()
+                }
+                // Where the player says it is. This is what ends a hold —
+                // arrival has to be remembered, or a player drifting on past
+                // the target afterwards reads as never having arrived and the
+                // bar jumps backwards to the asked-for position.
+                .onChange(of: payload.elapsed) { _, position in
+                    seek.reconcile(reported: position, on: songKey, at: Self.now())
                 }
 
                 Spacer(minLength: 8)
@@ -460,34 +597,27 @@ public struct NowPlayingCardView: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             guard proxy.size.width > 0 else { return }
-                            clearTask?.cancel()
-                            clearTask = nil
+                            // Grabbing the bar again abandons whatever the
+                            // last seek was still waiting for: the finger is
+                            // the newer answer.
+                            seek.refused()
+                            seekDeadline?.cancel()
+                            seekDeadline = nil
                             // The same latch the volume rows take: without it
                             // the card could close under a pointer that
                             // wandered off the shape mid-scrub, and the seek
                             // never arrived.
-                            if scrubbingTrack == nil {
-                                scrubbingTrack = songKey
-                                actions.setDragging(true)
-                            }
-                            scrubFraction = min(max(value.location.x / proxy.size.width, 0), 1)
+                            holdDrag()
+                            grip.moved(to: value.location.x / proxy.size.width, on: songKey)
                         }
                         .onEnded { _ in
                             // Only if it is still the song that was grabbed. A
                             // track ending mid-drag would otherwise seek the
                             // one that replaced it to wherever the pointer
                             // happened to be.
-                            if let fraction = scrubFraction, scrubbingTrack == songKey {
-                                actions.seek(fraction)
-                            }
-                            scrubbingTrack = nil
-                            actions.setDragging(false)
-                            clearTask?.cancel()
-                            clearTask = Task { @MainActor in
-                                try? await Task.sleep(for: .milliseconds(600))
-                                guard !Task.isCancelled else { return }
-                                scrubFraction = nil
-                            }
+                            let fraction = grip.released(on: songKey)
+                            releaseDrag()
+                            if let fraction { ask(toSeek: fraction) }
                         }
                 )
             }
@@ -502,15 +632,7 @@ public struct NowPlayingCardView: View {
             // not yank the bar back before the player has caught up.
             .accessibilityAdjustableAction { direction in
                 let step: Double = direction == .increment ? 0.05 : -0.05
-                let next = min(max(displayedFraction + step, 0), 1)
-                scrubFraction = next
-                actions.seek(next)
-                clearTask?.cancel()
-                clearTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(600))
-                    guard !Task.isCancelled else { return }
-                    scrubFraction = nil
-                }
+                ask(toSeek: min(max(displayedFraction + step, 0), 1))
             }
 
             // The minus sign reads as "time remaining", matching Apple's player.
@@ -534,22 +656,26 @@ public struct NowPlayingCardView: View {
             Color.clear.frame(width: 30, height: 28)
             Spacer(minLength: 0)
             glyph("backward.fill", size: 13) {
+                guard actions.previous() else { return }
                 navForward = false
                 navToken &+= 1
-                actions.previous()
             }
             .accessibilityLabel("Previous track")
             Spacer(minLength: 0)
             glyph(isPlayingDisplayed ? "pause.fill" : "play.fill", size: 17) {
-                setOptimistically(!isPlayingDisplayed)
-                actions.playPause()
+                // Asked first, shown second. Showing it first meant a refused
+                // press still flipped the glyph, and the card then sat on a
+                // state no player was ever told to reach.
+                let displayed = isPlayingDisplayed
+                guard actions.playPause() else { return }
+                setOptimistically(!displayed)
             }
             .accessibilityLabel(isPlayingDisplayed ? "Pause" : "Play")
             Spacer(minLength: 0)
             glyph("forward.fill", size: 13) {
+                guard actions.next() else { return }
                 navForward = true
                 navToken &+= 1
-                actions.next()
             }
             .accessibilityLabel("Next track")
             Spacer(minLength: 0)
@@ -651,11 +777,18 @@ public struct NowPlayingCardView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(for: Self.routeRefreshInterval)
                 guard !Task.isCancelled else { return }
-                // Not mid-drag: the dragged level is the truth until the
-                // pointer lifts, and the device is still catching up to it.
-                guard draggedLevels.isEmpty else { continue }
-                let fresh = actions.outputs()
-                if fresh != routeOptions { routeOptions = fresh }
+                // The list refreshes through a drag rather than stopping for
+                // one: the drawn level already prefers `draggedLevels`, so the
+                // pointer's value cannot be yanked back by a re-read. What the
+                // merge protects is the *row* — a device that drops out of
+                // range mid-slide must not take its own gesture off screen
+                // with it, because a gesture removed that way never ends and
+                // the card was left letting go of the latch on its behalf,
+                // closing the notch under a finger that was still down.
+                let rows = RoutePickerRows.merging(
+                    actions.outputs(), into: routeOptions, dragging: Set(draggedLevels.keys)
+                )
+                if rows != routeOptions { routeOptions = rows }
             }
         }
     }
@@ -781,7 +914,7 @@ public struct NowPlayingCardView: View {
                         guard abs(value.translation.width) > Self.dragThreshold else { return }
                         // Latch first: the shell must know a drag is in flight
                         // before the pointer can wander off the shape mid-slide.
-                        actions.setDragging(true)
+                        holdDrag()
                         let next = min(max(value.location.x / width, 0), 1)
                         // The latched drag level is the device's answer, so a
                         // clamped or refused write shows where the output
@@ -822,7 +955,7 @@ public struct NowPlayingCardView: View {
                             routeOptions = actions.outputs()
                         }
                         draggedLevels[option.id] = nil
-                        actions.setDragging(false)
+                        releaseDrag()
                     }
             )
         }
@@ -986,10 +1119,19 @@ struct NowPlayingArtwork: View {
     /// Waits briefly for a slow artwork before flipping to the placeholder, so
     /// the flip is never late — but also never shows filler when art is coming.
     @State private var graceTask: Task<Void, Never>?
+    /// The turn in progress. Held so it can be stopped when the view goes:
+    /// a flip left running against a card that is no longer on screen is work
+    /// nobody is watching, and it comes back at the end to start another one.
+    @State private var flipTask: Task<Void, Never>?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var trackKey: String { payload.artworkKey ?? payload.title }
+    /// Which song this is — not which cover it is carrying. The turn belongs
+    /// to a song changing; a cover arriving or being replaced updates the face
+    /// where it stands, which is what `artworkArrived` is for.
+    private var trackKey: String {
+        payload.itemKey ?? "\(payload.title)\u{1F}\(payload.artist)"
+    }
 
     private func decodedImage() -> NSImage? {
         guard let data = payload.artworkData else { return nil }
@@ -1009,6 +1151,7 @@ struct NowPlayingArtwork: View {
             .onChange(of: flipToken) { _, _ in recordDirection() }
             .onChange(of: trackKey) { _, _ in trackChanged() }
             .onChange(of: payload.artworkData) { _, _ in artworkArrived() }
+            .onDisappear { letGoOfTheTurn() }
     }
 
     @ViewBuilder
@@ -1070,6 +1213,23 @@ struct NowPlayingArtwork: View {
     /// Art landed. If the turn is still in the air it will pick this up when
     /// it reaches edge-on; if the flip is long over, the face changes in
     /// place — no second turn for one song.
+    /// Stops everything this view had in flight.
+    ///
+    /// A card is replaced on every track change, and none of these tasks is
+    /// tied to its lifetime: the turn, the grace that waits for a slow cover,
+    /// and the expiry that forgets which way the last press pointed all ran on
+    /// against a view that had gone.
+    private func letGoOfTheTurn() {
+        flipTask?.cancel()
+        flipTask = nil
+        graceTask?.cancel()
+        graceTask = nil
+        pendingExpiry?.cancel()
+        pendingExpiry = nil
+        isFlipping = false
+        angle = 0
+    }
+
     private func artworkArrived() {
         seedIfNeeded()
         let image = decodedImage()
@@ -1128,7 +1288,7 @@ struct NowPlayingArtwork: View {
 
         let out: Double = forward ? 90 : -90
         withAnimation(.easeIn(duration: 0.16)) { angle = out }
-        Task { @MainActor in
+        flipTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(160))
 
             // Edge-on: nothing of the card is visible, so this is the moment to

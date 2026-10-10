@@ -28,8 +28,28 @@ final class SerialCommandRunner: @unchecked Sendable {
     /// presses are noise.
     let capacity: Int
 
+    /// How long a command may wait before it stops meaning what it meant.
+    ///
+    /// Each command is a subprocess with a five-second deadline, and eight may
+    /// be waiting, so against a player that has stopped answering the last one
+    /// admitted could run the best part of a minute after the button was
+    /// pressed. A play/pause landing then toggles whatever state the player
+    /// has reached since, which is as likely to be wrong as right; a next-track
+    /// skips a song nobody asked to skip. Four seconds is about the longest a
+    /// press can wait and still be the press the user made.
+    let maxWait: TimeInterval
+
+    /// The clock. Injected so expiry can be tested at its boundary rather than
+    /// by waiting out real seconds.
+    private let now: @Sendable () -> TimeInterval
+
+    /// How many started commands the diagnostic history keeps. Comfortably
+    /// more than any burst of presses a person can produce, and a fixed cost
+    /// rather than a growing one.
+    static let rememberedStarts = 256
+
     private struct State {
-        var pending: [(sequence: Int, work: Work)] = []
+        var pending: [(sequence: Int, queuedAt: TimeInterval, work: Work)] = []
         /// Whether a consumer is already draining the queue. Exactly one runs.
         var consuming = false
         var nextSequence = 0
@@ -37,14 +57,27 @@ final class SerialCommandRunner: @unchecked Sendable {
         var peakConcurrency = 0
         var refusals = 0
         var completed = 0
+        /// Commands dropped for having waited too long to still mean anything.
+        var expired = 0
         /// The order work actually started in, for tests.
+        ///
+        /// Bounded, oldest dropped first. The queue itself has a bound and the
+        /// transport is not hot, but this grew by one entry per press for the
+        /// life of the process — a diagnostic that nothing read in production
+        /// quietly keeping every command number since launch.
         var startedOrder: [Int] = []
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
 
-    init(capacity: Int = 8) {
+    init(
+        capacity: Int = 8,
+        maxWait: TimeInterval = 4,
+        now: @escaping @Sendable () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
+    ) {
         self.capacity = capacity
+        self.maxWait = maxWait
+        self.now = now
     }
 
     /// Queues `work` behind whatever is already waiting.
@@ -55,12 +88,13 @@ final class SerialCommandRunner: @unchecked Sendable {
     func submit(_ work: @escaping Work) -> Bool {
         enum Admission { case refused, queued, queuedAndStart }
 
+        let queuedAt = now()
         let admission = state.withLock { s -> Admission in
             guard s.pending.count < capacity else {
                 s.refusals += 1
                 return .refused
             }
-            s.pending.append((s.nextSequence, work))
+            s.pending.append((s.nextSequence, queuedAt, work))
             s.nextSequence += 1
             guard !s.consuming else { return .queued }
             s.consuming = true
@@ -83,16 +117,36 @@ final class SerialCommandRunner: @unchecked Sendable {
     /// is empty, handing the flag back so the next `submit` starts a new one.
     private func consume() async {
         while true {
-            let next = state.withLock { s -> (Int, Work)? in
+            let startedAt = now()
+            let (next, dropped) = state.withLock { s -> ((Int, Work)?, Int) in
+                // Anything that has waited past `maxWait` is thrown away
+                // rather than run. Order survives: the queue is only ever
+                // drained from the front, so dropping a stale head cannot
+                // reorder what is behind it.
+                var dropped = 0
+                while let head = s.pending.first, startedAt - head.queuedAt > maxWait {
+                    s.pending.removeFirst()
+                    s.expired += 1
+                    dropped += 1
+                }
                 guard !s.pending.isEmpty else {
                     s.consuming = false
-                    return nil
+                    return (nil, dropped)
                 }
                 let item = s.pending.removeFirst()
                 s.running += 1
                 s.peakConcurrency = max(s.peakConcurrency, s.running)
                 s.startedOrder.append(item.sequence)
-                return (item.sequence, item.work)
+                if s.startedOrder.count > Self.rememberedStarts {
+                    s.startedOrder.removeFirst(s.startedOrder.count - Self.rememberedStarts)
+                }
+                return ((item.sequence, item.work), dropped)
+            }
+            if dropped > 0 {
+                Self.log.notice("""
+                    dropping \(dropped, privacy: .public) command(s) that waited \
+                    more than \(Int(self.maxWait), privacy: .public)s
+                    """)
             }
             guard let (_, work) = next else { return }
 
@@ -112,6 +166,7 @@ final class SerialCommandRunner: @unchecked Sendable {
     var peakConcurrency: Int { state.withLock { $0.peakConcurrency } }
     var refusals: Int { state.withLock { $0.refusals } }
     var completed: Int { state.withLock { $0.completed } }
+    var expired: Int { state.withLock { $0.expired } }
     var startedOrder: [Int] { state.withLock { $0.startedOrder } }
 
     /// Waits for everything queued so far to finish.

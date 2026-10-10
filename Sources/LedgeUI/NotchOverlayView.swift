@@ -24,7 +24,12 @@ public final class NotchPresentation {
                 waveformSeed = nil
                 return
             }
-            waveformSeed = LevelSimulator.seed(for: payload.artworkKey ?? "\(payload.title)|\(payload.artist)")
+            // Seeded from the song. Seeded from the cover, a replacement
+            // arriving mid-track restarted the waves for no reason anyone
+            // watching could have named.
+            waveformSeed = LevelSimulator.seed(
+                for: payload.itemKey ?? "\(payload.title)|\(payload.artist)"
+            )
         }
     }
 

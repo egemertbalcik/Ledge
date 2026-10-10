@@ -72,6 +72,29 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
         self.kind = kind
     }
 
+    /// Which cover this item is carrying, as distinct from which item it is.
+    ///
+    /// The system's artwork id where there is one, the artwork URL otherwise,
+    /// and nil when there is no cover at all. Kept apart from `trackKey` on
+    /// purpose: covers arrive late, get replaced by better ones, and are
+    /// shared between the songs of an album. None of that is a song changing.
+    public var artworkRevision: String? {
+        if let artworkID, !artworkID.isEmpty { return artworkID }
+        return artworkURL?.absoluteString
+    }
+
+    /// The key this item's cover is filed under: the item, and which cover it
+    /// has.
+    ///
+    /// The cache was keyed on the item alone, so a revised cover for the same
+    /// song found the old image already there and stopped — the better art was
+    /// fetched, decoded, and then never shown. With the revision in the key a
+    /// replacement is a miss, which is what makes it actually replace.
+    public var coverKey: String {
+        guard let artworkRevision else { return trackKey }
+        return "\(trackKey)#\(artworkRevision)"
+    }
+
     /// Compares artwork by identity, never by bytes.
     ///
     /// This runs on every poll. A cover image is hundreds of kilobytes, and
@@ -162,12 +185,48 @@ public enum NowPlayingCommand: Equatable, Sendable {
     case seek(TimeInterval)
 }
 
+/// What became of a transport command.
+///
+/// Three answers rather than a Bool, because the two ways of not being
+/// confirmed mean opposite things to the card and must not share a value. A
+/// press that was refused changed nothing anywhere, so nothing downstream may
+/// animate, mark a cache stale or grant a source handover on its account. A
+/// press that went out through MediaRemote did happen — it simply cannot be
+/// confirmed, and reading that as a refusal would freeze the transport for
+/// every player without a scripting dictionary, which is every browser.
+public enum NowPlayingDispatch: Equatable, Sendable {
+
+    /// Queued for the player named on the card, in order, and it will run.
+    case queued
+
+    /// Sent, but through MediaRemote, which acts on whatever the system
+    /// considers now-playing. Nothing comes back to say it landed.
+    case unconfirmed
+
+    /// Refused: the player's queue is full, so nothing was sent at all.
+    case refused
+
+    /// Refused because the only way left to reach this player would have been
+    /// a command the system aims somewhere else.
+    ///
+    /// Its own case rather than a kind of `refused`, because this one is not
+    /// about a player falling behind: it is about not being able to address
+    /// the player at all, which is a standing property of that player on this
+    /// machine and not a passing condition.
+    case wrongPlayer
+
+    /// Whether anything left the app. The card may only show what it asked
+    /// for when something did.
+    public var wasSent: Bool { self == .queued || self == .unconfirmed }
+}
+
 @MainActor
 public protocol NowPlayingCommanding: AnyObject {
-    /// Returns whether the command was dispatched. `false` means the caller
-    /// should not optimistically update the UI.
+    /// Says what became of the command. `.refused` means the caller must not
+    /// optimistically update the UI, mark caches stale or grant a handover —
+    /// nothing was sent.
     @discardableResult
-    func send(_ command: NowPlayingCommand, to bundleID: String) -> Bool
+    func send(_ command: NowPlayingCommand, to bundleID: String) -> NowPlayingDispatch
 }
 
 /// Fixed data, for previews and for developing the card without a player.

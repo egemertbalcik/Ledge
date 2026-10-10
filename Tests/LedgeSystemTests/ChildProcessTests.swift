@@ -170,7 +170,10 @@ struct SerialCommandRunnerTests {
 
     @Test("Fifty rapid commands run one at a time, in submission order")
     func fiftyCommandsStaySerial() async {
-        let runner = SerialCommandRunner(capacity: 64)
+        // A frozen clock, because this is about order and nothing else: with a
+        // real one a loaded machine can push the tail of the queue past the
+        // waiting-age bound and expire commands the test still wants to see.
+        let runner = SerialCommandRunner(capacity: 64, now: { 0 })
         let order = OSAllocatedUnfairLock(initialState: [Int]())
 
         // Submitted synchronously and back to back, as a user mashing a button
@@ -215,7 +218,7 @@ struct SerialCommandRunnerTests {
 
     @Test("Pending work never exceeds capacity")
     func pendingStaysBounded() async {
-        let runner = SerialCommandRunner(capacity: 4)
+        let runner = SerialCommandRunner(capacity: 4, now: { 0 })
         let release = OSAllocatedUnfairLock(initialState: false)
         var accepted = 0
 
@@ -239,9 +242,96 @@ struct SerialCommandRunnerTests {
 
     @Test("Submission order survives back-to-back calls from one thread")
     func submissionOrderIsPreserved() async {
-        let runner = SerialCommandRunner(capacity: 128)
+        let runner = SerialCommandRunner(capacity: 128, now: { 0 })
         for _ in 0..<100 { runner.submit {} }
         await runner.drain()
         #expect(runner.startedOrder == Array(0..<100), "order was scheduling order, not submission order")
+    }
+
+    /// Eight commands may wait, each is a subprocess with a five-second
+    /// deadline, and nothing used to bound how long one could sit there. So a
+    /// player that stopped answering could be handed a play/pause from half a
+    /// minute ago — toggling whatever state it had reached since, which is as
+    /// likely to be wrong as right — or a skip nobody still wanted.
+    @Test("A command that waited too long is dropped rather than run late")
+    func staleCommandsExpire() async {
+        let clock = OSAllocatedUnfairLock(initialState: TimeInterval(0))
+        let runner = SerialCommandRunner(
+            capacity: 8, maxWait: 4, now: { clock.withLock { $0 } }
+        )
+        let gate = Gate()
+        let ran = OSAllocatedUnfairLock(initialState: [Int]())
+
+        // The first press is picked up and then sits there — the player is not
+        // answering.
+        #expect(runner.submit { await gate.wait(); ran.withLock { $0.append(0) } })
+        for _ in 0..<10_000 where !gate.isWaiting { await Task.yield() }
+        #expect(gate.isWaiting, "the runner never started the first command")
+
+        // Two more presses queue behind it, ten seconds apart.
+        #expect(runner.submit { ran.withLock { $0.append(1) } })
+        clock.withLock { $0 = 10 }
+        #expect(runner.submit { ran.withLock { $0.append(2) } })
+
+        gate.open()
+        await runner.drain()
+
+        #expect(ran.withLock { $0 } == [0, 2], "a press from ten seconds ago ran anyway")
+        #expect(runner.expired == 1)
+        #expect(runner.completed == 2)
+    }
+}
+
+/// A diagnostic nothing reads in production used to grow by one entry per
+/// press for the life of the process.
+extension SerialCommandRunnerTests {
+
+    @Test("The started-order history stops growing")
+    func startedOrderIsBounded() async {
+        let runner = SerialCommandRunner(capacity: 512, now: { 0 })
+        let presses = SerialCommandRunner.rememberedStarts + 40
+        for _ in 0..<presses { runner.submit {} }
+        await runner.drain()
+
+        #expect(runner.completed == presses, "the bound dropped work, not just its record")
+        #expect(runner.startedOrder.count == SerialCommandRunner.rememberedStarts)
+        #expect(
+            runner.startedOrder.last == presses - 1,
+            "the history kept the oldest entries instead of the newest"
+        )
+    }
+}
+
+/// Holds one piece of work open until the test lets it go, so a backlog can be
+/// built with no clock running anywhere and nothing sleeping.
+private final class Gate: @unchecked Sendable {
+
+    private struct State {
+        var open = false
+        var waiting: [CheckedContinuation<Void, Never>] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var isWaiting: Bool { state.withLock { !$0.waiting.isEmpty } }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let passThrough = state.withLock { s -> Bool in
+                if s.open { return true }
+                s.waiting.append(continuation)
+                return false
+            }
+            if passThrough { continuation.resume() }
+        }
+    }
+
+    func open() {
+        let waiting = state.withLock { s -> [CheckedContinuation<Void, Never>] in
+            s.open = true
+            defer { s.waiting = [] }
+            return s.waiting
+        }
+        for continuation in waiting { continuation.resume() }
     }
 }

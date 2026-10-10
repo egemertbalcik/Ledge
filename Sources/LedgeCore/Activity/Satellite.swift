@@ -47,8 +47,7 @@ extension SatelliteContent {
     /// is exact: 3600 reads "1h" and 3599 reads "59:59", so the tick across
     /// the hour never shows a nonsense "0:59".
     public static func timerLabel(remaining: TimeInterval) -> String {
-        let sane = remaining.isFinite ? min(max(remaining, 0), 359_940) : 0
-        let total = Int(sane.rounded())
+        let total = wholeSeconds(remaining)
         if total >= 3600 {
             let hours = total / 3600
             let minutes = (total % 3600) / 60

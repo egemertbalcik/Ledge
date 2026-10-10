@@ -107,9 +107,17 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
             duration: total,
             appName: name,
             appBundleID: bundle,
-            // Prefer the player's own identity; fall back to the artwork digest,
-            // then to the default metadata key.
-            trackKey: trackID.map { "\(bundle)|\($0)" } ?? artworkID.map { "\(bundle)|\($0)" },
+            // The player's own identity for the item, and the metadata key
+            // when it gives none. Never the artwork.
+            //
+            // The artwork digest used to stand in here, and it made a cover
+            // into a song. A cover arriving a poll late, or being replaced
+            // with a better one, became a track change: the art turned and the
+            // transport's optimistic state was cleared for a song that had not
+            // moved. And the other way round, two songs from one album share a
+            // cover and so became one song — which is how a paused track could
+            // inherit the previous one's retirement and never appear at all.
+            trackKey: trackID.map { "\(bundle)|\($0)" },
             artworkID: artworkID,
             artworkData: artwork.flatMap { Data(base64Encoded: $0) },
             // The system's word when it gives one. When it does not, a thing

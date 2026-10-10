@@ -293,4 +293,169 @@ struct IncumbentTrackTests {
         time += 5
         #expect(await source.snapshot()?.elapsed == 15, "the bar keeps running while the system looks away")
     }
+
+    /// Reads of this source overlap in real use — the provider's steady poll,
+    /// its burst after a transport press and an immediate refresh all ask it —
+    /// and a read is several awaits with cache writes between them.
+    /// Interleaved, the one that started earlier could finish later and commit
+    /// its older answer over the newer one, after which the next several polls
+    /// projected the card from a reading taken before the press.
+    @Test("Overlapping reads take their turn instead of interleaving")
+    func overlappingReadsAreSerialised() async {
+        var steps: [String] = []
+        var asked = 0
+        let adapter = FakeSource(
+            identifier: "adapter",
+            value: snapshot(bundleID: "com.spotify.client", title: "Track")
+        )
+        let composite = CompositeNowPlayingSource(
+            adapter: adapter,
+            scripting: FakeSource(identifier: "scripting"),
+            scriptedSnapshot: { bundleID in
+                asked += 1
+                let n = asked
+                steps.append("start \(n)")
+                // The earlier read is the slower one, which is the ordering
+                // that let it finish last and hand its older position to the
+                // caller that had asked later.
+                for _ in 0..<(n == 1 ? 8 : 1) { await Task.yield() }
+                steps.append("end \(n)")
+                var answer = snapshot(bundleID: bundleID, title: "Track")
+                answer.elapsed = n == 1 ? 10 : 20
+                return answer
+            },
+            scriptingHandles: { $0 == "com.spotify.client" },
+            now: { 0 },
+            // A transport press has just gone out, which is exactly when the
+            // provider reads this source three times in quick succession.
+            lastTransportAt: { 100 }
+        )
+
+        async let earlier = composite.snapshot()
+        async let later = composite.snapshot()
+        let answers = await (earlier, later)
+
+        #expect(steps == ["start 1", "end 1", "start 2", "end 2"], "the reads interleaved: \(steps)")
+        #expect(answers.0?.elapsed == 10)
+        #expect(answers.1?.elapsed == 20, "the later read was handed the earlier reading")
+    }
+}
+
+@Suite("One song keeps one name")
+@MainActor
+struct CompositeSongIdentityTests {
+
+    // The card turns the cover over when the song changes, and it knows the
+    // song by the key the composite publishes. Two sources answer here, and
+    // they name the same song differently: the script knows the player's own
+    // track id, the adapter has only the metadata. A song whose name changes
+    // because the *answer* came from somewhere else is a song change as far as
+    // anything downstream can tell.
+
+    private func spotify(
+        _ title: String = "Song",
+        trackKey: String? = nil,
+        elapsed: TimeInterval = 10
+    ) -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: title,
+            artist: "A",
+            album: "Alb",
+            isPlaying: true,
+            elapsed: elapsed,
+            duration: 200,
+            appName: "Spotify",
+            appBundleID: "com.spotify.client",
+            trackKey: trackKey
+        )
+    }
+
+    @Test("A scripted answer that goes missing does not rename the song")
+    func scriptingSkipDoesNotRenameTheSong() async {
+        // The script answers, then one read does not — it timed out, or the
+        // queue dropped it for being late — then it answers again. The song
+        // never changed.
+        var clock: TimeInterval = 1_000
+        var answers: [NowPlayingSnapshot?] = [
+            spotify(trackKey: "com.spotify.client|id-1"),
+            nil,
+            spotify(trackKey: "com.spotify.client|id-1")
+        ]
+        let adapter = FakeSource(identifier: "adapter", value: spotify())
+        let source = makeComposite(
+            adapter: adapter,
+            scripting: FakeSource(identifier: "scripting"),
+            scripted: { _ in answers.isEmpty ? nil : answers.removeFirst() },
+            now: { clock }
+        )
+
+        let first = await source.snapshot()
+        clock += 60
+        let second = await source.snapshot()
+        clock += 60
+        let third = await source.snapshot()
+
+        #expect(first?.trackKey == second?.trackKey,
+                "the script missing one answer is not a new song")
+        #expect(second?.trackKey == third?.trackKey,
+                "and neither is it coming back")
+    }
+
+    @Test("A different song does get a different name")
+    func realTrackChangeStillRenames() async {
+        // The other half of the rule: keeping a name must not mean keeping it
+        // through an actual track change, or the cover would never turn over
+        // at all.
+        var clock: TimeInterval = 1_000
+        var answers: [NowPlayingSnapshot?] = [
+            spotify("First", trackKey: "com.spotify.client|id-1"),
+            spotify("Second", trackKey: "com.spotify.client|id-2")
+        ]
+        let adapter = FakeSource(identifier: "adapter", value: spotify("First"))
+        let source = makeComposite(
+            adapter: adapter,
+            scripting: FakeSource(identifier: "scripting"),
+            scripted: { _ in answers.isEmpty ? nil : answers.removeFirst() },
+            now: { clock }
+        )
+
+        let first = await source.snapshot()
+        clock += 60
+        adapter.value = spotify("Second")
+        let second = await source.snapshot()
+
+        #expect(first?.title == "First")
+        #expect(second?.title == "Second")
+        #expect(first?.trackKey != second?.trackKey,
+                "a new song brings a new name with it")
+    }
+
+    @Test("A script that never names the track still names it the same way twice")
+    func missingTrackIDIsStableAcrossReads() async {
+        // The player answers but has no id for the track, so the name falls
+        // back to the metadata. That has to be the *same* fallback each time.
+        var clock: TimeInterval = 1_000
+        var answers: [NowPlayingSnapshot?] = [
+            spotify(trackKey: "com.spotify.client|id-1"),
+            spotify(trackKey: nil, elapsed: 70),
+            spotify(trackKey: "com.spotify.client|id-1", elapsed: 130)
+        ]
+        let adapter = FakeSource(identifier: "adapter", value: spotify())
+        let source = makeComposite(
+            adapter: adapter,
+            scripting: FakeSource(identifier: "scripting"),
+            scripted: { _ in answers.isEmpty ? nil : answers.removeFirst() },
+            now: { clock }
+        )
+
+        let first = await source.snapshot()
+        clock += 60
+        let second = await source.snapshot()
+        clock += 60
+        let third = await source.snapshot()
+
+        #expect(first?.trackKey == second?.trackKey,
+                "losing the player's own id is not a new song")
+        #expect(second?.trackKey == third?.trackKey)
+    }
 }

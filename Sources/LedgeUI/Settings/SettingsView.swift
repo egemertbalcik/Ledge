@@ -123,6 +123,7 @@ struct SidebarIcon {
         case "focus": SidebarIcon(symbol: "moon.fill", color: .indigo)
         case "weather": SidebarIcon(symbol: "cloud.fill", color: .blue)
         case "timer": SidebarIcon(symbol: "timer", color: .orange)
+        case "keep-awake": SidebarIcon(symbol: "cup.and.saucer", color: .brown)
         case "shelf": SidebarIcon(symbol: "tray.full.fill", color: .teal)
         case "privacy": SidebarIcon(symbol: "video.fill", color: .green)
         case "airpods-proximity": SidebarIcon(symbol: "airpods.gen3", color: .gray)

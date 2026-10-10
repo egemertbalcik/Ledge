@@ -324,14 +324,20 @@ struct CompositeScriptingCacheTests {
         )
         // Music's dictionary has no artwork URL, so the scripted answer has no
         // artwork at all.
+        //
+        // Both sides describe the same song, which is what makes the borrow
+        // legitimate — their *ids* differ, because the adapter's and the
+        // script's come from unrelated namespaces, and that is exactly why the
+        // ids cannot be what decides. (The fixture used to give them different
+        // titles for convenience, which now reads as two different songs and
+        // is refused; see `MediaIdentityTests`.)
         let composite = makeComposite(
             adapter: adapter,
             scripting: FakeSource(identifier: "scripting"),
             clock: clock,
-            scripted: { _ in snapshot(bundleID: music, title: "scripted", trackKey: "m|scripted") }
+            scripted: { _ in snapshot(bundleID: music, trackKey: "m|scripted") }
         )
         let result = try #require(await composite.snapshot())
-        #expect(result.title == "scripted")
         #expect(result.trackKey == "m|scripted", "the scripted identity is kept")
         #expect(result.artworkData == cover)
         #expect(result.artworkID == "cover-1")

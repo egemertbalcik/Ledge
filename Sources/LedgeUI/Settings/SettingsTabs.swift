@@ -437,7 +437,7 @@ struct ProviderDetailPane: View {
     /// because a row that opens a pane holding a single toggle is a click
     /// asking to be a click.
     static func hasSettings(_ id: String) -> Bool {
-        ["timer", "nowplaying", "shelf", "weather"].contains(id)
+        ["timer", "nowplaying", "shelf", "weather", "keep-awake"].contains(id)
     }
 
     static func summary(for id: String) -> String {

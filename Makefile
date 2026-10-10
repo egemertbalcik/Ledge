@@ -132,6 +132,8 @@ notarize: release
 ## — the app's feed URL reads latest/download/appcast.xml, which GitHub
 ## redirects to whichever release is newest. CFBundleVersion is stamped from
 ## the git commit count by bundle.sh, so it rises on its own.
+
+
 appcast:
 	@for dmg in $(DIST_DIR)/*.dmg; do \
 	    xcrun stapler validate -q "$$dmg" >/dev/null 2>&1 || \

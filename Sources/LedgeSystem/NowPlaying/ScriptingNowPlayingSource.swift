@@ -395,7 +395,31 @@ public final class NowPlayingCommander: NowPlayingCommanding {
     /// state — is about to be wrong and must be re-read rather than projected.
     public private(set) static var lastCommandAt: TimeInterval = 0
 
-    public init() {}
+    /// Which player the system itself considers now-playing, read raw — see
+    /// `CompositeNowPlayingSource.systemOwnerBundleID`. Nil means not known.
+    ///
+    /// Injected because this type knows how to *send* commands and nothing
+    /// about who is playing, and because the honest answer comes from the
+    /// adapter rather than from the card's own idea of the current player.
+    /// The default says "not known", which is the safe answer: a commander
+    /// nobody has told anything to refuses to aim an unaddressed command
+    /// rather than firing it at whoever happens to hold the slot.
+    private let systemOwner: @MainActor () -> String?
+
+    /// How an unaddressed command is actually sent. Injected so the whole
+    /// command boundary can be tested — including that nothing is dispatched
+    /// on the paths that must refuse — without touching a real player.
+    private let dispatchGlobally: @MainActor (NowPlayingCommand) -> Void
+
+    public init(
+        systemOwner: @escaping @MainActor () -> String? = { nil },
+        dispatchGlobally: @escaping @MainActor (NowPlayingCommand) -> Void = {
+            MediaRemoteBridge.send($0)
+        }
+    ) {
+        self.systemOwner = systemOwner
+        self.dispatchGlobally = dispatchGlobally
+    }
 
     /// What happened to a command offered to the scripting path.
     ///
@@ -414,7 +438,7 @@ public final class NowPlayingCommander: NowPlayingCommanding {
     }
 
     @discardableResult
-    public func send(_ command: NowPlayingCommand, to bundleID: String) -> Bool {
+    public func send(_ command: NowPlayingCommand, to bundleID: String) -> NowPlayingDispatch {
         // Scripting first, because it is the only path that targets the player
         // actually shown on the card. MediaRemote acts on whatever the system
         // considers now-playing, which can be a different app entirely — press
@@ -422,8 +446,13 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         // and MediaRemote toggles the browser.
         switch sendViaScripting(command, to: bundleID) {
         case .queued:
-            noteDispatch()
-            return true
+            // No stamp here. Admission is not dispatch: the queue holds up to
+            // eight commands and a slow player can leave one waiting seconds.
+            // Stamping on admission told the source its cached answer was
+            // about to be wrong while the player had not yet been spoken to —
+            // so it re-read, got the old state, and cached *that* as fresh.
+            // `sendViaScripting` stamps when the work actually runs.
+            return .queued
 
         case .busy:
             // Dropped on purpose. The player is not keeping up, and the one
@@ -431,18 +460,36 @@ public final class NowPlayingCommander: NowPlayingCommanding {
             // else's player. Nothing was dispatched, so the freshness stamp
             // must not move either.
             Self.log.notice("command dropped: \(bundleID, privacy: .public) has a full queue")
-            return false
+            return .refused
 
         case .unsupported:
-            // No scripting dictionary for this player (a browser, say). Fall
-            // back to MediaRemote and report honestly that we cannot confirm
-            // it landed. Seek used to stop here, because MediaRemote had no
-            // usable symbol for it. `MRMediaRemoteSetElapsedTime` does the job,
-            // so a browser tab can now be scrubbed too — reported as
-            // unconfirmed, since the symbol returns nothing.
+            // No scripting dictionary for this player (a browser, say), so the
+            // only way left is MediaRemote — and MediaRemote has no idea which
+            // player was meant. It acts on whichever one the *system*
+            // considers now-playing, which is the right one exactly when the
+            // system agrees with the card.
+            //
+            // It often does not. A native player with no scripting dictionary
+            // can be held on the card — that is what `heldPlaying` is for —
+            // while a browser tab holds the system's slot, and every press
+            // then went to the tab: pausing a video the user was not looking
+            // at and leaving the card's own player running. Unknown counts as
+            // mismatched; a guess about who owns the slot is the one thing
+            // that must not be acted on here.
+            guard let owner = systemOwner(), owner == bundleID else {
+                Self.log.notice("""
+                    refusing an unaddressed command for \(bundleID, privacy: .public): \
+                    the system is pointing at \(self.systemOwner() ?? "nobody", privacy: .public)
+                    """)
+                return .wrongPlayer
+            }
+            // Reported as unconfirmed even now: the symbol returns nothing, so
+            // the command going out is all that is known about it. Seek used
+            // to stop here for want of a symbol; `MRMediaRemoteSetElapsedTime`
+            // does the job, so a browser tab can be scrubbed too.
             noteDispatch()
-            MediaRemoteBridge.send(command)
-            return false
+            dispatchGlobally(command)
+            return .unconfirmed
         }
     }
 
@@ -451,7 +498,12 @@ public final class NowPlayingCommander: NowPlayingCommanding {
     /// dispatched has invalidated nothing, and moving the stamp for one would
     /// make the source discard a perfectly good reading.
     private func noteDispatch() {
-        Self.lastCommandAt = Date().timeIntervalSinceReferenceDate
+        Self.noteDispatched()
+    }
+
+    /// The same mark, from the queue, at the moment the work actually runs.
+    static func noteDispatched() {
+        lastCommandAt = Date().timeIntervalSinceReferenceDate
     }
 
     func sendViaScripting(
@@ -486,19 +538,13 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         // stopped answering collected one child per press. The queue keeps the
         // order — pause-then-next is not next-then-pause — and refuses once a
         // backlog says the player is not listening.
+        let run = Self.runScript
         let queued = Self.commands.submit {
-            let outcome = await ChildProcess.run(
-                executable: "/usr/bin/osascript",
-                arguments: ["-e", source],
-                timeout: Self.commandTimeout,
-                captureOutput: false
-            )
-            if !outcome.succeeded {
-                Self.log.debug("""
-                    transport command exited \(outcome.status, privacy: .public)\
-                    \(outcome.timedOut ? " (timed out)" : "", privacy: .public)
-                    """)
-            }
+            // The stamp belongs here, where the player is actually spoken to,
+            // and not back at admission: between the two there can be seven
+            // other commands and a player that is not answering.
+            await MainActor.run { Self.noteDispatched() }
+            await run(source)
         }
         return queued ? .queued : .busy
     }
@@ -513,4 +559,26 @@ public final class NowPlayingCommander: NowPlayingCommanding {
     /// A transport command is a single AppleScript verb against a running app.
     /// Longer than this and the player is not answering.
     private static let commandTimeout: TimeInterval = 5
+
+    /// How a queued transport script is actually run.
+    ///
+    /// A `var` for the same reason `commands` is one: a test can take
+    /// `osascript`'s place and watch *when* the work happens, which is the
+    /// whole point of stamping at dispatch rather than at admission — and it
+    /// can do so without spawning a subprocess at a player the user is
+    /// listening to.
+    static var runScript: @Sendable (String) async -> Void = { source in
+        let outcome = await ChildProcess.run(
+            executable: "/usr/bin/osascript",
+            arguments: ["-e", source],
+            timeout: commandTimeout,
+            captureOutput: false
+        )
+        if !outcome.succeeded {
+            log.debug("""
+                transport command exited \(outcome.status, privacy: .public)\
+                \(outcome.timedOut ? " (timed out)" : "", privacy: .public)
+                """)
+        }
+    }
 }

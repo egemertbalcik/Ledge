@@ -125,6 +125,9 @@ extension Activity {
     /// - **Levels and the shelf** are control surfaces. Neither has news.
     /// - **A calendar with nothing imminent** is a reference, not an event;
     ///   only a meeting inside the hour earns the ears.
+    /// - **Keep Awake** rests only while it is holding the Mac awake. Its
+    ///   Ready card is a launcher like the timer's, and its Finished card is a
+    ///   sentence to read once, not a standing fact to watch.
     ///
     /// Announcements are not covered by this rule — a peek is explicitly news
     /// and shows whatever it is announcing, including a shelf drop.

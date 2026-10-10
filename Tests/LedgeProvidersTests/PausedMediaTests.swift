@@ -73,6 +73,59 @@ struct PausedMediaTests {
         #expect(retracted.count == 1, "and is taken away once it is stale")
     }
 
+    @Test("A card that has been retired does not come back on the next reading")
+    func retiredCardStaysRetired() async {
+        var clock: TimeInterval = 1000
+        let source = ScriptedNowPlayingSource()
+        let provider = provider(source, now: { clock })
+
+        source.current = track("Bad Habit", playing: false)
+        let events = await collect(provider) {
+            await provider.refreshNow()
+            clock += NowPlayingProvider.pausedCardLifetime + 1
+            // Retired here.
+            await provider.refreshNow()
+            // And read again, twice, with nobody having touched anything and
+            // the player saying exactly what it said before. Retiring used to
+            // forget the track's pause date, so the very next reading found
+            // nothing to measure, started a fresh quarter of an hour, and put
+            // the card the user had just watched expire straight back up.
+            await provider.refreshNow()
+            clock += 60
+            await provider.refreshNow()
+        }
+
+        let afterRetirement = events
+            .drop { if case .retract = $0 { return false } else { return true } }
+            .dropFirst()
+        #expect(
+            !afterRetirement.contains { if case .publish = $0 { return true } else { return false } },
+            "the card came back after it had been retired"
+        )
+    }
+
+    @Test("Playing the retired track again brings its card back")
+    func playingAgainUnretires() async {
+        var clock: TimeInterval = 1000
+        let source = ScriptedNowPlayingSource()
+        let provider = provider(source, now: { clock })
+
+        source.current = track("Bad Habit", playing: false)
+        let events = await collect(provider) {
+            await provider.refreshNow()
+            clock += NowPlayingProvider.pausedCardLifetime + 1
+            await provider.refreshNow()
+            // Somebody came back and pressed play. Retirement is for a track
+            // nobody returned to, and this one was returned to.
+            source.current = track("Bad Habit", playing: true)
+            await provider.refreshNow()
+        }
+
+        if case .publish = events.last {} else {
+            Issue.record("playing again left the card retired: \(String(describing: events.last))")
+        }
+    }
+
     @Test("Pressing play, or skipping a track, resets the clock")
     func activityResetsTheClock() async {
         var clock: TimeInterval = 1000

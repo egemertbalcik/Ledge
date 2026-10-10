@@ -374,10 +374,7 @@ public final class LedgePanelController {
             preferences: preferences, geometry: geometry, phase: phase,
             hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
         )
-        let frozen = presentation.notesBirth.flatMap { birth in
-            birth.displayID == displayID ? birth.sourceLayout : nil
-        }
-        let size = (frozen ?? layout).boundingSize
+        let size = layout.boundingSize
         let rect = CGRect(
             x: screen.frame.minX + geometry.notchCenterX - size.width / 2,
             y: screen.frame.maxY - size.height,

@@ -32,13 +32,48 @@ public struct PauseClock: Equatable, Sendable {
     /// construction: entries go as tracks play again or their cards retire.
     private var byTrack: [Key: TimeInterval] = [:]
 
+    /// Tracks whose cards have been retired, oldest first.
+    ///
+    /// Retirement has to outlive the reading that caused it. Forgetting the
+    /// date was enough to take the card away once — and then the next poll,
+    /// the same paused track with nobody having touched anything, found no
+    /// date, started a fresh quarter of an hour, and put the card straight
+    /// back. A card the user had watched expire returned seconds later and sat
+    /// there for another fifteen minutes.
+    ///
+    /// Three things end a retirement and nothing else does: the track plays
+    /// again, a different track arrives (a different key, which was never
+    /// retired), or the user presses something.
+    private var retiredTracks: [Key] = []
+
+    /// How many retirements are remembered. Nothing else prunes this list, so
+    /// it is bounded here and the oldest is dropped first — generous for the
+    /// handful of players and tracks that can be sitting paused at once.
+    public static let retiredMemory = 16
+
     public init() {}
 
-    /// The track is playing: it owes no pause, and has earned a fresh one for
-    /// whenever it stops.
+    /// The track is playing: it owes no pause, it has earned a fresh one for
+    /// whenever it stops, and it is no longer retired — playing again is the
+    /// plainest statement there is that somebody came back to it.
     public mutating func playing(_ key: Key) {
         running = nil
         byTrack[key] = nil
+        retiredTracks.removeAll { $0 == key }
+    }
+
+    /// Whether this track's card has already been retired and must not be put
+    /// back by a reading that says nothing new.
+    public func isRetired(_ key: Key) -> Bool {
+        retiredTracks.contains(key)
+    }
+
+    /// The user pressed a transport button. A press is the one unambiguous
+    /// sign that somebody is at the keyboard, so every retirement is lifted:
+    /// a card that refused to come back after a press would read as the
+    /// transport being dead.
+    public mutating func userAsked() {
+        retiredTracks.removeAll()
     }
 
     /// When this paused track's pause began.
@@ -65,12 +100,16 @@ public struct PauseClock: Equatable, Sendable {
         return started
     }
 
-    /// The card has been retired for good. The next time this track is seen
-    /// paused it starts its own clock, because by then it will have been played
-    /// again to get there.
+    /// The card has been retired. The track is remembered as retired until it
+    /// plays again or the user asks for it, so the reading that follows — the
+    /// same paused track, unchanged — cannot hand it a fresh quarter of an
+    /// hour and put the card back up.
     public mutating func retired(_ key: Key) {
         byTrack[key] = nil
         if running?.key == key { running = nil }
+        guard !retiredTracks.contains(key) else { return }
+        retiredTracks.append(key)
+        if retiredTracks.count > Self.retiredMemory { retiredTracks.removeFirst() }
     }
 
     /// The card has been taken off screen — by a refusal, or by another player

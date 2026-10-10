@@ -47,6 +47,44 @@ public enum DurationScrub {
 
     public static func ladder(fine useFine: Bool) -> [Int] { useFine ? fine : coarse }
 
+    /// The same two ladders over a different span.
+    ///
+    /// The dial's own range is the timer's, and Keep Awake runs to a day. Rather
+    /// than widen a range the timer shares — which would put detents on its
+    /// dial that nobody asked for — a caller with its own span supplies it
+    /// here and gets the same stepping within it.
+    public static func ladder(fine useFine: Bool, range: ClosedRange<Int>) -> [Int] {
+        guard range != DurationDial.range else { return ladder(fine: useFine) }
+        if useFine { return Array(range) }
+        var values = Array(range.lowerBound ..< min(10, range.upperBound))
+        values += stride(from: max(10, range.lowerBound), through: min(60, range.upperBound), by: 5)
+        values += stride(from: 75, through: min(180, range.upperBound), by: 15)
+        // Beyond three hours a quarter of an hour is noise; whole hours are
+        // what anybody setting a keep-awake is actually choosing between.
+        if range.upperBound > 180 {
+            values += stride(from: 240, through: range.upperBound, by: 60)
+        }
+        return values.filter(range.contains)
+    }
+
+    /// Where a drag has landed, on a caller's own span.
+    public static func minutes(
+        anchor: Int, translation: CGFloat, fine useFine: Bool, range: ClosedRange<Int>
+    ) -> Int {
+        let values = ladder(fine: useFine, range: range)
+        let clamp = { (value: Int) in min(max(value, range.lowerBound), range.upperBound) }
+        guard translation.isFinite else { return clamp(anchor) }
+        let steps = Int((translation / pointsPerDetent).rounded())
+        guard steps != 0 else { return clamp(anchor) }
+        var from = 0
+        var best = Int.max
+        for (index, value) in values.enumerated() {
+            let distance = abs(value - clamp(anchor))
+            if distance < best { best = distance; from = index }
+        }
+        return values[min(max(from + steps, 0), values.count - 1)]
+    }
+
     /// Where a drag has landed.
     ///
     /// - Parameters:

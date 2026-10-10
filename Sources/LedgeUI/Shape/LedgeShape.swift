@@ -34,28 +34,17 @@ public struct LedgeShape: Shape {
     /// edge and the cutout pixel-anchored: nothing else in the layout moves.
     public var trailingInset: CGFloat
 
-    /// How far the bottom-right corner hangs below the body, as if the shape
-    /// were thick liquid giving way under its own weight.
-    ///
-    /// Deforming the silhouette itself, rather than drawing a blob on top of
-    /// it, is the only way this reads as one substance: a shape laid over the
-    /// island meets its edge in a seam no amount of blurring hides, and the
-    /// island's own outline never moves. Here the body genuinely stretches, and
-    /// only the fill deforms; the content keeps its resting clip.
-    public var cornerSag: CGFloat
 
     public init(
         bottomRadius: CGFloat,
         gutterRadius: CGFloat,
         cornerSmoothing: CGFloat = 0.6,
         trailingInset: CGFloat = 0,
-        cornerSag: CGFloat = 0
     ) {
         self.bottomRadius = bottomRadius
         self.gutterRadius = gutterRadius
         self.cornerSmoothing = cornerSmoothing
         self.trailingInset = trailingInset
-        self.cornerSag = cornerSag
     }
 
     /// Animating the radii alongside the frame keeps the corners from popping
@@ -65,14 +54,13 @@ public struct LedgeShape: Shape {
         get {
             AnimatablePair(
                 AnimatablePair(bottomRadius, gutterRadius),
-                AnimatablePair(trailingInset, cornerSag)
+                AnimatablePair(trailingInset, 0)
             )
         }
         set {
             bottomRadius = newValue.first.first
             gutterRadius = newValue.first.second
             trailingInset = newValue.second.first
-            cornerSag = newValue.second.second
         }
     }
 
@@ -136,77 +124,14 @@ public struct LedgeShape: Shape {
         )
 
         // Across the bottom to where the bottom-right corner begins.
-        let sag = cornerSag.isFinite ? max(0, min(cornerSag, sideEdge)) : 0
-        if sag > 0 {
-            // The corner, drooping. One continuous run of curves from the bottom
-            // edge, down around a hanging lobe, and back up the right edge —
-            // every tangent matched at the joins, so the silhouette stays smooth
-            // at any amount of droop and the thing reads as stretching rather
-            // than as a ball stuck to a box.
-            // How far back along the bottom edge the deformation reaches, and
-            // how far past the corner it leans.
-            //
-            // These were 1.5× and 0.42× the sag, which put the peel 121 points
-            // inboard against a body around 253 wide and the tip only 28 past
-            // the corner — so the hanging mass centred nearly 50 points *inside*
-            // the card and the whole thing read as drooping from the middle of
-            // the edge rather than off the corner. The reach is now short and
-            // the lean is long, which puts the mass under the corner where it
-            // belongs.
-            let spread = min(sag * 0.30 + radius, halfBottom)
-            let out = sag * 0.70
-            let tipX = bodyRight + out
-            let tipY = bottom + sag
-            let waist = max(radius * 0.6, sag * 0.34)
-
-            // Morph from the actual resting corner, including its continuous
-            // curvature. A hard 0.5pt threshold switched to a different path
-            // and popped at the start and end of every flight.
-            var resting = Path()
-            resting.move(to: CGPoint(x: bodyRight - reach, y: bottom))
-            ContinuousCorner.append(to: &resting, vertex: CGPoint(x: bodyRight, y: bottom),
-                                    inDir: CGVector(dx: 1, dy: 0), outDir: CGVector(dx: 0, dy: -1),
-                                    radius: radius, smoothing: smoothing)
-            var curves: [(CGPoint, CGPoint, CGPoint)] = []
-            resting.forEach { element in
-                if case let .curve(to, control1, control2) = element {
-                    curves.append((to, control1, control2))
-                }
-            }
-            let u = min(1, sag / max(radius, 1))
-            let blend = u * u * (3 - 2 * u)
-            func mix(_ a: CGPoint, _ b: CGPoint) -> CGPoint {
-                CGPoint(x: a.x + (b.x - a.x) * blend, y: a.y + (b.y - a.y) * blend)
-            }
-            let deformed: [(CGPoint, CGPoint, CGPoint)] = [
-                (CGPoint(x: tipX - waist, y: tipY - sag * 0.42),
-                 CGPoint(x: bodyRight - spread * 0.32, y: bottom),
-                 CGPoint(x: tipX - waist, y: bottom + sag * 0.30)),
-                (CGPoint(x: tipX + waist * 0.55, y: tipY - sag * 0.30),
-                 CGPoint(x: tipX - waist, y: tipY + waist * 0.72),
-                 CGPoint(x: tipX + waist * 0.55, y: tipY + waist * 0.60)),
-                (CGPoint(x: bodyRight, y: bottom - reach),
-                 CGPoint(x: tipX + waist * 0.55, y: bottom + sag * 0.18),
-                 // Vertical at the return to the island's right edge.
-                 CGPoint(x: bodyRight, y: bottom - reach * 0.35))
-            ]
-            path.addLine(to: mix(CGPoint(x: bodyRight - reach, y: bottom),
-                                 CGPoint(x: bodyRight - spread, y: bottom)))
-            for (index, curve) in deformed.enumerated() {
-                let base = curves.count == 3 ? curves[index] : curve
-                path.addCurve(to: mix(base.0, curve.0), control1: mix(base.1, curve.1), control2: mix(base.2, curve.2))
-            }
-        } else {
-            path.addLine(to: CGPoint(x: bodyRight - reach, y: bottom))
-            ContinuousCorner.append(
-                to: &path,
-                vertex: CGPoint(x: bodyRight, y: bottom),
-                inDir: CGVector(dx: 1, dy: 0),
-                outDir: CGVector(dx: 0, dy: -1),
-                radius: radius, smoothing: smoothing
-            )
-        }
-
+        path.addLine(to: CGPoint(x: bodyRight - reach, y: bottom))
+        ContinuousCorner.append(
+            to: &path,
+            vertex: CGPoint(x: bodyRight, y: bottom),
+            inDir: CGVector(dx: 1, dy: 0),
+            outDir: CGVector(dx: 0, dy: -1),
+            radius: radius, smoothing: smoothing
+        )
         // Up the right edge to the top-right gutter.
         path.addLine(to: CGPoint(x: bodyRight, y: top + g))
         path.addCurve(

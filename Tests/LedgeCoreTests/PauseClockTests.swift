@@ -50,6 +50,41 @@ struct PauseClockTests {
         #expect(clock.pausedSince(track, continuing: false, now: 2_000) == 2_000)
     }
 
+    /// Clearing the date was enough to take the card away once, and then the
+    /// next poll — the same paused track, nobody having touched anything —
+    /// found no date, started a fresh quarter of an hour, and put the card
+    /// back up.
+    @Test("A retirement is remembered, so the card cannot simply return")
+    func retirementIsRemembered() {
+        var clock = PauseClock()
+        _ = clock.pausedSince(track, continuing: false, now: 1_000)
+        clock.retired(track)
+        #expect(clock.isRetired(track))
+        #expect(!clock.isRetired(other), "a different track was never retired")
+    }
+
+    @Test("Playing again, or a press, lifts the retirement")
+    func retirementIsLifted() {
+        var clock = PauseClock()
+        clock.retired(track)
+        clock.playing(track)
+        #expect(!clock.isRetired(track), "coming back to a track is not idleness")
+
+        clock.retired(track)
+        clock.retired(other)
+        clock.userAsked()
+        #expect(!clock.isRetired(track))
+        #expect(!clock.isRetired(other))
+    }
+
+    @Test("The memory of retirements is bounded")
+    func retirementMemoryIsBounded() {
+        var clock = PauseClock()
+        for i in 0...PauseClock.retiredMemory { clock.retired("track-\(i)") }
+        #expect(!clock.isRetired("track-0"), "the oldest retirement should have been dropped")
+        #expect(clock.isRetired("track-\(PauseClock.retiredMemory)"))
+    }
+
     @Test("Two tracks are dated separately")
     func perTrack() {
         var clock = PauseClock()

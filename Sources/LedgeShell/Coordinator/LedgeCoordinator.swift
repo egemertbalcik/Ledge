@@ -559,7 +559,23 @@ public final class LedgeCoordinator {
     private let screenshots = ScreenshotWatcher()
     private let permissions = PermissionCenter()
     private let settingsModel = SettingsModel()
-    private let commander = NowPlayingCommander()
+    /// Transport control, told where the system is actually pointing.
+    ///
+    /// A command with no address — the only kind a player without a scripting
+    /// dictionary can be sent — goes to whichever player the system considers
+    /// now-playing, which is not always the one on the card. The commander
+    /// refuses rather than guesses, and this is what it asks.
+    private lazy var commander = NowPlayingCommander(
+        systemOwner: { [weak self] in self?.systemMediaOwner }
+    )
+
+    /// Which player the system itself says is playing, raw. Only the composite
+    /// source can answer: the AppleScript-only path sees Music and Spotify,
+    /// both of which take addressed commands and never reach the unaddressed
+    /// one.
+    private var systemMediaOwner: String? {
+        (resolvedNowPlayingSource as? CompositeNowPlayingSource)?.systemOwnerBundleID
+    }
     private lazy var hud = HUDCoordinator(
         preferences: preferences,
         presentation: presentation,
@@ -1534,7 +1550,7 @@ public final class LedgeCoordinator {
     /// a republished card is a new `Activity` describing the same track.
     private static func mediaKey(_ activity: Activity?) -> String? {
         guard let activity, case .nowPlaying(let payload) = activity.payload else { return nil }
-        return "\(activity.id.source)|\(payload.artworkKey ?? payload.title)"
+        return "\(activity.id.source)|\(payload.itemKey ?? payload.title)"
     }
 
     /// What the *fact* path last told the reducer about resting: true while
@@ -1806,15 +1822,15 @@ public final class LedgeCoordinator {
 
     private func makeNowPlayingActions() -> NowPlayingActions {
         NowPlayingActions(
-            playPause: { [weak self] in self?.sendMedia(.playPause) },
-            next: { [weak self] in self?.sendMedia(.next) },
-            previous: { [weak self] in self?.sendMedia(.previous) },
+            playPause: { [weak self] in self?.sendMedia(.playPause) ?? false },
+            next: { [weak self] in self?.sendMedia(.next) ?? false },
+            previous: { [weak self] in self?.sendMedia(.previous) ?? false },
             seek: { [weak self] fraction in
                 guard let self,
                       case .nowPlaying(let payload)? = self.presentation.selected?.payload,
                       payload.duration > 0
-                else { return }
-                self.sendMedia(.seek(payload.duration * fraction))
+                else { return false }
+                return self.sendMedia(.seek(payload.duration * fraction))
             },
             audioLevels: { [weak self] in self?.simulatedLevels() ?? [] },
             chooseOutput: {
@@ -2139,14 +2155,17 @@ public final class LedgeCoordinator {
         Self.log.debug("brought \(bundleID, privacy: .public) forward")
     }
 
-    private func sendMedia(_ command: NowPlayingCommand) {
-        guard let bundleID = activeMediaBundleID else { return }
-        commander.send(command, to: bundleID)
-        // Re-read the player right away so the card reflects reality in a few
-        // hundred milliseconds, not on the next 1–4s poll — and say that this
-        // change was asked for, so the track it brings is not mistaken for a
-        // browser handing its slot around and made to wait.
-        nowPlayingProviderRef?.expectChange()
+    /// - Returns: whether the press reached a player. See `MediaPress`.
+    @discardableResult
+    private func sendMedia(_ command: NowPlayingCommand) -> Bool {
+        guard let bundleID = activeMediaBundleID else { return false }
+        let press = MediaPress(
+            send: { [weak self] in self?.commander.send($0, to: bundleID) ?? .refused },
+            // Re-read the player right away so the card reflects reality in a
+            // few hundred milliseconds, not on the next 1–4s poll.
+            expectChange: { [weak self] in self?.nowPlayingProviderRef?.expectChange() }
+        )
+        return press(command)
     }
 
     // MARK: - Gestures
@@ -3406,4 +3425,29 @@ public final class LedgeCoordinator {
         Self.log.notice("settings window presented at \(window.frame.debugDescription, privacy: .public)")
     }
 
+}
+
+
+/// Lets a caller wait for whichever of two things finishes first.
+///
+/// A task group would say this more briefly, but the region-based isolation
+/// checker cannot see through one whose child is main-actor isolated, and a
+/// construct the compiler cannot check is not worth the brevity.
+private actor FirstToFinish {
+
+    private var hasFinished = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func signal() {
+        guard !hasFinished else { return }
+        hasFinished = true
+        let resumable = waiting
+        waiting.removeAll()
+        resumable.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        guard !hasFinished else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
 }
