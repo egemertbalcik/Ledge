@@ -353,3 +353,175 @@ struct NotesStoreTests {
         #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(note.id).json").path))
     }
 }
+
+@Suite("Duplicating and sweeping")
+struct NotesDuplicateAndSweepTests {
+
+    private func store() -> NotesStore {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ledge-notes-tests/\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return NotesStore(directory: url, now: { 1 })
+    }
+
+    @Test("A copy is its own note, not a version of the original")
+    func duplicate() async {
+        let store = store()
+        let original = await store.create()
+        await store.update(original.id, text: AttributedString("Elma\nikinci satır"))
+        guard let copy = await store.duplicate(original.id) else {
+            return #expect(Bool(false), "nothing came back")
+        }
+        #expect(copy.id != original.id)
+        // The title is numbered so the two are tellable apart in a list; the
+        // body is not touched.
+        #expect(String(copy.text.characters) == "Elma (1)\nikinci satır")
+        // Editing the copy must not reach back into what it came from.
+        await store.update(copy.id, text: AttributedString("Armut"))
+        let after = await store.body(original.id)
+        #expect(after.map { String($0.text.characters) } == "Elma\nikinci satır")
+        #expect(await store.list().count == 2)
+    }
+
+    @Test("Duplicating something that is gone returns nothing")
+    func duplicateMissing() async {
+        let store = store()
+        #expect(await store.duplicate("no-such-note") == nil)
+    }
+
+    @Test("Blanks left behind by a kill are swept at launch, and only blanks")
+    func sweep() async {
+        // The case this exists for: `discardIfEmpty` runs when a window closes,
+        // and nothing closes a window when the process dies under it.
+        let store = store()
+        let written = await store.create()
+        await store.update(written.id, text: AttributedString("bu kalmalı"))
+        let blank = await store.create()
+        let spaces = await store.create()
+        await store.update(spaces.id, text: AttributedString("   \n  "))
+        await store.flush()
+
+        #expect(await store.discardEmpties() == 2)
+        let left = await store.list()
+        #expect(left.count == 1)
+        #expect(left.first?.id == written.id)
+        #expect(await store.body(blank.id) == nil)
+        #expect(await store.body(spaces.id) == nil)
+        // Nothing left to do on a second pass.
+        #expect(await store.discardEmpties() == 0)
+    }
+}
+
+@Suite("Numbering a copy")
+struct NotesNumberingTests {
+
+    private func title(_ text: AttributedString) -> String {
+        String(text.characters).split(separator: "\n", omittingEmptySubsequences: false)
+            .first.map(String.init) ?? ""
+    }
+
+    @Test("A copy takes the first number nobody else has")
+    func numbering() {
+        let note = AttributedString("Groceries\nmilk")
+        #expect(title(NotesStore.numbered(note, avoiding: [])) == "Groceries (1)")
+        #expect(title(NotesStore.numbered(note, avoiding: ["Groceries"])) == "Groceries (1)")
+        #expect(title(NotesStore.numbered(note, avoiding: ["Groceries", "Groceries (1)"])) == "Groceries (2)")
+        // Gaps are filled rather than skipped past.
+        #expect(title(NotesStore.numbered(note, avoiding: ["Groceries (1)", "Groceries (3)"])) == "Groceries (2)")
+    }
+
+    @Test("Copying a copy gives (2), never (1) (1)")
+    func copyOfCopy() {
+        let copy = AttributedString("Groceries (1)\nmilk")
+        let again = NotesStore.numbered(copy, avoiding: ["Groceries", "Groceries (1)"])
+        #expect(title(again) == "Groceries (2)")
+    }
+
+    @Test("Only the first line is numbered, and the rest is untouched")
+    func firstLineOnly() {
+        let note = AttributedString("Plan\nstep one\nstep two")
+        let copy = NotesStore.numbered(note, avoiding: [])
+        #expect(String(copy.characters) == "Plan (1)\nstep one\nstep two")
+    }
+
+    @Test("A note with nothing to call it is left alone")
+    func untitled() {
+        // A bare "(1)" is not a better name than no name.
+        #expect(String(NotesStore.numbered(AttributedString(""), avoiding: []).characters) == "")
+        #expect(String(NotesStore.numbered(AttributedString("   \nbody"), avoiding: []).characters) == "   \nbody")
+    }
+
+    @Test("Numbers that are part of the name are not mistaken for a count")
+    func parentheses() {
+        let note = AttributedString("Invoice (draft)")
+        #expect(title(NotesStore.numbered(note, avoiding: [])) == "Invoice (draft) (1)")
+    }
+
+    @Test("A bold title stays bold once it is numbered")
+    func keepsFormatting() {
+        var note = AttributedString("Plan")
+        note.inlinePresentationIntent = .stronglyEmphasized
+        note += AttributedString("\nbody")
+        let copy = NotesStore.numbered(note, avoiding: [])
+        let suffix = copy.runs.first { String(copy.characters[$0.range]).contains("(1)") }
+        #expect(suffix?.inlinePresentationIntent?.contains(.stronglyEmphasized) == true)
+    }
+}
+
+@Suite("Never keeping a blank")
+struct NotesBlankTests {
+
+    private func store() -> NotesStore {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ledge-notes-tests/\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return NotesStore(directory: url, now: { 1 })
+    }
+
+    @Test("Leaving a blank note for another one does not keep the blank")
+    func swapping() async {
+        // What the window does when ⌘N is pressed on an untouched note: write
+        // what is there, flush, then discard it if it was nothing.
+        let store = store()
+        let blank = await store.create()
+        await store.update(blank.id, text: AttributedString(""))
+        await store.flush()
+        await store.discardIfEmpty(blank.id)
+
+        let second = await store.create()
+        await store.update(second.id, text: AttributedString("kept"))
+        await store.flush()
+
+        let left = await store.list()
+        #expect(left.count == 1)
+        #expect(left.first?.id == second.id)
+    }
+
+    @Test("A last write of nothing does not bring a note back")
+    func noResurrection() async {
+        // A window closing writes its note out one more time. If that note was
+        // just discarded or deleted, that write must not recreate it.
+        let store = store()
+        let note = await store.create()
+        await store.discardIfEmpty(note.id)
+        #expect(await store.list().isEmpty)
+
+        await store.update(note.id, text: AttributedString(""))
+        await store.update(note.id, text: AttributedString("   \n "))
+        await store.flush()
+        #expect(await store.list().isEmpty)
+    }
+
+    @Test("A real edit to a note that has gone still brings it back")
+    func writingStillRevives() async {
+        // The protection is against blanks, not against somebody's writing.
+        let store = store()
+        let note = await store.create()
+        await store.delete(note.id)
+        await store.update(note.id, text: AttributedString("typed after it went"))
+        await store.flush()
+        #expect(await store.list().count == 1)
+        let revived = await store.body(note.id)
+        #expect(revived.map { String($0.text.characters) } == "typed after it went")
+    }
+}

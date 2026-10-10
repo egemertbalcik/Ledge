@@ -134,7 +134,6 @@ public final class NotchPresentation {
     ///
     /// Set by the shell the moment a note is asked for, and cleared when the
     /// real window has taken over.
-    public var notesBirth: NotesBirth?
 
     /// Whether the pointer is over a note tile, which suppresses the
     /// overlay-wide tap for the same reason the route picker does.
@@ -411,23 +410,21 @@ public struct NotchOverlayView: View {
 
     private var isHovering: Bool { isHoveredDisplay && presentation.isHovering }
 
+    /// Who holds the media card's drag latch. Lives here rather than in the
+    /// card because the card is the thing being replaced — see `DragLatch`.
+    @State private var mediaDrag = DragLatch()
+
     /// The media actions with the route-menu reporter attached, so the card can
     /// tell the presentation how tall it has become without knowing about it.
     private var routeAwareActions: NowPlayingActions {
         var actions = nowPlayingActions
         actions.setRoutePickerRows = { rows in presentation.routePickerRows = rows }
-        actions.setDragging = onHUDDragging
+        actions.beginDrag = { mediaDrag.begin(onHUDDragging) }
+        actions.endDrag = { mediaDrag.end($0, onHUDDragging) }
         return actions
     }
 
-    private var activeNotesBirth: NotesBirth? {
-        guard let birth = presentation.notesBirth,
-              birth.displayID == nil || birth.displayID == displayID else { return nil }
-        return birth
-    }
-
     private var layout: NotchLayout {
-        if let frozen = activeNotesBirth?.sourceLayout { return frozen }
         return presentation.layout(
             preferences: preferences, geometry: geometry, phase: phase,
             hudHovered: isHovering, hudExtraHeight: hudExtraHeight
@@ -437,23 +434,13 @@ public struct NotchOverlayView: View {
     /// The silhouette: the notch's own shape, flaring into the bezel with
     /// gutters. Panels exist only on notched displays, so there is no other
     /// case to draw.
-    private var shape: LedgeShape { shape(sagging: 0) }
-
-    private func shape(sagging sag: CGFloat) -> LedgeShape {
+    private var shape: LedgeShape {
         LedgeShape(
             bottomRadius: layout.bottomRadius,
             gutterRadius: layout.gutterRadius,
             cornerSmoothing: preferences.cornerSmoothing,
-            trailingInset: satelliteCollapse,
-            cornerSag: sag
+            trailingInset: satelliteCollapse
         )
-    }
-
-    private func notesBirthFill(_ birth: NotesBirth, progress: Double) -> some View {
-        shape(sagging: reduceMotion || presentation.screensAreDark ? 0 : NotesBirthView.sag(
-            at: progress, scale: birth.displayScale
-        ))
-        .fill(preferences.debugTint ? AnyShapeStyle(.red.opacity(0.55)) : AnyShapeStyle(.black))
     }
 
     /// How much the island's trailing side gives up while the satellite is
@@ -476,24 +463,11 @@ public struct NotchOverlayView: View {
             // stretches — so its fill is redrawn on the flight's clock. Only
             // the fill: the clip keeps the undeformed shape, which is right,
             // because the card's content has no business following the droop.
-            Group {
-                if let birth = activeNotesBirth {
-                    if let now = presentation.fixedNow {
-                        notesBirthFill(birth, progress: birth.progress(at: now))
-                    } else {
-                        TimelineView(.animation(minimumInterval: 1.0 / 60,
-                                                paused: reduceMotion || presentation.screensAreDark)) { timeline in
-                            notesBirthFill(birth, progress: birth.progress(at: timeline.date))
-                        }
-                    }
-                } else {
-                    shape.fill(
-                        preferences.debugTint
-                            ? AnyShapeStyle(.red.opacity(0.55))
-                            : AnyShapeStyle(.black)
-                    )
-                }
-            }
+            shape.fill(
+                preferences.debugTint
+                    ? AnyShapeStyle(.red.opacity(0.55))
+                    : AnyShapeStyle(.black)
+            )
             content
                 .frame(width: layout.boundingSize.width, height: layout.boundingSize.height, alignment: .top)
                 // The resting silhouette: a card has no business following the
@@ -539,11 +513,7 @@ public struct NotchOverlayView: View {
         // drawn out, so the sag is not cut off. A clip only has to *contain*
         // every frame, not hug it, so one fixed shape serves the whole flight
         // and the stack does not relayout per frame.
-        .clipShape(
-            activeNotesBirth.map {
-                shape(sagging: NotesBirthGeometry.peakSag(scale: $0.displayScale))
-            } ?? shape
-        )
+        .clipShape(shape)
         // The detached satellite, seated just past the island's right edge
         // while the companion rests — the ear inside goes dark and this circle
         // owns the readout. It slides out from behind the island as if
@@ -613,7 +583,7 @@ public struct NotchOverlayView: View {
             // Centre. A fixed subtle stroke reads the same on dark, vanishes
             // into light backdrops on its own, costs nothing, and needs no
             // permission at all.
-            if preferences.outlineEnabled, phase != .idle, activeNotesBirth == nil {
+            if preferences.outlineEnabled, phase != .idle {
                 shape.stroke(.white.opacity(0.14), lineWidth: 1)
                     // The top edge is flush with the screen's own edge — the
                     // shape *is* connected there, and outlining it would draw
@@ -657,36 +627,6 @@ public struct NotchOverlayView: View {
         }
         .animation(.easeOut(duration: 0.15), value: isDropTargeted)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // A note being born out of the island's corner.
-        //
-        // Attached *here*, to the panel-wide frame, and not to the island: the
-        // landing rect is in the panel's coordinates, and the island's own view
-        // is only as wide as the card. Drawn against the island it flew to a
-        // point hundreds of points outside itself, which renders perfectly and
-        // is visible to nobody.
-        .overlay(alignment: .topLeading) {
-            if let birth = activeNotesBirth {
-                GeometryReader { panel in
-                    NotesBirthView(
-                        birth: birth,
-                        // The shape that is actually drawn, not the card's
-                        // size. They differ whenever the island is not open —
-                        // a collapsed notch draws 179 points wide while the
-                        // card measures 275 — and the strand would then hang
-                        // off a point fifty points clear of anything visible.
-                        islandRect: CGRect(
-                            x: (panel.size.width - layout.bodySize.width) / 2,
-                            y: 0,
-                            width: layout.bodySize.width,
-                            height: layout.bodySize.height
-                        ),
-                        tint: .black,
-                        fixedProgress: presentation.screensAreDark ? 1 : presentation.fixedNow.map { birth.progress(at: $0) }
-                    )
-                }
-                .allowsHitTesting(false)
-            }
-        }
         .environment(\.waveformAnimationsEnabled, !presentation.screensAreDark)
         .animation(
             Motion.expand(

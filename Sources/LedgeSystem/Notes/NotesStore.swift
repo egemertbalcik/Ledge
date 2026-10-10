@@ -287,6 +287,106 @@ public actor NotesStore {
         return note
     }
 
+    /// A second note with the same text, as a new note of its own.
+    ///
+    /// Its own id and its own timestamps: a copy is a note that happens to have
+    /// started as another one, not a version of it. Returns nil when the
+    /// original is gone, so the caller does not open a window on nothing.
+    @discardableResult
+    public func duplicate(_ id: String) -> NoteBody? {
+        load()
+        guard let original = body(id) else { return nil }
+        let stamp = now()
+        var copy = NoteBody(id: UUID().uuidString, createdAt: stamp, editedAt: stamp)
+        copy.text = Self.numbered(original.text, avoiding: summaries.values.map(\.title))
+        bodies[copy.id] = copy
+        summaries[copy.id] = copy.summary
+        dirtyBodies.insert(copy.id)
+        indexDirty = true
+        if oldestDirtyAt == nil { oldestDirtyAt = ContinuousClock.now }
+        scheduleBodyWrite()
+        scheduleIndexWrite()
+        noteChanged()
+        return copy
+    }
+
+    /// The same text with its first line numbered, so a copy is tellable from
+    /// what it was copied from.
+    ///
+    /// Two notes called "Groceries" in a list of notes called "Groceries" is a
+    /// list nobody can use. The number goes on the title — the note's own first
+    /// line, since that is the only title a note has — and takes the lowest one
+    /// not already taken, so copying a copy gives (2) rather than (1) (1).
+    ///
+    /// Formatting on the first line is kept: the suffix inherits whatever the
+    /// character before it was wearing, which is what makes a bold title stay a
+    /// bold title.
+    static func numbered(_ text: AttributedString, avoiding taken: [String]) -> AttributedString {
+        let plain = String(text.characters)
+        let firstLine = plain.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            .first.map(String.init) ?? ""
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return text }
+
+        // "Groceries (3)" copies from "Groceries", not from "Groceries (3)".
+        let base = stem(of: trimmed)
+        let used = Set(taken.compactMap { title -> Int? in
+            let candidate = title.trimmingCharacters(in: .whitespaces)
+            guard stem(of: candidate) == base else { return nil }
+            return candidate == base ? 0 : number(in: candidate)
+        })
+        var next = 1
+        while used.contains(next) { next += 1 }
+
+        // The suffix replaces any number already on the title rather than
+        // following it: a copy of "Groceries (1)" is "Groceries (2)", not
+        // "Groceries (1) (1)".
+        let leading = firstLine.prefix { $0.isWhitespace }.count
+        var copy = text
+        let characters = copy.characters
+        guard characters.count >= firstLine.count else { return text }
+        let lineEnd = characters.index(characters.startIndex, offsetBy: firstLine.count)
+        let stemEnd = characters.index(characters.startIndex, offsetBy: leading + base.count)
+        let attributes = copy[copy.startIndex ..< stemEnd].runs.last?.attributes ?? AttributeContainer()
+        copy.replaceSubrange(stemEnd ..< lineEnd,
+                             with: AttributedString(" (\(next))", attributes: attributes))
+        return copy
+    }
+
+    /// A title with any trailing " (n)" taken off.
+    private static func stem(of title: String) -> String {
+        guard title.hasSuffix(")"), let open = title.lastIndex(of: "(") else { return title }
+        let inside = title[title.index(after: open) ..< title.index(before: title.endIndex)]
+        guard !inside.isEmpty, inside.allSatisfy(\.isNumber) else { return title }
+        return String(title[title.startIndex ..< open]).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The n in a trailing " (n)", if there is one.
+    private static func number(in title: String) -> Int? {
+        guard title.hasSuffix(")"), let open = title.lastIndex(of: "(") else { return nil }
+        return Int(title[title.index(after: open) ..< title.index(before: title.endIndex)])
+    }
+
+    /// Sets aside every note that holds nothing, and says how many.
+    ///
+    /// `discardIfEmpty` runs when a window closes, which covers the ordinary
+    /// way a blank note comes to exist. It cannot cover the other way: quit the
+    /// app, lose power, or have the process killed while an untouched note is
+    /// open, and that note is on disk with nobody left to close its window.
+    /// Running this at launch is what makes "no empty notes" true rather than
+    /// usually true.
+    ///
+    /// Quarantined like every other removal, never unlinked — the rule is the
+    /// app's, and the user's writing is not the app's to destroy even when the
+    /// app is certain it is blank.
+    @discardableResult
+    public func discardEmpties() -> Int {
+        load()
+        let blanks = bodies.values.filter(\.isEmpty).map(\.id)
+        for id in blanks { discardIfEmpty(id) }
+        return blanks.count
+    }
+
     /// Takes an edit. Called on every keystroke's worth of change, so it does
     /// no work beyond remembering what changed.
     public func update(_ id: String, text: AttributedString) {
@@ -295,7 +395,17 @@ public actor NotesStore {
         // writing about to go nowhere — the window can still be open on a note
         // that was discarded on a lost focus or deleted from the card. Bring it
         // back rather than dropping every keystroke on the floor in silence.
-        guard var note = body(id) ?? revive(id) else { return }
+        var existing = body(id)
+        if existing == nil {
+            // Nothing worth bringing back for. A write of nothing to a note
+            // that has gone is what an editor sends on its way out — the last
+            // flush of a window whose note was just discarded or deleted — and
+            // acting on it put the blank straight back in the list.
+            guard !String(text.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            existing = revive(id)
+        }
+        guard var note = existing else { return }
         guard note.text != text else { return }
         note.text = text
         note.editedAt = now()

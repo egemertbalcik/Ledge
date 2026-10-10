@@ -736,8 +736,8 @@ public struct NotchLayout: Sendable, Equatable {
         let notes = cardSize(kind: .notes, phase: .expanded, base: .zero,
                              cardContentHeight: .greatestFiniteMagnitude,
                              geometry: geometry, routePickerRows: 0, hasSelection: true)
-        let notesFlight = notes.height + NotesBirthGeometry.editorSize.height
-            + 32 * NotesBirthGeometry.scale(geometry.displayScale)
+        let notesFlight = notes.height + NotesGeometry.editorSize.height
+            + 32 * NotesGeometry.scale(geometry.displayScale)
         return CGSize(
             width: geometry.screenSize.width,
             // A note lands below the Notes card. Reserve its flight as well as

@@ -12,12 +12,17 @@ import os
 /// one has to take focus, because a window you cannot type into is not an
 /// editor.
 ///
-/// Measured, not assumed: a `.nonactivatingPanel` with `canBecomeKey` true
-/// stops being the key window the moment another application activates, so
-/// "show it without ever taking focus" is not available. What is available is
-/// the arrangement Raycast settled on after years of getting it wrong in both
-/// directions — take focus on the click that asks for it, and hand it straight
-/// back on Escape without closing the window.
+/// Taking focus and taking the screen away from somebody are different things,
+/// and only the first is wanted. `.nonactivatingPanel` separates them: the app
+/// that was in front stays active and keeps the menu bar, its window keeps
+/// drawing as the one being worked in, and only the keyboard moves here. This
+/// is what every accessory app with a text field does — Maccy's floating panel
+/// and Ice's search panel are both `.nonactivatingPanel` with `canBecomeKey`
+/// true and no activation call anywhere.
+///
+/// It does mean the panel loses the keyboard when anything else legitimately
+/// claims it, which for an editor is right: that is the user going back to
+/// their work, and `didResignKey` already saves the note when it happens.
 final class NotesPanel: NSPanel {
 
     /// The app that was in front when this window opened, so Escape can give
@@ -26,6 +31,24 @@ final class NotesPanel: NSPanel {
 
     /// Told when Escape is pressed, so the controller can return focus.
     var onEscape: (() -> Void)?
+
+    /// Told about every command key this app has no menu to dispatch from.
+    ///
+    /// `NSApplication` sends ⌘-anything through `NSApp.mainMenu` first, and
+    /// this app has no menu at all — no Dock icon, no menu bar item, so
+    /// `mainMenu` is nil for the whole life of the process. Measured:
+    /// `performKeyEquivalent(⌘V)` returns false and nothing is pasted, while
+    /// `sendAction(paste:)` works and the text view is right there in the
+    /// responder chain. The chain was never the problem; the dispatch was
+    /// missing. This supplies it.
+    var onCommand: ((NotesCommand) -> Void)?
+
+    /// ⌘K, which opens the list of commands rather than running one.
+    var onPalette: (() -> Void)?
+
+    /// Whether the note itself is what is on screen, rather than a list laid
+    /// over it. Commands that act on the writing are refused while it is not.
+    var isEditingNote: (() -> Bool)?
 
     override var canBecomeKey: Bool { true }
     /// Never main: this app is an accessory and has no main window of its own.
@@ -44,22 +67,67 @@ final class NotesPanel: NSPanel {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.contains(.command) else { return super.performKeyEquivalent(with: event) }
         let shift = flags.contains(.shift)
+        let control = flags.contains(.control)
+
+        // Anything macOS already means by a key inside a text view is not
+        // ours to take. ⌘⌫ is `deleteToBeginningOfLine:`, ⌘← and ⌘→ move to
+        // the ends of a line, ⌥⌫ deletes a word, the control letters are the
+        // emacs bindings AppKit has honoured since before this app existed.
+        // Every one of those reaches `default:` below and goes to the text
+        // view, which is the only correct answer: a note window that cannot
+        // delete a line is not an editor.
+        //
+        // This is what ⌘⌫ used to break — it closed the window instead of
+        // deleting back to the start of the line.
+        if control {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "\u{8}", "\u{7f}": onCommand?(.deleteNote); return true
+            default: return super.performKeyEquivalent(with: event)
+            }
+        }
+
+        if shift {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c": onCommand?(.copyMarkdown); return true
+            case "e": onCommand?(.exportToNotes); return true
+            default: break
+            }
+        }
 
         switch event.charactersIgnoringModifiers?.lowercased() {
+        // Editing, handed to whatever holds the caret — the note, or a search
+        // field when one is open.
         case "c": return NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
         case "v": return NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
         case "x": return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
         case "a": return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+        case "z":
+            return NSApp.sendAction(shift ? Selector(("redo:")) : Selector(("undo:")),
+                                    to: nil, from: self)
+
+        // Moving about, which works wherever you are.
+        case "n": onCommand?(.newNote); return true
+        case "p": onCommand?(.allNotes); return true
+        case "k": onPalette?(); return true
         case "w":
             // The system close button is hidden, so this is the keyboard way
             // out and it has to be wired by hand like the rest.
             requestClose()
             return true
-        case "z":
-            let selector = shift
-                ? Selector(("redo:"))
-                : Selector(("undo:"))
-            return NSApp.sendAction(selector, to: nil, from: self)
+
+        // Acting on the note, which only means anything while the note is what
+        // is on screen. Styling the text under a search field nobody can see
+        // changing is worse than doing nothing.
+        case "d", "f", "b", "i":
+            guard isEditingNote?() == true else { return super.performKeyEquivalent(with: event) }
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "d": onCommand?(.duplicate)
+            case "f": onCommand?(.find)
+            case "b": onCommand?(.bold)
+            default: onCommand?(.italic)
+            }
+            return true
+
         default:
             return super.performKeyEquivalent(with: event)
         }
@@ -103,11 +171,6 @@ final class NotesWindowController {
     /// Told which note is open, or nil when the window closes.
     var onOpenNoteChanged: ((String?) -> Void)?
 
-    /// Asks the island to play a note leaving it, at the rect the window is
-    /// about to occupy. Returns whether a flight
-    /// actually started — there is none without a notched panel to draw it in.
-    var playBirth: ((CGRect) -> Bool)?
-    var endBirth: (() -> Void)?
 
     private(set) var openNoteID: String?
 
@@ -146,6 +209,7 @@ final class NotesWindowController {
     }
 
     private func present(_ body: NoteBody) {
+        retire(before: body.id)
         let panel = panel ?? makePanel()
         model.load(body)
         updateTitle(from: body.text)
@@ -153,115 +217,142 @@ final class NotesWindowController {
         onOpenNoteChanged?(body.id)
 
         let landing = landingFrame(for: panel)
-        let destinationScreen = notchScreen?() ?? NSScreen.main
 
-        // Already on screen: nothing is being born, the note simply changes.
+        // Already on screen: nothing is opening, the note simply changes.
+        // Switching notes must not undo the user's dragged window position.
         guard !panel.isVisible else {
-            // Switching notes must not undo the user's dragged window position.
             raise(panel)
             return
         }
 
-        // The island plays the note coming out of its corner, and the window
-        // appears only as that lands. The flight is drawn inside the notch
-        // panel rather than by moving this window: a real window's frame is
-        // committed by the WindowServer on its own schedule, which comes apart
-        // from a SwiftUI spring at exactly the overshoot.
+        panel.setFrame(landing, display: false)
+
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
-            // No flight, and no wait for one. Sleeping anyway would leave a
-            // Reduce Motion user looking at nothing for half a second.
-            panel.setFrame(landing, display: true)
-            raise(panel)
+            model.finishOpening(animated: false)
+            fadeIn(panel)
             return
         }
 
-        // A flight already running is already heading for the right rect, and
-        // the note it carries is only ever read at the end. Starting a second
-        // one resets the clock, so the blob snaps back to the island mid-air
-        // and the window arrives a whole duration later than the click.
-        guard flight == nil else { return }
+        // The window is at its final size and position from the first frame,
+        // and only its content moves: the frame itself cannot be sprung —
+        // `NSWindow` is composited by the window server, not by this process's
+        // layer tree, so no spring can reach it — and animating it instead
+        // gave a motion that came apart from the island's at every overshoot.
+        //
+        // The state change is started *before* the window is shown. Shown
+        // first, the first composited frame is the resting state and the
+        // animation begins from there, which reads as a flash.
+        model.beginOpening()
+        hosting?.layoutSubtreeIfNeeded()
+        model.finishOpening(animated: true)
+        fadeIn(panel)
+    }
 
-        // Whether a flight actually began. The shell refuses one when there is
-        // no notched panel to draw it in, or when the window would land outside
-        // that panel — and waiting out the full duration for an animation that
-        // never played means every note on a lid-closed Mac opens after a
-        // second of nothing.
-        guard playBirth?(landing) == true else {
-            panel.setFrame(landing, display: true)
-            raise(panel)
-            return
-        }
-
-        birthToken &+= 1
-        let token = birthToken
-        flight = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(NotesBirth.duration)) }
-            catch { return }
-            guard let self, self.birthToken == token else { return }
-            if let panel = self.panel {
-                // Keep the chosen destination even if the pointer moved to a
-                // second monitor. Recompute only when that screen is gone or
-                // its usable bounds changed during the flight.
-                let stillFits = destinationScreen.map { screen in
-                    NSScreen.screens.contains(screen) && screen.visibleFrame.contains(landing)
-                } ?? false
-                panel.setFrame(stillFits ? landing : self.landingFrame(for: panel), display: true)
-                self.raise(panel)
-            }
-            // One owned task covers both the flight and handoff. Closing can
-            // cancel either part, and an old cleanup cannot erase a new birth.
-            do { try await Task.sleep(for: .milliseconds(32)) }
-            catch { return }
-            guard self.birthToken == token else { return }
-            self.endBirth?()
-            self.flight = nil
+    /// Alpha, and only alpha, on the window itself.
+    ///
+    /// Short and flat: it is not the animation, it is cover for the one frame
+    /// where the window server registers a new window and the backing store is
+    /// allocated. Everything anybody is meant to notice happens in the content.
+    private func fadeIn(_ panel: NotesPanel) {
+        panel.alphaValue = 0
+        raise(panel)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
         }
     }
 
-    private func cancelBirth() {
-        birthToken &+= 1
-        flight?.cancel()
-        flight = nil
-        endBirth?()
-    }
-
-    /// A display reconfiguration invalidates the panel-space flight. Complete
-    /// on the surviving screen immediately instead of drawing stale coordinates.
+    /// A display reconfiguration can leave the window on a screen that no
+    /// longer exists, or outside the usable bounds of the one that does.
     func finishBirthAfterDisplayChange() {
-        guard flight != nil else { return }
-        cancelBirth()
-        if let panel, openNoteID != nil {
-            panel.setFrame(landingFrame(for: panel), display: true)
-            raise(panel)
+        guard let panel, panel.isVisible, openNoteID != nil else { return }
+        panel.setFrame(landingFrame(for: panel), display: true)
+    }
+
+    /// Builds everything the first open would otherwise have to build while it
+    /// was supposed to be animating.
+    ///
+    /// Measured: the first open blocked the main thread for around 200ms where
+    /// a later one blocked 50, and a quarter-second animation cannot survive
+    /// that. Two costs arrive together on that first open — the panel's
+    /// registration with the window server, and SwiftUI building the editor's
+    /// view graph and laying out its text. Neither has to happen then.
+    ///
+    /// Invisible and never key: alpha zero, ordered front only so the window
+    /// server does its half of the work, then ordered straight back out.
+    func warmUp() {
+        guard panel == nil else { return }
+        let panel = makePanel()
+        panel.alphaValue = 0
+        panel.orderFrontRegardless()
+        hosting?.layoutSubtreeIfNeeded()
+        panel.displayIfNeeded()
+        warming = Task { @MainActor [weak self] in
+            // Held for a couple of frames rather than torn down in the same
+            // turn: a view's first composite is where the window server and the
+            // text system do their share, and a warm-up that lays out and
+            // leaves pays for none of it.
+            for _ in 0 ..< 2 {
+                do { try await Task.sleep(for: .milliseconds(34)) } catch { break }
+                panel.displayIfNeeded()
+            }
+            panel.orderOut(nil)
+            panel.alphaValue = 1
+            self?.warming = nil
         }
     }
 
-    /// The flight in progress, so closing or quitting can stop it raising a
-    /// window that is no longer wanted.
-    private var flight: Task<Void, Never>?
-
-    /// Which flight is the current one, so a second click cannot land an older
-    /// one on top of it.
-    private var birthToken = 0
+    private var warming: Task<Void, Never>?
 
     private func raise(_ panel: NotesPanel) {
         // Remembered so Escape can hand the user back what they were doing.
-        // Taken here rather than at the click, because the flight runs for half
-        // a second and the user may have changed apps in between.
+        // Taken here rather than at the click: the open is asynchronous and
+        // the user may have changed apps in between.
         let front = NSWorkspace.shared.frontmostApplication
         if front?.bundleIdentifier != Bundle.main.bundleIdentifier {
             panel.previousApp = front
         }
+        // No activation. `.nonactivatingPanel` plus `orderFrontRegardless`
+        // is the documented way to take the keyboard without taking the app
+        // in front down with it; `orderFrontRegardless` is explicitly a
+        // stacking call that changes neither the key nor the main window, and
+        // `makeKey` then moves only key.
         panel.orderFrontRegardless()
-        panel.makeKeyAndOrderFront(nil)
-        // An accessory app is not in the activation order, so ordering a window
-        // front is not enough to make it key — the same four-call sequence the
-        // Settings window and the tour already use. This is only ever reached
-        // from a click on a tile, which is the user event macOS wants to see
-        // behind a programmatic activation.
-        NSApp.activate(ignoringOtherApps: true)
-        if let hosting { panel.makeFirstResponder(hosting) }
+        panel.makeKey()
+        // Not `makeFirstResponder(hosting)`. The hosting view accepting first
+        // responder is exactly what it looks like — focus landing on the
+        // container rather than on the text inside it — and it took the caret
+        // back off the editor every time the window was raised. Measured: the
+        // panel was key and the app active, and the first responder was
+        // `NSHostingView<NotesEditorView>`, with no insertion point anywhere in
+        // the window. The editor's own `@FocusState` owns this.
+        model.requestFocus()
+        captureEditorFrames()
     }
+
+    /// Writes a few frames of the open editor to disk, when asked to.
+    ///
+    /// Only runs if `~/.ledge-notes-diag` exists, so it costs a stat and
+    /// nothing else for everybody who has not asked for it. Several frames
+    /// because the caret blinks: one picture proves nothing about whether there
+    /// is a caret at all.
+    private func captureEditorFrames() {
+        let marker = (NSHomeDirectory() as NSString).appendingPathComponent(".ledge-notes-capture")
+        guard FileManager.default.fileExists(atPath: marker) else { return }
+        editorCapture?.cancel()
+        editorCapture = Task { @MainActor [weak self] in
+            for ms in [300, 500, 700, 900, 1100, 1300] {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                guard let self, let png = self.capturedContentPNG() else { return }
+                let out = (NSHomeDirectory() as NSString)
+                    .appendingPathComponent(".ledge-editor-\(ms).png")
+                try? png.write(to: URL(fileURLWithPath: out))
+            }
+        }
+    }
+
+    private var editorCapture: Task<Void, Never>?
 
     /// The window's title is the note's first line, which is the only title a
     /// note has — there is no title field to fill in before writing.
@@ -273,34 +364,133 @@ final class NotesWindowController {
         panel?.title = first.isEmpty ? "New Note" : first
     }
 
-    /// Puts focus back where it was, leaving the window on screen.
+    /// Puts the note the window is leaving to bed before it takes up another.
+    ///
+    /// Closing the window already does this. Swapping notes inside an open one
+    /// did not, so pressing ⌘N on a blank note left that blank on disk and
+    /// opened a second one — and the note list filled up with untitled nothing.
+    /// Every way out of a note goes through here now: a new note, a note picked
+    /// from the list, and closing.
+    ///
+    /// The text is read before `model.load` replaces it, which is why this runs
+    /// first and not as part of the swap.
+    private func retire(before next: String?) {
+        guard let leaving = openNoteID, leaving != next else { return }
+        let text = NotesEditorModel.stored(model.text)
+        let store = store
+        Task {
+            await store.update(leaving, text: text)
+            await store.flush()
+            await store.discardIfEmpty(leaving)
+        }
+    }
+
+    /// Carries out a command, wherever it was asked for — the palette, a
+    /// header button, or a key the window caught.
+    ///
+    /// One place, so the three can never disagree about what a command does.
+    func run(_ command: NotesCommand) {
+        guard model.canRun(command) else { return }
+        switch command {
+        case .newNote:
+            create()
+        case .duplicate:
+            guard let id = openNoteID else { return }
+            let store = store
+            Task { @MainActor [weak self] in
+                guard let copy = await store.duplicate(id) else { return }
+                self?.present(copy)
+            }
+        case .allNotes:
+            let store = store
+            Task { @MainActor [weak self] in
+                self?.model.notes = await store.list()
+                self?.model.show(.notes)
+            }
+        case .find:
+            model.show(.find)
+        case .bold:
+            model.toggle(.stronglyEmphasized)
+        case .italic:
+            model.toggle(.emphasized)
+        case .copyMarkdown:
+            copy(NoteMarkdown.render(NotesEditorModel.stored(model.text)))
+        case .copyPlainText:
+            copy(String(model.text.characters))
+        case .exportToNotes:
+            let title = model.title
+            let text = NotesEditorModel.stored(model.text)
+            Task { [weak self] in
+                if let failure = await NotesExport.send(title: title, text: text) {
+                    await MainActor.run { self?.report(failure) }
+                }
+            }
+        case .deleteNote:
+            guard let id = openNoteID else { return }
+            // Forgotten before the window closes. Closing writes the note out
+            // one last time, and `update` revives a note that has gone — so
+            // leaving the id in place would bring back the note just deleted.
+            openNoteID = nil
+            onOpenNoteChanged?(nil)
+            let store = store
+            Task { await store.delete(id) }
+            close()
+        }
+    }
+
+    private func copy(_ text: String) {
+        let board = NSPasteboard.general
+        board.clearContents()
+        board.setString(text, forType: .string)
+    }
+
+    /// Says what went wrong, where the user is already looking.
+    ///
+    /// A refusal is a decision, not a fault: the user was asked once whether
+    /// Ledge could drive Notes and said no, and asking again by raising an
+    /// alert would be arguing with them. The window's own header says it
+    /// instead, and the next export will try again.
+    private func report(_ failure: NotesExport.Failure) {
+        switch failure {
+        case .notPermitted:
+            model.notice = "Notes isn't allowing this. Turn Ledge on under Privacy & Security → Automation."
+        case .timedOut:
+            model.notice = "Notes didn't answer."
+        case .failed:
+            model.notice = "Couldn't hand this to Notes."
+        }
+    }
+
+    /// Hands the keyboard back, leaving the window on screen.
+    ///
+    /// The app in front never stopped being active, so there is nothing to
+    /// restore — only the key window moves. Activating it again is what makes
+    /// one of its windows key, which is where the next keystroke should go.
     private func returnFocus() {
         guard let panel else { return }
         panel.resignKey()
         if let previous = panel.previousApp, previous.bundleIdentifier != Bundle.main.bundleIdentifier {
             previous.activate()
-        } else {
-            NSApp.hide(nil)
         }
     }
 
     /// Sleep/lock cancels pending focus changes but leaves an existing editor alone.
     func cancelPendingOpening() {
         opening.cancel()
-        cancelBirth()
     }
 
     func close() {
-        // Stopped first: a flight still running would raise this window again a
+        // Stopped first: a load still running would raise this window again a
         // moment after it closed, and pull focus with it.
         opening.cancel()
-        cancelBirth()
         panel?.close()
     }
 
     private func flush() {
         let id = openNoteID
-        let text = model.text
+        // Stored form, not what is on screen: the font is derived from the
+        // intent for the editor's benefit and is never the truth about a note.
+        let text = NotesEditorModel.stored(model.text)
         let store = self.store
         Task {
             if let id { await store.update(id, text: text) }
@@ -316,7 +506,18 @@ final class NotesWindowController {
             // titled panel still reserves its title bar's height, which left a
             // dead strip above the view's own header. Dragging is kept by
             // `isMovableByWindowBackground` below.
-            styleMask: [.borderless, .utilityWindow],
+            //
+            // `.nonactivatingPanel` is what lets the caret land here without
+            // the app behind going dim. Three states are in play and only one
+            // of them should change: the app that was in front stays *active*
+            // and keeps the menu bar, its window stays *main* and keeps drawing
+            // as the window you are working in, and only *key* — where
+            // keystrokes go — moves here. Without this bit a window of an
+            // accessory app cannot become key at all without activating the
+            // whole app, which is why there used to be an `NSApp.activate` call
+            // below, and why Terminal visibly lost focus the moment a note
+            // opened.
+            styleMask: [.borderless, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: false
         )
@@ -325,6 +526,11 @@ final class NotesWindowController {
         // window for anything that reads it, like the window menu.
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        // The window paints itself near-black whatever the system is set to, so
+        // it has to say so: in Light Mode the system would otherwise draw this
+        // window's selection highlight, scrollers and context menus for a light
+        // background they are not on.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
         panel.isFloatingPanel = true
@@ -343,7 +549,27 @@ final class NotesWindowController {
         // rather than inventing a second rule for the same question.
         panel.sharingType = preferences.hideFromScreenCapture ? .none : .readOnly
 
-        panel.onEscape = { [weak self] in self?.returnFocus() }
+        panel.onEscape = { [weak self] in
+            guard let self else { return }
+            // Escape means "back", and what it goes back to depends on where
+            // you are: out of a list to the note, and out of the note to
+            // whatever you were doing before. Routing it through the window
+            // rather than only through the search field is what makes it work
+            // when the field has lost focus — which is most of "return does not
+            // always work".
+            if self.model.overlay != .none {
+                self.model.dismissOverlay()
+            } else {
+                self.returnFocus()
+            }
+        }
+        panel.onCommand = { [weak self] command in self?.run(command) }
+        panel.onPalette = { [weak self] in
+            guard let self else { return }
+            // ⌘K is a way in and a way out: pressed again it puts the note back.
+            self.model.overlay == .commands ? self.model.dismissOverlay() : self.model.show(.commands)
+        }
+        panel.isEditingNote = { [weak self] in self?.model.overlay == NotesOverlay.none }
         panel.onClose = { [weak self] in self?.close() }
 
         let hosting = NSHostingView(rootView: NotesEditorView(
@@ -365,7 +591,6 @@ final class NotesWindowController {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.opening.cancel()
-                self.cancelBirth()
                 self.flush()
                 self.openNoteID = nil
                 self.onOpenNoteChanged?(nil)
@@ -382,9 +607,12 @@ final class NotesWindowController {
         model.onEdit = { [weak self] text in
             guard let self, let id = self.openNoteID else { return }
             self.updateTitle(from: text)
+            self.model.notice = nil
             let store = self.store
             Task { await store.update(id, text: text) }
         }
+        model.onCommand = { [weak self] command in self?.run(command) }
+        model.onOpenNote = { [weak self] id in self?.open(noteID: id) }
 
         self.panel = panel
         return panel
@@ -400,7 +628,7 @@ final class NotesWindowController {
         guard let screen else { return panel.frame }
         let island = sourceIsland?() ?? CGRect(x: screen.frame.midX, y: screen.visibleFrame.maxY,
                                                width: 0, height: 0)
-        return NotesBirthGeometry.landing(island: island, visible: screen.visibleFrame,
+        return NotesGeometry.landing(island: island, visible: screen.visibleFrame,
                                           scale: displayScale?() ?? 1)
     }
 
@@ -414,7 +642,6 @@ final class NotesWindowController {
 
     func tearDown() {
         opening.cancel()
-        cancelBirth()
         flush()
         if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
         if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
