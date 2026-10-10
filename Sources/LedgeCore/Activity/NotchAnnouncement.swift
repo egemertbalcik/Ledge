@@ -88,4 +88,47 @@ public struct NotchAnnouncement: Equatable, Sendable {
             completedSessions: payload.completedSessions
         )
     }
+
+    /// What a Keep Awake card should say when it lands, or nil when it is not
+    /// worth standing up for.
+    ///
+    /// Two arrivals qualify, and they are the two the user did not ask for at
+    /// that moment. A session that *ended* is a power change: the Mac can
+    /// sleep again, and `KeepAwakeCopy` has a sentence saying so for every
+    /// reason it can happen for. A session picked up again after a relaunch is
+    /// the other: it comes back on its own, and the notch saying so is how the
+    /// user learns their Mac is being held awake. Pressing Start is neither —
+    /// they are looking at the card they pressed it on.
+    public static func forKeepAwake(_ payload: KeepAwakePayload) -> NotchAnnouncement? {
+        switch payload.phase {
+        case .ready:
+            return nil
+        case .running:
+            guard payload.resumed else { return nil }
+            return NotchAnnouncement(
+                title: KeepAwakeCopy.resumed(
+                    remaining: SatelliteContent.keepAwakeLabel(remaining: payload.remaining),
+                    until: payload.until
+                ),
+                symbolName: "cup.and.saucer.fill",
+                accent: keepAwakeAccent
+            )
+        case .finished(let reason):
+            guard reason.isVisible else { return nil }
+            return NotchAnnouncement(
+                title: KeepAwakeCopy.finished(
+                    reason,
+                    at: payload.until,
+                    floor: payload.batteryFloor,
+                    lidClosed: payload.lidClosed
+                ),
+                symbolName: "cup.and.saucer.fill",
+                accent: keepAwakeAccent
+            )
+        }
+    }
+
+    /// Keep Awake's tan, the same one its card and ears wear. Warm rather than
+    /// alarming: nothing is wrong, the Mac is simply being held open.
+    private static let keepAwakeAccent = AccentColor(red: 0.72, green: 0.56, blue: 0.38)
 }

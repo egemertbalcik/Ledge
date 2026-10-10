@@ -129,6 +129,7 @@ public final class LedgePanelController {
     private let onTap: () -> Void
     private let nowPlayingActions: NowPlayingActions
     private let timerActions: TimerActions
+    private let keepAwakeActions: KeepAwakeActions
     private let shelfActions: ShelfActions
     private let notesActions: NotesActions
     private let levelsActions: LevelsActions
@@ -156,6 +157,7 @@ public final class LedgePanelController {
         onTap: @escaping () -> Void,
         nowPlayingActions: NowPlayingActions = NowPlayingActions(),
         timerActions: TimerActions = TimerActions(),
+        keepAwakeActions: KeepAwakeActions = KeepAwakeActions(),
         shelfActions: ShelfActions = ShelfActions(),
         notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
@@ -169,6 +171,7 @@ public final class LedgePanelController {
         self.onTap = onTap
         self.nowPlayingActions = nowPlayingActions
         self.timerActions = timerActions
+        self.keepAwakeActions = keepAwakeActions
         self.shelfActions = shelfActions
         self.notesActions = notesActions
         self.levelsActions = levelsActions
@@ -205,6 +208,7 @@ public final class LedgePanelController {
             onTap: onTap,
             nowPlayingActions: nowPlayingActions,
             timerActions: timerActions,
+            keepAwakeActions: keepAwakeActions,
             shelfActions: shelfActions,
             notesActions: notesActions,
             levelsActions: levelsActions,

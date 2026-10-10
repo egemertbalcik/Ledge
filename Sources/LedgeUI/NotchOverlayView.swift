@@ -71,6 +71,10 @@ public final class NotchPresentation {
     /// while music keeps the island (and the island itself when it does not).
     public var timerSession: Activity?
 
+    /// The Keep Awake card, read straight off the queue like the timer's, so
+    /// the ears and the satellite empty the moment the session ends.
+    public var keepAwakeSession: Activity?
+
     /// The privacy card while recording is live — the satellite's most urgent
     /// standing tenant.
     public var privacyActive: Activity?
@@ -217,6 +221,16 @@ public final class NotchPresentation {
         return session
     }
 
+    /// The Keep Awake session while one is genuinely running. A Ready or
+    /// Finished card is a card, not a standing fact about the Mac.
+    public var runningKeepAwake: Activity? {
+        guard let session = keepAwakeSession,
+              case .keepAwake(let payload) = session.payload,
+              payload.isRunning
+        else { return nil }
+        return session
+    }
+
     /// The now-playing activity, only when it has business in the ears —
     /// playing, and something listened to rather than watched.
     var playingNowPlaying: Activity? {
@@ -245,6 +259,12 @@ public final class NotchPresentation {
                 isRunning: payload.isRunning
             )
         }()
+        let keepAwakeContent: SatelliteContent? = {
+            guard let session = runningKeepAwake,
+                  case .keepAwake(let payload) = session.payload
+            else { return nil }
+            return .keepAwake(remaining: payload.remaining)
+        }()
         let privacyContent: SatelliteContent? = {
             guard let activity = privacyActive,
                   case .privacy(let payload) = activity.payload,
@@ -256,6 +276,7 @@ public final class NotchPresentation {
             transient: hudSatellite,
             privacy: privacyContent,
             timer: timerContent,
+            keepAwake: keepAwakeContent,
             timerIsMainIsland: playingNowPlaying == nil,
         )
     }
@@ -291,6 +312,7 @@ public struct NotchOverlayView: View {
     }
 
     private let timerActions: TimerActions
+    private let keepAwakeActions: KeepAwakeActions
     private let shelfActions: ShelfActions
     private let notesActions: NotesActions
     private let levelsActions: LevelsActions
@@ -310,6 +332,7 @@ public struct NotchOverlayView: View {
         onTap: @escaping () -> Void = {},
         nowPlayingActions: NowPlayingActions = NowPlayingActions(),
         timerActions: TimerActions = TimerActions(),
+        keepAwakeActions: KeepAwakeActions = KeepAwakeActions(),
         shelfActions: ShelfActions = ShelfActions(),
         notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
@@ -325,6 +348,7 @@ public struct NotchOverlayView: View {
         self.onTap = onTap
         self.nowPlayingActions = nowPlayingActions
         self.timerActions = timerActions
+        self.keepAwakeActions = keepAwakeActions
         self.shelfActions = shelfActions
         self.notesActions = notesActions
         self.levelsActions = levelsActions
@@ -402,6 +426,7 @@ public struct NotchOverlayView: View {
             // the test and vanished to idle during a hover elsewhere.
             let hasRestingContent = presentation.playingNowPlaying != nil
                 || presentation.runningTimerSession != nil
+                || presentation.runningKeepAwake != nil
             return hasRestingContent ? .companion : .idle
         default:
             return presentation.phase
@@ -735,6 +760,7 @@ public struct NotchOverlayView: View {
                     farewell: presentation.farewell,
                     playingNowPlaying: presentation.playingNowPlaying,
                     runningTimer: presentation.runningTimerSession,
+                    keepAwake: presentation.runningKeepAwake,
                     closeEvent: presentation.closeEvent,
                     nowPlaying: presentation.lingeringNowPlaying,
                     selected: presentation.selected
@@ -911,6 +937,7 @@ public struct NotchOverlayView: View {
                         // mattered and the shell never grew its hit region.
                         nowPlayingActions: routeAwareActions,
                         timerActions: timerActions,
+                        keepAwakeActions: keepAwakeActions,
                         shelfActions: shelfActions,
                         notesActions: notesActions,
                         levelsActions: levelsActions,

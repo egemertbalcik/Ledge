@@ -65,6 +65,20 @@ public enum Prefs {
     /// Recently used quick-timer minutes, freshest first, comma-joined.
     public static let timerRecents = PrefKey<String>("timer.recents", default: "")
 
+    // Keep Awake
+    /// The length the Ready card opens on, in minutes.
+    ///
+    /// An hour: long enough to cover the thing a keep-awake is usually
+    /// reached for — an export, an install, a long download — without being
+    /// the sort of number somebody has to remember to undo.
+    public static let keepAwakeDefaultMinutes = PrefKey<Double>("keepAwake.defaultMinutes", default: 60)
+    /// The battery level a session ends at while on battery.
+    ///
+    /// Fifteen percent, which is where macOS itself starts warning. Low
+    /// enough to be out of the way of ordinary work, high enough that the Mac
+    /// is handed back with something left to sleep on rather than flat.
+    public static let keepAwakeBatteryFloor = PrefKey<Double>("keepAwake.batteryFloor", default: 15)
+
     // Shelf
     /// Parked file paths, newline-separated. `PrefKey` supports no arrays, and
     /// this matches how `disabledProviders` already encodes a set.
@@ -264,6 +278,7 @@ public enum Prefs {
         peekDuration.name, hudDuration.name, companionLinger.name,
         timerWorkMinutes.name, timerShortBreakMinutes.name, timerLongBreakMinutes.name,
         timerAutoAdvance.name, timerRecents.name, shelfPaths.name,
+        keepAwakeDefaultMinutes.name, keepAwakeBatteryFloor.name,
         swipeThreshold.name, naturalSwipe.name,
         disabledProviders.name, enabledProviders.name, weatherCity.name, weatherUnits.name,
         quietDuringFocus.name,
@@ -318,6 +333,12 @@ public final class Preferences {
     public var timerLongBreakMinutes: Double { didSet { persist(timerLongBreakMinutes, Prefs.timerLongBreakMinutes) } }
     public var timerAutoAdvance: Bool { didSet { persist(timerAutoAdvance, Prefs.timerAutoAdvance) } }
     public var timerRecents: String { didSet { persist(timerRecents, Prefs.timerRecents) } }
+    public var keepAwakeDefaultMinutes: Double {
+        didSet { persist(keepAwakeDefaultMinutes, Prefs.keepAwakeDefaultMinutes) }
+    }
+    public var keepAwakeBatteryFloor: Double {
+        didSet { persist(keepAwakeBatteryFloor, Prefs.keepAwakeBatteryFloor) }
+    }
     public var shelfPaths: String { didSet { persist(shelfPaths, Prefs.shelfPaths) } }
     public var hudDuration: Double { didSet { persist(hudDuration, Prefs.hudDuration) } }
 
@@ -398,6 +419,8 @@ public final class Preferences {
         timerLongBreakMinutes = store.value(for: Prefs.timerLongBreakMinutes)
         timerAutoAdvance = store.value(for: Prefs.timerAutoAdvance)
         timerRecents = store.value(for: Prefs.timerRecents)
+        keepAwakeDefaultMinutes = store.value(for: Prefs.keepAwakeDefaultMinutes)
+        keepAwakeBatteryFloor = store.value(for: Prefs.keepAwakeBatteryFloor)
         shelfPaths = store.value(for: Prefs.shelfPaths)
         hudDuration = store.value(for: Prefs.hudDuration)
         hudEnabled = store.value(for: Prefs.hudEnabled)
@@ -475,6 +498,8 @@ public final class Preferences {
         timerLongBreakMinutes = Prefs.timerLongBreakMinutes.defaultValue
         timerAutoAdvance = Prefs.timerAutoAdvance.defaultValue
         timerRecents = Prefs.timerRecents.defaultValue
+        keepAwakeDefaultMinutes = Prefs.keepAwakeDefaultMinutes.defaultValue
+        keepAwakeBatteryFloor = Prefs.keepAwakeBatteryFloor.defaultValue
         shelfPaths = Prefs.shelfPaths.defaultValue
         hudDuration = Prefs.hudDuration.defaultValue
         hudEnabled = Prefs.hudEnabled.defaultValue

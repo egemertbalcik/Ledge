@@ -20,6 +20,7 @@ public struct ActivityCardView: View {
     private let onContentHeight: (ActivityID, CGFloat) -> Void
     private let nowPlayingActions: NowPlayingActions
     private let timerActions: TimerActions
+    private let keepAwakeActions: KeepAwakeActions
     private let shelfActions: ShelfActions
     private let notesActions: NotesActions
     private let levelsActions: LevelsActions
@@ -40,6 +41,7 @@ public struct ActivityCardView: View {
         isCompactWidth: Bool = false,
         nowPlayingActions: NowPlayingActions = NowPlayingActions(),
         timerActions: TimerActions = TimerActions(),
+        keepAwakeActions: KeepAwakeActions = KeepAwakeActions(),
         shelfActions: ShelfActions = ShelfActions(),
         notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
@@ -61,6 +63,7 @@ public struct ActivityCardView: View {
         self.onContentHeight = onContentHeight
         self.nowPlayingActions = nowPlayingActions
         self.timerActions = timerActions
+        self.keepAwakeActions = keepAwakeActions
         self.shelfActions = shelfActions
         self.notesActions = notesActions
         self.levelsActions = levelsActions
@@ -90,6 +93,13 @@ public struct ActivityCardView: View {
                 isCompactWidth: isCompactWidth,
                 now: fixedNow
             )
+        case .keepAwake(let payload):
+            KeepAwakeCardView(
+                payload: payload,
+                actions: keepAwakeActions,
+                isCompactWidth: isCompactWidth
+            )
+            .measuredContent(activity.id, onContentHeight)
         case .levels:
             LevelsCardView(actions: levelsActions, isCompactWidth: isCompactWidth, liveLevel: liveLevel)
         case .shelf(let payload):
@@ -195,7 +205,8 @@ public struct ActivityCardView: View {
                 .frame(height: 3)
                 .padding(.top, 2)
 
-        case .focus, .event, .message, .weather, .timer, .shelf, .privacy, .keyboard, .levels, .notes:
+        case .focus, .event, .message, .weather, .timer, .shelf, .privacy, .keyboard, .levels, .notes,
+             .keepAwake:
             EmptyView()
         }
     }
@@ -219,6 +230,7 @@ public struct ActivityCardView: View {
         case .levels: "Levels"
         case .notes(let payload):
             payload.notes.count == 1 ? "1 note" : "\(payload.notes.count) notes"
+        case .keepAwake: KeepAwakeCopy.title
         }
     }
 
@@ -239,6 +251,17 @@ public struct ActivityCardView: View {
         case .levels: "Sound & display"
         case .notes(let payload):
             payload.notes.first?.title ?? "Nothing written down"
+        case .keepAwake(let payload):
+            // What the card would say in full, one state at a time. A running
+            // hold says when it ends; a finished one says what happened.
+            switch payload.phase {
+            case .ready: payload.problem == nil ? KeepAwakeCopy.readyLidOpen : ""
+            case .running: KeepAwakeCopy.runningUntil(payload.until)
+            case .finished(let reason):
+                KeepAwakeCopy.finished(reason, at: payload.until,
+                                       floor: payload.batteryFloor,
+                                       lidClosed: payload.lidClosed)
+            }
         }
     }
 
@@ -257,6 +280,8 @@ public struct ActivityCardView: View {
             payload.lowestLevel.map { "\(Int(($0 * 100).rounded()))%" }
         case .keyboard(let payload):
             payload.code.isEmpty ? nil : payload.code
+        case .keepAwake(let payload):
+            payload.isRunning ? SatelliteContent.keepAwakeLabel(remaining: payload.remaining) : nil
         case .focus, .message, .weather, .shelf, .privacy, .levels, .notes:
             nil
         }
@@ -280,6 +305,7 @@ public struct ActivityCardView: View {
         case .keyboard(let payload): payload.symbolName ?? "keyboard"
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
+        case .keepAwake: "cup.and.saucer"
         }
     }
 
@@ -299,6 +325,7 @@ public struct ActivityCardView: View {
         case .keyboard: .white
         case .levels: .white
         case .notes: .yellow
+        case .keepAwake: KeepAwakeCardView.tint
         }
     }
 

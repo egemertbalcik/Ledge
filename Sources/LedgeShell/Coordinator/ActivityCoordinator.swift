@@ -434,10 +434,18 @@ public final class ActivityCoordinator {
         // opens, and the ears decide what to draw in it. When the two rules
         // differed the island opened for a video the compact view then
         // declined to draw, and the notch sat there with two empty ears.
+        let keepAwakeRunning = queue.activities.contains { activity in
+            guard case .keepAwake(let payload) = activity.payload else { return false }
+            return payload.isRunning
+        }
         let playing = timerRunning || closeEvent || queue.activities.contains {
             $0.id.kind == .nowPlaying && $0.restsInEars
         }
         let present = playing
+            // A running Keep Awake rests in the ears like a running timer. Left
+            // out, the island refused to open for it and the countdown had
+            // nowhere to appear.
+            || keepAwakeRunning
             || queue.activities.contains { activity in
                 guard case .nowPlaying(let payload) = activity.payload else { return false }
                 // Paused media is present for its linger — but only what the
@@ -494,6 +502,7 @@ public final class ActivityCoordinator {
         presentation.timerSession = queue.activities.first {
             $0.id.kind == .timer && $0.id.source == "session"
         }
+        presentation.keepAwakeSession = queue.activities.first { $0.id.kind == .keepAwake }
         presentation.privacyActive = queue.activities.first { $0.id.kind == .privacy }
         // The lingering card follows the queue while it lasts: the coordinator
         // decides *whether* a paused track may still be drawn, but which track

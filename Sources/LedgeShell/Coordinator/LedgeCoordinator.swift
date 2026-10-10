@@ -116,6 +116,11 @@ public final class LedgeCoordinator {
         }
         let work = Task { @MainActor [weak self] in
             guard let self else { return }
+            // Keep Awake first, and before `activities.stop()` takes the
+            // provider down: `stop()` lets go of the assertion but writes
+            // nothing, so the session has to be ended — or deliberately left
+            // running — while there is still a provider to ask.
+            await self.endKeepAwakeForTermination()
             self.activities.stop()
             await self.deviceObservations.close()
             await self.settingsModel.drainPendingWrites()
@@ -129,6 +134,94 @@ public final class LedgeCoordinator {
 
     /// The shutdown in progress, so a second request joins it.
     private var quiesceWork: Task<Void, Never>?
+
+    // MARK: - Keep Awake
+
+    /// How this process is about to end, which decides whether a Keep Awake
+    /// session ends with it.
+    ///
+    /// Classified rather than inferred, because the three cases are
+    /// indistinguishable from inside `applicationShouldTerminate`: Sparkle
+    /// relaunching for an update, the system logging out or restarting, and the
+    /// user actually quitting all arrive the same way. Only the last one means
+    /// "I am done keeping this Mac awake".
+    enum TerminationKind: Equatable {
+        case quit
+        case updateRelaunch
+        case powerOff
+    }
+
+    private(set) var terminationKind: TerminationKind = .quit
+
+    /// Told by the Sparkle delegate just before an update relaunch.
+    public func willRelaunchForUpdate() {
+        terminationKind = .updateRelaunch
+    }
+
+    /// Told by `NSWorkspace.willPowerOffNotification`.
+    public func willPowerOff() {
+        terminationKind = .powerOff
+    }
+
+    /// The provider, while the card is on. Held so the coordinator can end a
+    /// session explicitly — `hub.remove` only reaches `stop()`, which is the
+    /// crash-equivalent path and deliberately writes nothing.
+    weak var keepAwake: KeepAwakeProvider?
+
+    /// How long a quit may wait for the session to be written down.
+    ///
+    /// Bounded because a quit that hangs on a disk is worse than a session
+    /// recorded a moment late: the end is released before the write is even
+    /// attempted, so the Mac is already free to sleep whatever happens here.
+    static let keepAwakeTerminationBudget: Duration = .seconds(6)
+
+    private func endKeepAwakeForTermination() async {
+        guard let provider = keepAwake else { return }
+        switch terminationKind {
+        case .updateRelaunch, .powerOff:
+            // Neither is the user saying they are finished. The journal keeps
+            // `running`; a relaunch in this boot resumes and announces it, and
+            // a restart ends it by boot id.
+            await provider.flushPendingWrites()
+        case .quit:
+            await withTimeout(Self.keepAwakeTerminationBudget) {
+                await provider.end(reason: .quit)
+            }
+        }
+    }
+
+    /// Ends a session because the card is being switched off or settings are
+    /// being reset.
+    public func endKeepAwake(reason: KeepAwakeEndReason) async {
+        guard let provider = keepAwake else { return }
+        await withTimeout(Self.keepAwakeTerminationBudget) {
+            await provider.end(reason: reason)
+        }
+    }
+
+    /// Stops waiting on `body` after `budget`, rather than holding a quit open.
+    ///
+    /// It bounds the *wait*, not the work. `end` lets go of the assertion
+    /// before it tries to write anything, so by the time this gives up the Mac
+    /// is already free to sleep and all that is outstanding is a record
+    /// catching up. A quit wedged behind a disk that has stopped answering
+    /// would be the worse outcome, and a failing disk is exactly when that
+    /// happens.
+    private func withTimeout(_ budget: Duration,
+                             _ body: @escaping @MainActor () async -> Void) async {
+        let gate = FirstToFinish()
+        let work = Task { @MainActor in
+            await body()
+            await gate.signal()
+        }
+        let limit = Task {
+            try? await Task.sleep(for: budget)
+            await gate.signal()
+        }
+        await gate.wait()
+        work.cancel()
+        limit.cancel()
+    }
 
     /// Builds the Devices pane's model once, handing it closures that reach
     /// the catalogue actor. The pane never touches the store directly, so no
@@ -349,11 +442,63 @@ public final class LedgeCoordinator {
         }
     }
 
+    /// Which card-switch request is the newest.
+    /// The journal's one writer, outliving every provider over it.
+    private let keepAwakeJournal = KeepAwakeJournalWorker(FileKeepAwakeJournal())
+
+    /// Keeps the Keep Awake switch's answers in the order they were given.
+    private lazy var keepAwakeToggle = KeepAwakeToggle(
+        end: { [weak self] in await self?.endKeepAwake(reason: .turnedOff) },
+        apply: { [weak self] enabled in
+            guard let self else { return }
+            self.activities.setProvider("keep-awake", enabled: enabled)
+            self.refreshSettingsModel()
+        }
+    )
+
+    /// What the Keep Awake card's buttons actually do.
+    ///
+    /// Without this the card drew Start, End, Resume and Done over the default
+    /// empty closures, so every one of them was a no-op in the shipping app
+    /// while the tests that drove the provider directly all passed.
+    private func makeKeepAwakeActions() -> KeepAwakeActions {
+        KeepAwakeActions(
+            start: { [weak self] minutes in
+                guard let self else { return }
+                self.preferences.keepAwakeDefaultMinutes = Double(minutes)
+                Task { @MainActor in await self.keepAwake?.begin(minutes: minutes) }
+            },
+            end: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in await self.keepAwake?.end(reason: .endedByYou) }
+            },
+            dismiss: { [weak self] in self?.keepAwake?.dismiss() },
+            resume: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in await self.keepAwake?.resume() }
+            },
+            haptic: {
+                NSHapticFeedbackManager.defaultPerformer.perform(
+                    .alignment, performanceTime: .drawCompleted
+                )
+            },
+            setDragging: { [weak self] dragging in self?.setHUDDragging(dragging) }
+        )
+    }
+
     private func handlePreferencesReset() {
         shelf.reload()
         timerProviderRef?.replaceRecents(TimerProvider.decodeRecents(preferences.timerRecents))
-        activities.reconcileWithPreferences()
-        refreshSettingsModel()
+        // The reconcile is what tears the provider down, so the end has to be
+        // awaited before it rather than merely started alongside it: posting
+        // the end and reconciling in the same turn let the removal win, and a
+        // reset then left a session on disk that the next launch resumed.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.endKeepAwake(reason: .turnedOff)
+            self.activities.reconcileWithPreferences()
+            self.refreshSettingsModel()
+        }
     }
 
     private func setScreensDark(_ reason: ScreenDormancy.Reason, _ active: Bool) {
@@ -637,6 +782,7 @@ public final class LedgeCoordinator {
             onTap: { [weak self] in self?.send(.clicked) },
             nowPlayingActions: makeNowPlayingActions(),
             timerActions: makeTimerActions(),
+            keepAwakeActions: makeKeepAwakeActions(),
             shelfActions: makeShelfActions(),
             notesActions: makeNotesActions(),
             levelsActions: makeLevelsActions(),
@@ -888,6 +1034,12 @@ public final class LedgeCoordinator {
         switch activity.payload {
         case .timer(let payload):
             return NotchAnnouncement.forTimer(payload)
+        case .keepAwake(let payload):
+            // A session that came back on its own, and one that ended while
+            // nobody was looking, both have to say so — the first because
+            // nobody asked for it, the second because the Mac's behaviour
+            // changed while the user was away.
+            return NotchAnnouncement.forKeepAwake(payload)
         default:
             return nil
         }
@@ -1214,6 +1366,48 @@ public final class LedgeCoordinator {
             focusSource: { [weak self] in
                 guard let base = self?.focusBaseline else { return SystemFocusSource() }
                 return SharedFocusSource(base)
+            },
+            keepAwakeProvider: { [weak self] in
+                guard let self else {
+                    return KeepAwakeProvider(
+                        assertion: IOPMSleepAssertion(),
+                        power: IOKitPowerSource(),
+                        thermal: ProcessInfoThermalSource(),
+                        journal: FileKeepAwakeJournal(),
+                        tombstone: DefaultsKeepAwakeTombstone(),
+                        bootID: BootSession.identifier()
+                    )
+                }
+                let provider = KeepAwakeProvider(
+                    assertion: IOPMSleepAssertion(),
+                    // Its own power source, not a share of the battery card's.
+                    // The single-subscriber limit is per instance, and each
+                    // instance brings its own run-loop source, so this watches
+                    // the same hardware without taking the other's callback
+                    // away.
+                    power: IOKitPowerSource(),
+                    thermal: ProcessInfoThermalSource(),
+                    // The one writer over the one file, shared by every
+                    // provider built here. Switching Keep Awake off and on
+                    // again builds a new one while the old one may still be
+                    // waiting on the disk, and which of them is allowed to
+                    // write is a question that outlives both.
+                    journal: self.keepAwakeJournal,
+                    tombstone: DefaultsKeepAwakeTombstone(),
+                    bootID: BootSession.identifier(),
+                    // A session that ends with no notch on screen keeps its
+                    // summary until there is somewhere to show it.
+                    hasNotchPanel: { [weak self] in self?.displayPanels.primary != nil },
+                    settings: { [weak self] in
+                        guard let self else { return KeepAwakeProvider.Settings() }
+                        return KeepAwakeProvider.Settings(
+                            defaultMinutes: Int(self.preferences.keepAwakeDefaultMinutes),
+                            batteryFloor: Int(self.preferences.keepAwakeBatteryFloor)
+                        )
+                    }
+                )
+                self.keepAwake = provider
+                return provider
             }
         )
         for registration in registrations {
@@ -2617,6 +2811,7 @@ public final class LedgeCoordinator {
             farewell: presentation.farewell,
             playingNowPlaying: playing,
             runningTimer: runningTimer,
+            keepAwake: presentation.runningKeepAwake,
             closeEvent: presentation.closeEvent,
             nowPlaying: presentation.lingeringNowPlaying,
             selected: presentation.selected
@@ -2962,6 +3157,29 @@ public final class LedgeCoordinator {
             })
         }
 
+        // Logging out, restarting or shutting down is not the user saying they
+        // are finished with Keep Awake, so the session is left recorded as
+        // running: a restart then ends it by boot id, and a logout resumes it
+        // at the next login if its deadline is still ahead.
+        observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.willPowerOff() }
+        })
+
+        // The deadline is an absolute time, so moving the clock moves how long
+        // is left. The timer is re-armed rather than trusted — a timer that
+        // fires early and quietly returns is how a session never ends at all.
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NSSystemClockDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.keepAwake?.clockDidChange() }
+        })
+
         observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -2970,6 +3188,10 @@ public final class LedgeCoordinator {
             MainActor.assumeIsolated {
                 Self.log.notice("woke from sleep — repositioning")
                 self?.send(.forceCollapse)
+                // The assertion is re-armed rather than assumed intact, and the
+                // deadline is checked: sleeping through the end of a session is
+                // the ordinary case, not the exception.
+                self?.keepAwake?.systemDidWake()
                 // A lid can close on one permission state and open on another.
                 self?.revalidatePermissions()
                 // The refresh timer runs on a suspending clock, so a night of
@@ -3138,8 +3360,15 @@ public final class LedgeCoordinator {
             refreshPermissions: { [weak self] in self?.revalidatePermissions() },
             setProviderEnabled: { [weak self] id, enabled in
                 guard let self else { return }
-                self.activities.setProvider(id, enabled: enabled)
-                self.refreshSettingsModel()
+                // Keep Awake is the one switch with work to do on the way off,
+                // so it is the one switch whose order has to be kept. See
+                // `KeepAwakeToggle`.
+                guard id == "keep-awake" else {
+                    self.activities.setProvider(id, enabled: enabled)
+                    self.refreshSettingsModel()
+                    return
+                }
+                self.keepAwakeToggle.set(enabled)
             },
             showOnboarding: { [weak self] in self?.showOnboarding() },
             openSource: { NSWorkspace.shared.open(Self.sourceURL) },

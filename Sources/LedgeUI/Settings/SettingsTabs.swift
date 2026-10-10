@@ -309,6 +309,30 @@ struct ProviderDetailPane: View {
                     }
                 }
 
+                if id == "keep-awake" {
+                    Section("Length") {
+                        LabeledSlider("Default", value: $preferences.keepAwakeDefaultMinutes,
+                                      in: 5...180, format: "%.0f min")
+                        Text("What the card opens on. The length is still set on the card itself, by dragging the number sideways.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Section("Battery") {
+                        LabeledSlider("End at", value: $preferences.keepAwakeBatteryFloor,
+                                      in: 5...50, format: "%.0f%%")
+                        Text("On battery, a session ends here so your Mac can sleep before it runs out. Plugged in, it runs to the end.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    Section("If Ledge restarts") {
+                        // Stated rather than discovered. The alternative is
+                        // learning the policy by losing a session to it.
+                        Text(KeepAwakeCopy.continuityPolicy)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if id == "nowplaying" {
                     Section("What Ledge can see") {
                         HStack {
@@ -425,6 +449,7 @@ struct ProviderDetailPane: View {
         case "focus": "A card when a Focus mode turns on or off."
         case "weather": "Current conditions for your location, or a city you choose."
         case "timer": "A focus timer and pomodoro cycle, counted down in the notch."
+        case "keep-awake": KeepAwakeCopy.settingsSummary
         case "shelf": "Drop files on the notch to park them, then drag them out anywhere."
         case "privacy": "A dot while the camera or microphone is in use by an app."
         case "levels": "Sliders for sound and brightness, for a keyboard or mouse with no keys for them."

@@ -16,6 +16,7 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
     case keyboard
     case levels
     case notes
+    case keepAwake
 
     /// Default ordering weight. Higher wins a place nearer the front.
     ///
@@ -39,6 +40,10 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
         // A running session outranks an ambient Focus card, but a meeting about
         // to start still wins. The finishing publish overrides this upward.
         case .timer: 45
+        // One under the timer, because when both are running the countdown is
+        // the one with a deadline the user is waiting on; a keep-awake is a
+        // condition they set and stopped thinking about.
+        case .keepAwake: 44
         case .focus: 40
         case .nowPlaying: 30
         // Ambient by design: a standing widget you cycle to, never something
@@ -138,6 +143,8 @@ extension Activity {
             return payload.isPlaying && payload.showsInCompact
         case .timer(let payload):
             return !payload.isIdle
+        case .keepAwake(let payload):
+            return payload.isRunning
         case .event(let payload):
             return payload.hasEvent && payload.startsIn <= 60 * 60 && payload.startsIn >= -60
         case .levels, .shelf, .notes:
@@ -164,6 +171,26 @@ extension Activity {
         switch payload {
         case .timer(let payload):
             return !payload.isIdle
+        case .keepAwake(let payload):
+            switch payload.phase {
+            case .ready:
+                // The launcher, exactly as the timer's: its arrival is the
+                // absence of a session.
+                return false
+            case .running:
+                // Starting is something the user just did and is looking at.
+                // A session picked up again is not: it comes back on its own
+                // after a relaunch, and the first the user knows of it is the
+                // notch saying so. The provider marks that publish by carrying
+                // what was given back in `resumable`.
+                return payload.resumed
+            case .finished(let reason):
+                // A session ending on its own is a power change nobody asked
+                // for at that moment, which is the whole reason each reason
+                // has a sentence. Quitting and switching the card off are the
+                // two that have no surface left to say it on.
+                return reason.isVisible
+            }
         case .nowPlaying(let payload):
             // Nothing that has no place in the ears announces itself into
             // them: the peek would flash a card and hand back to an empty
@@ -201,15 +228,21 @@ extension Activity {
 ///
 /// The precedence lives here, as a pure function, because it is a *rule*
 /// rather than a view detail: a farewell outranks the residents for its four
-/// seconds, then playing music, then a running timer, then an imminent
-/// meeting, then paused music inside its linger. Only then the card the user
-/// last looked at — and only if that card has any business resting.
+/// seconds, then playing music, then a running timer, then a running Keep
+/// Awake, then an imminent meeting, then paused music inside its linger. Only
+/// then the card the user last looked at — and only if that card has any
+/// business resting.
 public enum CompactRest {
 
+    /// - Parameter keepAwake: a Keep Awake session that is actually holding
+    ///   the Mac awake. Below the timer for the same reason its priority is:
+    ///   both are counting down, and only one of them is a deadline the user
+    ///   is waiting on.
     public static func resolve(
         farewell: Activity?,
         playingNowPlaying: Activity?,
         runningTimer: Activity?,
+        keepAwake: Activity? = nil,
         closeEvent: Activity?,
         nowPlaying: Activity?,
         selected: Activity?
@@ -226,6 +259,7 @@ public enum CompactRest {
         if let farewell { return farewell }
         if let playingNowPlaying = restable(playingNowPlaying) { return playingNowPlaying }
         if let runningTimer { return runningTimer }
+        if let keepAwake { return keepAwake }
         if let closeEvent { return closeEvent }
         if let nowPlaying = restable(nowPlaying) { return nowPlaying }
         // The last resort is the only one that is not already a live fact, so

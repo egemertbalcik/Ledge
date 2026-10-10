@@ -20,6 +20,7 @@ public enum ActivityPayload: Equatable, Sendable {
     case keyboard(KeyboardLayoutPayload)
     case levels(LevelsPayload)
     case notes(NotesPayload)
+    case keepAwake(KeepAwakePayload)
 }
 
 /// Which recording hardware is live right now.

@@ -136,6 +136,20 @@ public struct CompactEarsView: View {
             return payload.isMuted ? "Levels, muted" : "Levels, volume \(percent(payload.volume))"
         case .notes(let payload):
             return payload.notes.count == 1 ? "1 note" : "\(payload.notes.count) notes"
+        case .keepAwake(let payload):
+            switch payload.phase {
+            case .ready:
+                return "\(KeepAwakeCopy.title), ready"
+            case .running:
+                return "\(KeepAwakeCopy.title), "
+                    + "\(KeepAwakeCardView.spoken(payload.remaining)) left, "
+                    + KeepAwakeCopy.runningUntil(payload.until).lowercased()
+            case .finished(let reason):
+                return "\(KeepAwakeCopy.title), "
+                    + KeepAwakeCopy.finished(reason, at: payload.until,
+                                             floor: payload.batteryFloor,
+                                             lidClosed: payload.lidClosed)
+            }
         }
     }
 
@@ -193,6 +207,14 @@ public struct CompactEarsView: View {
             // A countdown gets the dial; a stopwatch has no total to empty and
             // keeps its glyph.
             TimerDial(remaining: 1 - payload.progress, tint: accent)
+                .padding(.horizontal, 6)
+        } else if case .keepAwake = activity.payload {
+            // The cup, and no dial. Keep Awake rests here only while it is
+            // running, and what it is running towards is not progress anyone
+            // watches — the trailing ear carries the only number worth having.
+            Image(systemName: symbolName)
+                .font(.cardTitle)
+                .foregroundStyle(accent)
                 .padding(.horizontal, 6)
         } else if case .weather = activity.payload {
             // The system's own multicolor weather rendering — the yellow sun,
@@ -392,6 +414,17 @@ public struct CompactEarsView: View {
                 .foregroundStyle(.white.opacity(0.9))
         case .message:
             connectionDot
+        case .keepAwake(let payload):
+            // The time left, in Keep Awake's own tan rather than white, so the
+            // two ears read as one instrument the way the timer's do.
+            if payload.isRunning {
+                Text(SatelliteContent.keepAwakeLabel(remaining: payload.remaining))
+                    .font(.cardCaption)
+                    .monospacedDigit()
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
         }
     }
 
@@ -425,6 +458,7 @@ public struct CompactEarsView: View {
         case .keyboard(let payload): payload.symbolName ?? "keyboard"
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
+        case .keepAwake: "cup.and.saucer"
         }
     }
 
@@ -444,6 +478,7 @@ public struct CompactEarsView: View {
         case .keyboard: .white
         case .levels: .white
         case .notes: .yellow
+        case .keepAwake: KeepAwakeCardView.tint
         }
     }
 }

@@ -171,6 +171,52 @@ enum StateGallery {
             presentation.selected = PreviewFixtures.timerFinished
             presentation.count = 3
         },
+
+        // MARK: Keep Awake
+        //
+        // Every face the card has, and every sentence it can end on. The
+        // finished states are one per reason rather than a representative
+        // sample on purpose: each reason is a different sentence, and a
+        // sentence nobody has looked at is a sentence that reads wrong.
+        State(name: "card-keep-awake-ready") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeReady
+            presentation.count = 3
+        },
+        /// The last minute, when the seconds come back.
+        State(name: "card-keep-awake-running-seconds") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeRunning(remaining: 42)
+            presentation.count = 3
+        },
+        /// The ordinary case: hours left, and the label in "1h 12m".
+        State(name: "card-keep-awake-running-hours") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeRunning(remaining: 72 * 60 + 3600)
+            presentation.count = 3
+        },
+        /// The assertion was refused. Nothing changed, and the card says so
+        /// where the lid line would otherwise be.
+        State(name: "card-keep-awake-refused") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeProblem(.assertionRefused)
+            presentation.count = 3
+        },
+        State(name: "card-keep-awake-start-not-saved") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeProblem(.startNotSaved)
+            presentation.count = 3
+        },
+    ] + KeepAwakeEndReason.allCases.filter(\.isVisible).map { reason in
+        // One state per reason, built rather than written out: a case added to
+        // the enum then arrives in the gallery on its own, instead of being
+        // the one sentence nobody remembered to export.
+        State(name: "card-keep-awake-finished-\(reason.rawValue)") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.keepAwakeFinished(reason)
+            presentation.count = 3
+        }
+    } + [
         State(name: "card-weather") { presentation in
             presentation.phase = .expanded
             presentation.selected = PreviewFixtures.weather
@@ -303,5 +349,75 @@ enum StateGallery {
         // motion is stopped at the source instead: nothing here animates
         // unless a transaction carries an animation, and none does.
         .transaction { $0.animation = nil }
+    }
+}
+
+
+extension PreviewFixtures {
+
+    /// The length the card opens on, and the floor it would end at: the
+    /// shipped defaults, so the gallery shows what a new install does.
+    private static let keepAwakeMinutes = 60
+    private static let keepAwakeFloor = 15
+
+    /// The wall-clock end time, fixed like every other clock read in the
+    /// gallery — the shell formats this for the user's locale, and an export
+    /// that differs from yesterday's for that reason is a diff nobody reads.
+    private static let keepAwakeUntil = "17:40"
+
+    static let keepAwakeReady = keepAwake(KeepAwakePayload(
+        phase: .ready,
+        minutes: keepAwakeMinutes,
+        batteryFloor: keepAwakeFloor
+    ))
+
+    static func keepAwakeRunning(remaining: TimeInterval) -> Activity {
+        keepAwake(KeepAwakePayload(
+            phase: .running,
+            remaining: remaining,
+            until: keepAwakeUntil,
+            minutes: keepAwakeMinutes,
+            batteryFloor: keepAwakeFloor
+        ))
+    }
+
+    static func keepAwakeProblem(_ problem: KeepAwakePayload.Problem) -> Activity {
+        keepAwake(KeepAwakePayload(
+            phase: .ready,
+            minutes: keepAwakeMinutes,
+            batteryFloor: keepAwakeFloor,
+            problem: problem
+        ))
+    }
+
+    static func keepAwakeFinished(_ reason: KeepAwakeEndReason) -> Activity {
+        keepAwake(KeepAwakePayload(
+            phase: .finished(reason),
+            until: keepAwakeUntil,
+            minutes: keepAwakeMinutes,
+            batteryFloor: keepAwakeFloor,
+            // Phase 1 never holds the lid, so the thermal sentence exported
+            // here is the one a shipping build can actually produce.
+            lidClosed: false,
+            // Only the user's own End offers Resume, so only that state gets
+            // the two-button row.
+            resumable: reason.isUserCancellation ? 72 * 60 : nil
+        ))
+    }
+
+    /// The source is the reason, so two finished states can sit in one
+    /// presentation without deduplicating each other.
+    private static func keepAwake(_ payload: KeepAwakePayload) -> Activity {
+        let source: String
+        switch payload.phase {
+        case .ready: source = payload.problem.map { "ready-\($0)" } ?? "ready"
+        case .running: source = "running"
+        case .finished(let reason): source = "finished-\(reason.rawValue)"
+        }
+        return Activity(
+            id: ActivityID(kind: .keepAwake, source: "preview.\(source)"),
+            createdAt: 0,
+            payload: .keepAwake(payload)
+        )
     }
 }

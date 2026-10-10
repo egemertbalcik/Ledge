@@ -100,9 +100,14 @@ public enum ProviderRegistry {
         // keeps its own idea of the answer, they announce changes against each
         // other's state. That was a Focus card peeking on and off every four
         // seconds for as long as a Focus was on.
-        focusSource: @escaping @MainActor () -> any FocusSource = { SystemFocusSource() }
+        focusSource: @escaping @MainActor () -> any FocusSource = { SystemFocusSource() },
+        // No default worth having: Keep Awake holds a real power assertion and
+        // writes a journal, so a caller that has not thought about where those
+        // live should get no provider at all rather than a convenient one
+        // pointed at a scratch directory.
+        keepAwakeProvider: (@MainActor () -> any ActivityProvider)? = nil
     ) -> [ProviderRegistration] {
-        [
+        var registrations: [ProviderRegistration] = [
             ProviderRegistration(
                 // Lower-case to match `NowPlayingProvider.identifier`; see the
                 // note on the AirPods registration below.
@@ -313,6 +318,34 @@ public enum ProviderRegistry {
                 make: { PrivacyProvider(source: SystemRecordingSource()) }
             ),
         ]
+
+        // Registered only when the caller has somewhere for its assertion and
+        // its journal to live. A Keep Awake provider pointed at a scratch
+        // directory would write sessions nobody can recover, so a caller that
+        // has not supplied one gets no card rather than a broken one.
+        if let keepAwakeProvider,
+           let afterTimer = registrations.firstIndex(where: { $0.id == "timer" }).map({ $0 + 1 }) {
+            registrations.insert(
+                ProviderRegistration(
+                    id: "keep-awake",
+                    displayName: "Keep Awake",
+                    kind: .keepAwake,
+                    // Nothing to ask the system for: the assertion is available
+                    // to any process, and its limits are stated on the card
+                    // rather than hidden behind a permission.
+                    permission: nil,
+                    // The first registration to ship switched off. Keeping a
+                    // Mac awake is not something to start doing to somebody who
+                    // never asked, and while it is off the provider is never
+                    // constructed, so it costs nothing at all.
+                    isEnabledByDefault: false,
+                    make: keepAwakeProvider
+                ),
+                at: afterTimer
+            )
+        }
+
+        return registrations
     }
 
     /// Descriptors for the settings UI, with the user's choices folded in.

@@ -573,6 +573,25 @@ public struct SatelliteView: View {
                     : "\(SatelliteContent.timerLabel(remaining: remaining)) elapsed"
             )
 
+        case .keepAwake(let remaining):
+            // The timer blob, verbatim: same disc, same digits, same seat.
+            // What differs is the rim — a keep-awake has no total to drain
+            // against, so it keeps the quiet full ring the stopwatch wears —
+            // and the label, which drops its seconds above a minute.
+            circle {
+                ring(level: 1, tint: Color.white.opacity(0.35))
+                Text(SatelliteContent.keepAwakeLabel(remaining: remaining))
+                    .font(.system(size: 9, weight: .bold))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.45)
+                    .lineLimit(1)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(KeepAwakeCopy.title)
+            .accessibilityValue("\(SatelliteContent.keepAwakeLabel(remaining: remaining)) remaining")
+
         case .privacy(let camera, let microphone):
             circle {
                 // Apple's own colour language: green for camera, amber for mic.

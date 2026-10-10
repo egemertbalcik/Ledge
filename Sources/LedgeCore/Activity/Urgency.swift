@@ -43,6 +43,16 @@ public enum Urgency {
                 score += 40
             }
 
+        case .keepAwake(let payload):
+            switch payload.phase {
+            // A session that has ended says something about the Mac's power
+            // that the user did not ask for at that moment, so it outranks
+            // anything merely running — the same shape as the timer's finish.
+            case .finished: score += 60
+            case .running: score += 20
+            case .ready: break
+            }
+
         case .event(let payload):
             if payload.hasEvent {
                 if payload.startsIn <= 15 * 60 {
