@@ -121,7 +121,40 @@ public final class LedgeCoordinator {
             // nothing, so the session has to be ended — or deliberately left
             // running — while there is still a provider to ask.
             await self.endKeepAwakeForTermination()
+            // And then wait for what ending it set in motion. The lid restore
+            // is enqueued, not performed, by the end above — and a quit that
+            // exits with it still queued leaves the panel at zero and the
+            // record on disk. Recoverable at the next launch, which is no help
+            // at all to somebody holding a dark laptop now.
+            //
+            // Bounded by the same budget as the session write, and for the
+            // same reason: a quit wedged behind a device that has stopped
+            // answering is worse than a restore that lands a moment late. The
+            // record survives either way.
+            await self.withTimeout(Self.keepAwakeTerminationBudget) {
+                // Everything the end set in motion, not just the part of it
+                // this coordinator happens to hold a handle to. Returning
+                // from `end(reason:)` says the session is written down; the
+                // hold being given back, the panel coming up, another
+                // application's preference going back and the daemon hearing
+                // "no more Low Power Mode" are each a separate piece of work
+                // that nobody was waiting on.
+                await self.keepAwake?.joinSideEffects()
+                await self.lidConserve.settle()
+                await self.lidLowPower?.settle()
+            }
+            // Taking the providers down starts more of the same work — a
+            // second App Nap end, a second disarm — so the barrier has to come
+            // after it as well as before it. Before, so the End's own
+            // restores are joined while the provider still exists; after,
+            // because `stop()` is itself a producer.
+            let finishing = self.keepAwake
             self.activities.stop()
+            await self.withTimeout(Self.keepAwakeTerminationBudget) {
+                await finishing?.joinSideEffects()
+                await self.lidConserve.settle()
+                await self.lidLowPower?.settle()
+            }
             await self.deviceObservations.close()
             await self.settingsModel.drainPendingWrites()
             await self.deviceCatalogue.flush()
@@ -446,6 +479,107 @@ public final class LedgeCoordinator {
     /// The journal's one writer, outliving every provider over it.
     private let keepAwakeJournal = KeepAwakeJournalWorker(FileKeepAwakeJournal())
 
+    /// The lid-closed hold.
+    ///
+    /// A seam, and for now an honest refusal: nothing here registers a
+    /// privileged daemon, so until the installation path exists this reports
+    /// what is true — the helper is not set up, or this build could never set
+    /// it up — and the card says so in words instead of offering a mode that
+    /// cannot start. Swapping in the real `KeepAwakeHelperLid` is the whole of
+    /// what has to change here when it does.
+    /// The lid-closed hold, over XPC to the root daemon when this build can
+    /// have one.
+    ///
+    /// `fromBundle` answers nil for a build with no requirement recorded in its
+    /// Info.plist, which is what an ad-hoc signed local build is: no
+    /// requirement could match an unsigned chain, so the packaging script
+    /// leaves the key out rather than writing one that never will. There is
+    /// then nothing to connect to, and the unavailable stand-in says so in a
+    /// sentence instead of offering a hold that could not be taken.
+    /// The one connection to the daemon, or nil for a build that can have none.
+    ///
+    /// One client, not two. The hold and Low Power Mode are the same lease
+    /// under the same generation — the daemon refuses a Low Power Mode request
+    /// from a session that is not the one holding this Mac — so a second
+    /// client with its own session and its own generation counter would be
+    /// refused every time it asked.
+    private lazy var keepAwakeHelperClient: KeepAwakeHelperClient? = {
+        guard let link = KeepAwakeXPCLink.fromBundle() else { return nil }
+        return KeepAwakeHelperClient(link: link)
+    }()
+
+    private lazy var keepAwakeLid: any KeepAwakeLidHolding = {
+        guard let client = keepAwakeHelperClient else {
+            return KeepAwakeLidUnavailable(KeepAwakeHelperInstall.current())
+        }
+        return KeepAwakeHelperLid(
+            client: client,
+            installation: { KeepAwakeHelperInstall.current() }
+        )
+    }()
+
+    /// Everything a shut lid is supposed to save, and the journal that puts it
+    /// all back.
+    ///
+    /// One instance for the app, not one per provider. The record it owns
+    /// outlives any provider — a session switched off and on again builds a
+    /// new one while the old one's restore may still be landing — and two of
+    /// these over the same file would each think the other's entries were
+    /// leftovers to clean up.
+    ///
+    /// The keyboard backlight is behind its own gate, so this is the real one
+    /// on every Mac and the gate decides whether it does anything. Low Power
+    /// Mode goes through the daemon when there is one, and a Mac with no
+    /// daemon installed gets every other saving and an honest refusal for
+    /// that one — the setting is root, and claiming a change it never made
+    /// would be worse than not making it.
+    /// Turning App Nap off for the roster while a lid-closed session runs.
+    ///
+    /// Both the switch and the roster are read at the moment of use rather
+    /// than captured, so a user who changes either mid-session gets what they
+    /// asked for without restarting one.
+    private lazy var keepAwakeAppNap: AppNapSuspending = {
+        let preferences = self.preferences
+        return RosterAppNap(
+            suspension: AppNapSuspension(
+                journal: FileAppNapJournal(
+                    url: FileKeepAwakeJournal.defaultDirectory()
+                        .appendingPathComponent("app-nap.json", isDirectory: false)
+                )
+            ),
+            wanted: { preferences.keepAwakeDisableAppNap },
+            roster: { preferences.agentRoster }
+        )
+    }()
+
+    /// Low Power Mode, held separately so a quit can join its outstanding
+    /// request. A Mac left throttled because the app exited before the daemon
+    /// heard "give it back" is a Mac running slower than its owner asked for,
+    /// with nothing on screen to explain it.
+    private lazy var lidLowPower: HelperLowPowerMode? =
+        keepAwakeHelperClient.map(HelperLowPowerMode.init(client:))
+
+    private lazy var lidConserve: LidConserveDriver = {
+        let lowPower: any LowPowerModeControl = lidLowPower ?? UnprivilegedLowPowerMode()
+        return LidConserveDriver(
+            sensor: ClamshellSensor(),
+            conserver: LidConserver(
+                journal: FileLidConserveJournal(),
+                panel: PanelBacklight(controller: BrightnessController()),
+                keyboard: CoreBrightnessKeyboardBacklight(),
+                audio: CoreAudioLidOutput(),
+                lowPower: lowPower
+            )
+        )
+    }()
+
+    /// The menu-bar item a live lid-closed hold puts up, and the only way to
+    /// end one when the lid is shut and the notch is on a panel that is off.
+    private lazy var keepAwakeLidItem = KeepAwakeLidStatusItem(end: { [weak self] in
+        guard let self else { return }
+        Task { @MainActor in await self.endKeepAwake(reason: .endedByYou) }
+    })
+
     /// Keeps the Keep Awake switch's answers in the order they were given.
     private lazy var keepAwakeToggle = KeepAwakeToggle(
         end: { [weak self] in await self?.endKeepAwake(reason: .turnedOff) },
@@ -463,10 +597,21 @@ public final class LedgeCoordinator {
     /// while the tests that drove the provider directly all passed.
     private func makeKeepAwakeActions() -> KeepAwakeActions {
         KeepAwakeActions(
+            switchOn: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in await self.keepAwake?.begin() }
+            },
             start: { [weak self] minutes in
                 guard let self else { return }
                 self.preferences.keepAwakeDefaultMinutes = Double(minutes)
                 Task { @MainActor in await self.keepAwake?.begin(minutes: minutes) }
+            },
+            startLidClosed: { [weak self] minutes in
+                guard let self else { return }
+                self.preferences.keepAwakeDefaultMinutes = Double(minutes)
+                Task { @MainActor in
+                    await self.keepAwake?.begin(minutes: minutes, lidClosed: true)
+                }
             },
             end: { [weak self] in
                 guard let self else { return }
@@ -1068,6 +1213,13 @@ public final class LedgeCoordinator {
     /// only then the switches, observers and the start itself.
     private func startActivities() {
         wireArrivals()
+        wireKeepAwakeLidItem()
+        // Before any provider, and whether or not Keep Awake is switched on.
+        // A conserve record is left by a process that died with the lid shut
+        // and the panel at zero, and the user who then turns the feature off
+        // is exactly the user who would never get their screen back if this
+        // lived inside the provider that the setting decides not to build.
+        lidConserve.recover()
         wireRestingContent()
         // Fixtures are development scaffolding, not something a normal run
         // should show. Now that a real provider exists they are opt-in.
@@ -1122,6 +1274,29 @@ public final class LedgeCoordinator {
 
     /// What an arriving card does to the island, and what an emptied queue
     /// leaves behind.
+    /// Keeps the menu-bar item in step with the hold.
+    ///
+    /// Driven from every Keep Awake publish rather than from the arrival,
+    /// because the item has to follow what is left and what the helper last
+    /// said for the whole life of a session — which may be days — and because
+    /// the moment it must disappear is the moment the hold stops, not the
+    /// moment a card is dismissed.
+    private func wireKeepAwakeLidItem() {
+        activities.onKeepAwake = { [weak self] payload in
+            guard let self else { return }
+            guard let payload, payload.isRunning else {
+                self.keepAwakeLidItem.hide()
+                return
+            }
+            self.keepAwakeLidItem.show(KeepAwakeLidBadge.badge(
+                for: payload.lid,
+                remaining: payload.isIndefinite
+                    ? nil
+                    : SatelliteContent.keepAwakeLabel(remaining: payload.remaining)
+            ))
+        }
+    }
+
     private func wireArrivals() {
         activities.onArrival = { [weak self] activity in
             guard let self else { return }
@@ -1411,6 +1586,9 @@ public final class LedgeCoordinator {
                     journal: self.keepAwakeJournal,
                     tombstone: DefaultsKeepAwakeTombstone(),
                     bootID: BootSession.identifier(),
+                    lid: self.keepAwakeLid,
+                    conserve: self.lidConserve,
+                    appNap: self.keepAwakeAppNap,
                     // A session that ends with no notch on screen keeps its
                     // summary until there is somewhere to show it.
                     hasNotchPanel: { [weak self] in self?.displayPanels.primary != nil },
@@ -2290,6 +2468,9 @@ public final class LedgeCoordinator {
         installDevicesModelIfNeeded()
         settingsModel.isSuppressingSystemHUD = hud.isSuppressing
         settingsModel.focusFolderGranted = focusFolder.isReadable
+        // Read every time rather than cached at launch: a helper installed
+        // while Ledge is running must not need a relaunch to be believed.
+        settingsModel.keepAwakeHelper = KeepAwakeHelperInstall.current()
         // Deliberately does *not* re-read the permissions: this runs from many
         // places, and every read would quietly become the new baseline, so a
         // revocation could be absorbed between two of them and never acted on.
@@ -3363,6 +3544,35 @@ public final class LedgeCoordinator {
             quit: { NSApp.terminate(nil) },
             checkForUpdates: { [weak self] in self?.onCheckForUpdates() },
             canCheckForUpdates: { [weak self] in self?.canCheckForUpdates() ?? false },
+            runningApps: {
+                // Dock apps and menu-bar apps, not the dozens of background
+                // processes behind them: the roster is a list somebody picks
+                // from, and a hundred-entry menu is not one.
+                NSWorkspace.shared.runningApplications.compactMap { app in
+                    guard app.activationPolicy != .prohibited,
+                          let id = app.bundleIdentifier,
+                          AgentRoster.isWritableDomain(id)
+                    else { return nil }
+                    return (id: id, name: app.localizedName ?? id)
+                }
+            },
+            runningChromium: { RunningChromium.all() },
+            installKeepAwakeHelper: { [weak self] in
+                guard KeepAwakeHelperInstall.current() != .unsignedBuild else { return .unavailable }
+                let outcome: KeepAwakeHelperSetupOutcome
+                switch KeepAwakeHelperSetup.register() {
+                case .installed: outcome = .installed
+                case .needsApproval: outcome = .needsApproval
+                case .removed: outcome = .unavailable
+                case .refused(let why): outcome = .refused(why)
+                }
+                // The pane's own reading is a separate fact from the outcome
+                // of this press, and it is the one the rest of the section is
+                // drawn from.
+                self?.refreshSettingsModel()
+                return outcome
+            },
+            showKeepAwakeHelperApproval: { KeepAwakeHelperSetup.showApproval() },
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
             requestAccessibility: { [weak self] in self?.requestPermission(.accessibility) },
             requestPermission: { [weak self] kind in self?.requestPermission(kind) },

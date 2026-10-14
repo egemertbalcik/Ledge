@@ -54,6 +54,29 @@ public struct MuteReasons: Equatable, Sendable {
 public struct MuteIntentLedger: Equatable, Sendable {
 
     private var reasons: [UInt32: MuteReasons] = [:]
+    /// How many times somebody has *said* what this output's silence means.
+    ///
+    /// Bumped by `set` — the explicit path, which is where a user pressing
+    /// the mute key or moving the slider ends up — and deliberately not by
+    /// `observed`, which is Ledge noticing the hardware and adopting it.
+    ///
+    /// The difference is the whole point. The lid conserve mutes the hardware
+    /// without touching intent, and the volume watcher may then see that mute
+    /// and adopt it: an echo of Ledge's own doing, which the lid coming up
+    /// should correct. A person reaching for the mute key in the middle of
+    /// the same conserve produces the same *reasons* and means the opposite
+    /// thing. Comparing the reasons cannot tell them apart; this can.
+    /// One counter for the whole ledger, and the point at which each output
+    /// was last spoken for.
+    ///
+    /// Monotonic across the ledger rather than per device, because the
+    /// comparison that matters is "has anybody declared anything about this
+    /// output *since*". A per-device counter answered that wrongly whenever
+    /// the device's entry went away: pruning an unplugged output reset it to
+    /// zero, and zero against a remembered one reads as a change rather than
+    /// as nothing having happened.
+    private var declarations = 0
+    private var declaredAt: [UInt32: Int] = [:]
 
     public init() {}
 
@@ -79,13 +102,48 @@ public struct MuteIntentLedger: Equatable, Sendable {
         reasons(for: device).showsMuted
     }
 
+    /// Says what this output's silence means, as an act of intent.
+    ///
+    /// Every caller of this is somebody deciding: the user's mute key, the
+    /// slider, a restore putting a remembered meaning back. The revision
+    /// moves, and anything that recorded an older one can tell that a
+    /// decision has been taken since.
     public mutating func set(_ value: MuteReasons, for device: UInt32) {
+        store(value, for: device)
+        declarations &+= 1
+        declaredAt[device] = declarations
+    }
+
+    /// Records what a device's silence means without claiming anybody decided
+    /// it — for an attempt the hardware refused, whose reasons still describe
+    /// the device truthfully.
+    public mutating func adopt(_ value: MuteReasons, for device: UInt32) {
+        store(value, for: device)
+    }
+
+    /// The same write without the claim of intent, for Ledge adopting what it
+    /// sees on the hardware.
+    private mutating func store(_ value: MuteReasons, for device: UInt32) {
         if value.isEmpty {
             reasons.removeValue(forKey: device)
         } else {
             reasons[device] = value
         }
     }
+
+    /// When this output was last spoken for, on the ledger's own clock.
+    ///
+    /// Compared with an earlier reading of itself, and only as "is this one
+    /// *later*". Never as equality: an output that has been forgotten —
+    /// unplugged and pruned, or handed a new device id — comes back at zero,
+    /// which is not later than anything and so reads as nothing having
+    /// happened. Which is the truth: nobody declared anything, the ledger
+    /// simply stopped knowing.
+    ///
+    /// The number means nothing outside the ledger that issued it, and a
+    /// ledger does not survive a relaunch. Anything that writes one down has
+    /// to write down which ledger it came from — see `incarnation`.
+    public func lastDeclaration(for device: UInt32) -> Int { declaredAt[device] ?? 0 }
 
     /// Takes in a mute state that arrived from outside Ledge.
     ///
@@ -108,7 +166,11 @@ public struct MuteIntentLedger: Equatable, Sendable {
         guard muted else {
             // Unmuted from outside: neither reason survives, whatever we
             // believed. The hardware is the last word on silence.
-            set(.none, for: device)
+            //
+            // Stored, not *set*: this is Ledge noticing, not anybody
+            // deciding, and a conserve's own mute echoing back here must not
+            // read afterwards as the user having had an opinion.
+            store(.none, for: device)
             return
         }
         // Muted, and nothing of ours explains it. Clear of the clamped floor
@@ -121,7 +183,7 @@ public struct MuteIntentLedger: Equatable, Sendable {
             } else {
                 current.zeroSilence = true
             }
-            set(current, for: device)
+            store(current, for: device)
         }
         // Otherwise one of our reasons already accounts for it, and a clamped
         // readback above zero does not promote it to the user's.
@@ -131,6 +193,7 @@ public struct MuteIntentLedger: Equatable, Sendable {
     /// AirPlay speakers does not carry forty entries.
     public mutating func keepOnly(_ devices: Set<UInt32>) {
         reasons = reasons.filter { devices.contains($0.key) }
+        declaredAt = declaredAt.filter { devices.contains($0.key) }
     }
 
     /// How many outputs are remembered. For tests and diagnostics.

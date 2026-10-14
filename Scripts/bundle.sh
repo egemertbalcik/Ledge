@@ -33,6 +33,17 @@ mkdir -p "$(dirname "$APP")"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BUILD_DIR/Ledge" "$APP/Contents/MacOS/Ledge"
+
+# The privileged helper, if this build produced one. It lives in Contents/MacOS
+# beside the app rather than in a Helpers directory: SMAppService resolves a
+# daemon's BundleProgram relative to the bundle root, and Contents/MacOS is the
+# path codesign treats as executable code without further argument. Absent
+# builds are not an error — the daemon is a separate target, and an app without
+# it simply has no lid-closed mode (sign.sh then clears the plist key that
+# would otherwise promise one).
+if [[ -x "$BUILD_DIR/LedgeKeepAwakeHelper" ]]; then
+    cp "$BUILD_DIR/LedgeKeepAwakeHelper" "$APP/Contents/MacOS/LedgeKeepAwakeHelper"
+fi
 cp "$ROOT/Bundle/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
@@ -124,7 +135,9 @@ fi
 # be shipped by pointing bundle.sh at the wrong directory.
 if [[ "${LEDGE_DIST:-0}" == "1" ]]; then
     shopt -s nullglob
-    for binary in "$APP/Contents/MacOS/Ledge" "$APP"/Contents/Frameworks/*.dylib; do
+    for binary in "$APP/Contents/MacOS/Ledge" "$APP"/Contents/MacOS/LedgeKeepAwakeHelper \
+                  "$APP"/Contents/Frameworks/*.dylib; do
+        [[ -e "$binary" ]] || continue
         ARCHS="$(lipo -archs "$binary")"
         if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
             echo "error: $(basename "$binary") is not universal (archs: $ARCHS)" >&2

@@ -391,6 +391,24 @@ public struct NotchLayout: Sendable, Equatable {
         return min(max(notchHeight + contentHeight + dotsBand, 96 + delta), 220 + delta)
     }
 
+    /// The Keep Awake card's height, from the height its content reported.
+    ///
+    /// Same shape as `simpleCardHeight` with a ceiling that fits the tallest
+    /// face: the card asking how long is three boxes plus a button, which the
+    /// simple cards' 220 cuts into.
+    public static func keepAwakeHeight(
+        _ contentHeight: CGFloat,
+        notchHeight: CGFloat = referenceNotchHeight
+    ) -> CGFloat {
+        let delta = notchHeight - referenceNotchHeight
+        guard contentHeight > 0, contentHeight.isFinite else { return 150 + delta }
+        // The ceiling has to clear the tallest face: three stepper rows, the
+        // minimum-length line and a button come to about 275 with the cutout
+        // and the dots' strip. 260 cut five points off it, which the height
+        // contract test caught before anyone saw it.
+        return min(max(notchHeight + contentHeight + dotsBand, 110 + delta), 300 + delta)
+    }
+
     /// A month is four, five or six rows deep, and the card was sized for the
     /// deepest of them — so most months carried a band of empty black under
     /// the grid. It now follows the month on show.
@@ -781,6 +799,22 @@ public struct NotchLayout: Sendable, Equatable {
             // is kept narrower (iOS-Island-like) but the height keeps its full
             // padding so the transport row is not cramped against the edge.
             return CGSize(width: base.width, height: max(base.height, 164))
+        case .keepAwake:
+            // Its own branch rather than the simple-card list, because its
+            // faces are further apart than theirs: a resting launcher is two
+            // lines and a button, and the same card asking how long carries
+            // three boxes as well — about sixty points between them. Taking
+            // the height preference as a floor, as it used to, pinned the
+            // island at 170 whatever the card measured, so the asking and
+            // finished faces had their buttons drawn under the page dots.
+            //
+            // The ceiling is higher than the simple cards' 220 for the same
+            // reason, and `dotsBand` is added here — the card itself does not
+            // reserve that strip, or it would be counted twice.
+            return CGSize(
+                width: base.width,
+                height: keepAwakeHeight(cardContentHeight, notchHeight: notchHeight)
+            )
         case .device, .focus, .privacy, .keyboard, .power, .message, .shelf, .notes:
             // The simple cards: a glyph and a line or two, sometimes a row of
             // cells. They used to take the *height preference* as a floor like

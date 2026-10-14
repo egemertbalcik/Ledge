@@ -44,6 +44,15 @@ public final class SettingsModel {
     /// difference in writing rather than in a log line nobody reads.
     public var isSuppressingSystemHUD = false
 
+    /// Whether Keep Awake's privileged helper could be installed here, and
+    /// whether it is.
+    ///
+    /// A value rather than a check the pane runs, for the same reason as the
+    /// Focus folder below: the pane only redraws when something it observes
+    /// moves, and a helper installed while the window was open went on
+    /// reading "not set up" until something unrelated happened to redraw it.
+    public var keepAwakeHelper: KeepAwakeHelperInstallation = .notInstalled
+
     /// Whether the Focus database folder can be read.
     ///
     /// Observable state rather than a closure the view calls, because a view

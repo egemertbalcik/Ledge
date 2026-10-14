@@ -51,6 +51,33 @@ public final class KeepAwakeProvider: ActivityProvider {
     private let power: PowerSource
     private let thermal: ThermalSource
     private let journal: KeepAwakeJournalWorker
+    /// The lid-closed hold, behind a protocol.
+    ///
+    /// The real one is an XPC connection to a root daemon, and the states
+    /// worth building a card for — refused, silent, held by somebody else —
+    /// cannot be produced on demand against one. The default holds nothing and
+    /// says so, which is also the honest shipping answer until the daemon is
+    /// installable.
+    private let lid: any KeepAwakeLidHolding
+    /// The lid-closed savings: darkened backlights, a muted output, and a
+    /// journal that says how to put each of them back.
+    ///
+    /// Separate from `lid` on purpose. That one asks a root daemon to stop the
+    /// Mac sleeping; this one is everything the hold then *costs*, and it
+    /// needs no privilege at all. A Mac with no helper installed still has a
+    /// lid, and a session whose hold was refused still wants its panel dark if
+    /// somebody shuts it — which is why a refusal above does not reach here.
+    private let conserve: LidConserveDriver?
+    /// Turns App Nap off for the roster while a lid-closed session runs.
+    ///
+    /// Session-scoped rather than lid-scoped, unlike everything the conserve
+    /// driver does, and the difference costs nothing: `NSAppSleepDisabled`
+    /// only means anything for an app macOS considers invisible, so while the
+    /// lid is up it is inert. Doing it at the start rather than at the close
+    /// keeps the moment the lid comes down quiet — writing preferences into
+    /// seventeen applications is work, and a shut lid is when the Mac is
+    /// supposed to stop doing work.
+    private let appNap: AppNapSuspending?
     /// This provider's place in the order of everything that has written to
     /// the journal. Writes from an owner the journal has moved past are
     /// refused, which is what stops a provider on its way out from replacing
@@ -107,6 +134,19 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// Consecutive failures to read the battery.
     private var batteryMisses = 0
 
+    /// What the lid-closed mode last said about itself.
+    ///
+    /// The last *answer*, never what was asked for. Everything this card can
+    /// usefully say about a privileged hold — that it is held, that it was
+    /// refused, that the daemon has gone quiet and it is probably still held —
+    /// is a reading, and a reading is the one thing a hopeful guess cannot
+    /// stand in for.
+    private var lidState: KeepAwakeLidState = .notInstalled
+    /// Whether the session on the Finished card had asked for the lid hold,
+    /// kept because the finish itself does not carry it and the thermal
+    /// sentence changes with it.
+    private var finishedWithLid = false
+
     // MARK: - The journal writer (§6.1.1)
 
     /// The record the disk is meant to hold, and how new it is.
@@ -143,6 +183,9 @@ public final class KeepAwakeProvider: ActivityProvider {
         journal: KeepAwakeJournalWorker,
         tombstone: KeepAwakeTombstone,
         bootID: String?,
+        lid: any KeepAwakeLidHolding = KeepAwakeLidUnavailable(),
+        conserve: LidConserveDriver? = nil,
+        appNap: AppNapSuspending? = nil,
         hasNotchPanel: @escaping () -> Bool = { true },
         settings: @escaping () -> Settings = { Settings() },
         makeID: @escaping () -> String = { UUID().uuidString },
@@ -153,6 +196,9 @@ public final class KeepAwakeProvider: ActivityProvider {
         self.power = power
         self.thermal = thermal
         self.journal = journal
+        self.lid = lid
+        self.conserve = conserve
+        self.appNap = appNap
         self.owner = journal.claim()
         self.tombstone = tombstone
         self.bootID = bootID
@@ -173,6 +219,9 @@ public final class KeepAwakeProvider: ActivityProvider {
         journal: any KeepAwakeJournal,
         tombstone: KeepAwakeTombstone,
         bootID: String?,
+        lid: any KeepAwakeLidHolding = KeepAwakeLidUnavailable(),
+        conserve: LidConserveDriver? = nil,
+        appNap: AppNapSuspending? = nil,
         hasNotchPanel: @escaping () -> Bool = { true },
         settings: @escaping () -> Settings = { Settings() },
         makeID: @escaping () -> String = { UUID().uuidString },
@@ -180,8 +229,9 @@ public final class KeepAwakeProvider: ActivityProvider {
     ) {
         self.init(now: now, assertion: assertion, power: power, thermal: thermal,
                   journal: KeepAwakeJournalWorker(journal), tombstone: tombstone,
-                  bootID: bootID, hasNotchPanel: hasNotchPanel, settings: settings,
-                  makeID: makeID, formatTime: formatTime)
+                  bootID: bootID, lid: lid, conserve: conserve, appNap: appNap,
+                  hasNotchPanel: hasNotchPanel,
+                  settings: settings, makeID: makeID, formatTime: formatTime)
     }
 
     public static let defaultTimeFormat: (Date) -> String = { date in
@@ -202,6 +252,24 @@ public final class KeepAwakeProvider: ActivityProvider {
             // that came back on its own did so in silence.
             let recovering = Task { @MainActor [weak self] in
                 guard let self, self.streamGeneration == generation else { return }
+                // Before the session is recovered, and whether or not there is
+                // one. A record left here belongs to a process that is gone —
+                // force-quit, crashed, or replaced by an update with the lid
+                // shut and the panel at zero — and it is restored for exactly
+                // that reason: nobody is left who could be relying on it.
+                self.conserve?.recover()
+                // Whatever a crash left in other applications' preferences,
+                // put back — and unconditionally, like the conserve recovery
+                // beside it. The user who turns Keep Awake off after a crash
+                // is exactly the one whose other apps would otherwise keep a
+                // setting Ledge wrote and nothing would ever undo.
+                if let appNap = self.appNap {
+                    // Tracked like every other producer. A launch recovery
+                    // that puts another application's preference back is work
+                    // a quit has to wait for, and an untracked Task is work
+                    // the barrier cannot see.
+                    self.track { await appNap.restoreOutstanding() }
+                }
                 await self.recoverFromJournal(generation: generation)
                 guard self.streamGeneration == generation else { return }
                 self.publish()
@@ -256,6 +324,7 @@ public final class KeepAwakeProvider: ActivityProvider {
         assertion.release()
         power.stopWatching()
         thermal.stopWatching()
+        disarmLid()
         continuation?.finish()
         continuation = nil
     }
@@ -268,18 +337,39 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// nobody wrote down is a hold nobody can release after a crash; a record
     /// of a hold that was never taken is merely wrong, and the next launch
     /// corrects it.
+    /// Switches it on. Holds until it is switched off, or a floor ends it.
     @discardableResult
-    public func begin(minutes: Int) async -> Bool {
+    public func begin() async -> Bool {
+        await begin { boot in
+            KeepAwakeReducer.start(from: .ready, now: now(), id: makeID(), bootID: boot)?.session
+        }
+    }
+
+    /// Switches it on for a set length. The lid-closed mode's entry point.
+    ///
+    /// `lidClosed` is the whole difference between the two timed starts, and
+    /// it is why this one takes a length at all: an indefinite hold through a
+    /// shut lid is the shape of session that flattens a battery or cooks a Mac
+    /// in a bag, so the mode that can survive a shut lid is the one mode that
+    /// always has an end.
+    @discardableResult
+    public func begin(minutes: Int, lidClosed: Bool = false) async -> Bool {
+        await begin { boot in
+            KeepAwakeReducer.start(
+                from: .ready, minutes: minutes, now: now(), id: makeID(), bootID: boot,
+                lidHoldRequested: lidClosed
+            )?.session
+        }
+    }
+
+    private func begin(_ make: (String) -> KeepAwakeSession?) async -> Bool {
         guard case .ready = state, pendingStart == nil else { return false }
         guard let boot = bootID else {
             problem = .assertionRefused
             publish()
             return false
         }
-        let session = KeepAwakeReducer.start(
-            from: .ready, minutes: minutes, now: now(), id: makeID(), bootID: boot
-        )?.session
-        guard let session else { return false }
+        guard let session = make(boot) else { return false }
         return await claim(session)
     }
 
@@ -367,9 +457,183 @@ public final class KeepAwakeProvider: ActivityProvider {
         state = .running(session)
         beginWatching()
         armDeadline()
+        armLid(for: session)
+        beginConserving(for: session)
         publish()
         return true
     }
+
+    // MARK: - The lid-closed hold
+
+    /// Asks the helper to hold this session through a shut lid.
+    ///
+    /// After the session is running, and never as a condition of it. The
+    /// ordinary hold is already taken by the time this runs, so a refusal from
+    /// the daemon costs the user nothing they had: the Mac still stays awake
+    /// with the lid open, and the card says what the lid part could not do.
+    /// Failing the whole start over it would throw away the half that worked.
+    private func armLid(for session: KeepAwakeSession) {
+        guard session.lidHoldRequested, let deadline = session.deadline else { return }
+        let era = lifecycle
+        let issued = commandEpoch
+        // Owned from here, not from the answer: the release has to be able to
+        // name this session even if the arm is still in the air.
+        armedSessionID = session.id
+        track { @MainActor [weak self] in
+            guard let self else { return }
+            // Fenced before acting, not only before publishing. A stale arm
+            // landing after a release would recreate ownership of a hold
+            // nobody wants.
+            guard self.lifecycle == era, self.commandEpoch == issued,
+                  self.state.session?.id == session.id else { return }
+            let reading = await self.lid.arm(session: session.id, until: deadline)
+            // The answer can be seconds old by the time it lands — a daemon
+            // behind a `pmset` transaction takes its time — and in those
+            // seconds the user may have ended this session and started
+            // another. Publishing a refusal over that one would explain the
+            // wrong session's trouble.
+            guard self.lifecycle == era, self.commandEpoch == issued,
+                  self.state.session?.id == session.id else { return }
+            self.lidState = reading
+            self.publish()
+        }
+    }
+
+    /// Starts the savings a shut lid is supposed to buy.
+    ///
+    /// Only for a session that asked to survive a shut lid. An ordinary
+    /// session sleeps when the lid comes down, so there is nothing to darken
+    /// and nobody to darken it for.
+    ///
+    /// Not conditional on the daemon having said yes. The hold and the savings
+    /// fail independently — a Mac with no helper installed still has a lid,
+    /// and a user who shuts one on a refused hold has exactly the lit panel
+    /// inside a closed machine that this exists to turn off.
+    private func beginConserving(for session: KeepAwakeSession) {
+        guard session.lidHoldRequested else { return }
+        conserve?.begin(sessionID: session.id)
+        if let appNap {
+            // Tracked, and fenced before it acts: a Begin delayed past the
+            // End that was supposed to cancel it would otherwise disable
+            // another application's App Nap for a session that is over.
+            let era = lifecycle
+            let issued = commandEpoch
+            track { @MainActor [weak self] in
+                guard let self, self.lifecycle == era, self.commandEpoch == issued,
+                      self.state.session?.id == session.id
+                else { return }
+                await appNap.beginIfWanted()
+            }
+        }
+    }
+
+    /// Gives the lid-closed hold back.
+    ///
+    /// Unconditional, and never awaited. A release is never refused by the
+    /// daemon and everything about one moves the Mac towards being allowed to
+    /// sleep, so there is no state in which skipping it — because we believe
+    /// nothing is held — is the safer answer; the belief is the thing most
+    /// likely to be wrong. If the process dies before this lands, the daemon's
+    /// own lease ends the hold within ninety seconds.
+    private func disarmLid() {
+        // Before the hold, and synchronously. Everything the savings changed
+        // is a thing the user can see the moment they open the lid, and a
+        // restore that waited on an XPC round trip would be a panel that
+        // stayed dark for as long as a silent daemon takes to time out.
+        conserve?.end()
+        // Tracked, not fired and forgotten. Returning from `end(reason:)` has
+        // only ever said the session is *recorded*; another application's
+        // preference being put back is a separate piece of work, and a quit
+        // that exits here leaves it changed.
+        if let appNap {
+            track { await appNap.end() }
+        }
+        let era = lifecycle
+        // Named, because this task can be delayed past the point where a
+        // replacement provider has taken a hold of its own, and an unnamed
+        // release would end that one instead. The publication guard below
+        // cannot undo a release that has already gone out.
+        // A provider that armed nothing releases nothing. Clearing it here
+        // also makes the `stop()` that follows an End a no-op rather than a
+        // second, now-nameless release.
+        guard let releasing = armedSessionID else { return }
+        armedSessionID = nil
+        track { @MainActor [weak self] in
+            guard let self else { return }
+            await self.lid.disarm(session: releasing)
+            guard self.lifecycle == era, self.state.session == nil else { return }
+            await self.refreshLid()
+        }
+    }
+
+    /// Everything started on this provider's behalf that outlives the call
+    /// that started it.
+    ///
+    /// Returning from `end(reason:)` says the session is written down. It has
+    /// never said the hold was given back, the savings put away, or another
+    /// application's preference restored — those are tasks nobody was holding
+    /// on to, and a quit that exits here leaves all three outstanding.
+    private var sideEffects: [Int: Task<Void, Never>] = [:]
+    private var nextSideEffect = 0
+
+    /// The session this provider actually armed, held until its release has
+    /// gone out.
+    ///
+    /// `state.session?.id` is not it. The first End reads that while the state
+    /// is still running and gets the right answer; the `stop()` that follows
+    /// reads it after the state has become Finished and gets nil — which means
+    /// "whatever is held", and ended the session that had replaced it. A
+    /// provider that armed nothing releases nothing.
+    private var armedSessionID: String?
+
+    /// Keeps a handle only while the work is live.
+    ///
+    /// Removing merely cancelled tasks kept every completed one for the
+    /// provider's lifetime — normal completion does not set `isCancelled` —
+    /// so a provider left enabled accumulated handles for every session it
+    /// ever ran.
+    private func track(_ body: @escaping @Sendable () async -> Void) {
+        nextSideEffect += 1
+        let token = nextSideEffect
+        sideEffects[token] = Task { @MainActor [weak self] in
+            await body()
+            self?.sideEffects[token] = nil
+        }
+    }
+
+    /// How much work is still live. For a test, and for a quit that wants to
+    /// know whether its barrier actually drained anything.
+    public var liveSideEffectCount: Int { sideEffects.count }
+
+    /// Waits for every side effect still running, and for anything they start.
+    ///
+    /// Loops because the work being joined can enqueue more — a release that
+    /// finishes asks for a fresh reading — and a barrier that returned with
+    /// that still outstanding is not a barrier.
+    public func joinSideEffects() async {
+        for _ in 0..<8 {
+            let live = sideEffects.values
+            guard !live.isEmpty else { return }
+            for task in live { await task.value }
+        }
+    }
+
+    /// Reads the lid-closed mode without changing anything.
+    ///
+    /// Published only when the reading has actually moved. A status call is
+    /// answered from the daemon's memory and costs nothing, but redrawing the
+    /// card every minute to say the same sentence is the kind of noise the
+    /// recipe's quiet operation rules out.
+    public func refreshLid() async {
+        let era = lifecycle
+        let reading = await lid.state()
+        guard lifecycle == era, reading != lidState else { return }
+        lidState = reading
+        publish()
+    }
+
+    /// The reading the card needs, for a settings pane or a test.
+    public var lidReading: KeepAwakeLidState { lidState }
 
     /// Whether another session may be started.
     ///
@@ -478,6 +742,9 @@ public final class KeepAwakeProvider: ActivityProvider {
         commandEpoch += 1
         let at = now()
         let era = lifecycle
+        // Remembered before the session goes, because the finish does not
+        // carry it and the thermal sentence turns on it.
+        finishedWithLid = session.lidHoldRequested
         // Released first, always. Whether the disk takes the record is a
         // separate question from whether the Mac is free to sleep, and the
         // Mac's answer must not wait on the disk's.
@@ -627,15 +894,23 @@ public final class KeepAwakeProvider: ActivityProvider {
             charging: snapshot.map { $0.isCharging || $0.isPluggedIn },
             isPresent: power.isAvailable
         )
+        // What the user *asked for*, not what the daemon last confirmed. If
+        // they asked for a lid-closed hold they have very likely shut the lid,
+        // and a helper that has gone quiet is no reason to relax the floors
+        // that exist because nobody can see the Mac — the hold is still
+        // standing on its lease, and the Mac is still shut.
+        let lidClosed = state.session?.lidHoldRequested == true
         let decision = KeepAwakeFloors.decide(
             battery: battery,
             floor: settings().batteryFloor,
             missCount: batteryMisses,
             thermal: thermal.state,
-            lidClosed: false,
-            // Phase 1 never holds the lid closed, so a failed battery read is
-            // not a reason to cut a session the user can see for themselves.
-            enforcesUnreadable: false
+            lidClosed: lidClosed,
+            // With the lid open the user can see their own battery, and ending
+            // their session over a failed read would be Ledge being jumpy
+            // about a number it did not need. With it shut, that number is the
+            // only thing standing between a held-awake Mac and a flat one.
+            enforcesUnreadable: lidClosed
         )
         guard case .end(let reason) = decision else { return }
         endNow(reason: reason)
@@ -643,11 +918,27 @@ public final class KeepAwakeProvider: ActivityProvider {
 
     // MARK: - Assertion
 
+    /// How long powerd's own backstop runs for a hold with no deadline.
+    ///
+    /// The assertion dies with the process, so this is not about a crash: it is
+    /// about a Ledge that is still running and has stopped thinking. An hour,
+    /// re-armed every half hour while the session is healthy, bounds that
+    /// without the user ever seeing it.
+    private static let openEndedBackstop: TimeInterval = 3600
+    private static let openEndedRearm: TimeInterval = 1800
+
+    private func backstop(for session: KeepAwakeSession) -> TimeInterval {
+        guard let remaining = session.remaining(at: now()) else {
+            return Self.openEndedBackstop
+        }
+        return remaining + Self.powerdMargin
+    }
+
     private func acquire(for session: KeepAwakeSession) -> Bool {
         assertion.acquire(
             name: IOPMSleepAssertion.assertionName,
-            details: "until \(formatTime(session.deadline))",
-            timeout: session.remaining(at: now()) + Self.powerdMargin
+            details: session.deadline.map { "until \(formatTime($0))" } ?? "until switched off",
+            timeout: backstop(for: session)
         )
     }
 
@@ -659,8 +950,7 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// if even that fails the session ends rather than carrying on holding
     /// something nobody can account for.
     private func rearmBackstop(for session: KeepAwakeSession) {
-        let timeout = session.remaining(at: now()) + Self.powerdMargin
-        if assertion.rearm(timeout: timeout) { return }
+        if assertion.rearm(timeout: backstop(for: session)) { return }
         Self.log.error("keep awake: the backstop could not be re-armed")
         guard acquire(for: session) else {
             endNow(reason: .timeUp)
@@ -675,6 +965,7 @@ public final class KeepAwakeProvider: ActivityProvider {
         assertion.release()
         power.stopWatching()
         thermal.stopWatching()
+        disarmLid()
     }
 
     // MARK: - Journal
@@ -1008,6 +1299,14 @@ public final class KeepAwakeProvider: ActivityProvider {
             announcesResume = true
             beginWatching()
             armDeadline()
+            // The hold, as well as the savings. A resumed session that darkens
+            // the panel without re-arming the daemon is the worst of both: it
+            // looks held, the screen is dark, and the Mac sleeps the moment the
+            // lid comes down. The daemon never inherits a hold across its own
+            // restart, so a resume has to ask again — under a new generation,
+            // which `arm` takes care of.
+            armLid(for: session)
+            beginConserving(for: session)
         }
     }
 
@@ -1016,12 +1315,14 @@ public final class KeepAwakeProvider: ActivityProvider {
     private func armDeadline() {
         cancelDeadline()
         guard let session = state.session else { return }
-        let left = session.remaining(at: now())
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated { self?.deadlineTick() }
         }
         deadlineWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(left, 0.02), execute: work)
+        // A hold with no deadline has nothing to fire *for*, but powerd's
+        // backstop still expires, so the same timer re-arms it instead.
+        let after = session.remaining(at: now()).map { max($0, 0.02) } ?? Self.openEndedRearm
+        DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: work)
         armPublish()
     }
 
@@ -1039,7 +1340,9 @@ public final class KeepAwakeProvider: ActivityProvider {
     private func armPublish() {
         cancelPublish()
         guard let session = state.session else { return }
-        let left = session.remaining(at: now())
+        // Counting up rather than down when there is no deadline: the card
+        // shows how long it has been holding, which changes once a minute.
+        let left = session.remaining(at: now()) ?? session.elapsed(at: now())
         let delay: TimeInterval = left <= 60
             ? max(0.2, left.truncatingRemainder(dividingBy: 1) + 0.02)
             : left.truncatingRemainder(dividingBy: 60) + 0.02
@@ -1047,6 +1350,11 @@ public final class KeepAwakeProvider: ActivityProvider {
             MainActor.assumeIsolated {
                 self?.publish()
                 self?.armPublish()
+                // The client renews every thirty seconds; this asks what came
+                // of it. A minute behind the truth is the worst the card can
+                // be, which is close enough for a sentence and far cheaper
+                // than a second timer of its own.
+                self?.refreshLidWhileHeld()
             }
         }
         publishWork = work
@@ -1058,28 +1366,54 @@ public final class KeepAwakeProvider: ActivityProvider {
         publishWork = nil
     }
 
+    /// Re-reads the lid-closed mode, but only for a session that asked for it.
+    ///
+    /// A session with the lid open has no helper to ask about, and asking
+    /// anyway would put a daemon's troubles on a card they have nothing to do
+    /// with.
+    private func refreshLidWhileHeld() {
+        guard state.session?.lidHoldRequested == true else { return }
+        Task { @MainActor [weak self] in await self?.refreshLid() }
+    }
+
     public var payload: KeepAwakePayload {
         let floor = settings().batteryFloor
         switch state {
         case .ready:
             return KeepAwakePayload(phase: .ready, minutes: chosenMinutes,
-                                    batteryFloor: floor, problem: problem)
+                                    batteryFloor: floor, lid: lidState,
+                                    problem: problem)
         case .running(let session):
             return KeepAwakePayload(
                 phase: .running,
-                remaining: session.remaining(at: now()),
-                until: formatTime(session.deadline),
+                remaining: session.remaining(at: now()) ?? 0,
+                held: session.elapsed(at: now()),
+                isIndefinite: session.isIndefinite,
+                until: session.deadline.map(formatTime) ?? "",
                 minutes: chosenMinutes,
                 batteryFloor: floor,
+                // Derived here and nowhere else, so the flag and the reading
+                // it comes from cannot disagree on the card.
+                lidHeld: lidState.isLive,
+                lidClosed: session.lidHoldRequested,
+                lid: lidState,
                 resumed: announcesResume
             )
         case .finished(let finish):
             return KeepAwakePayload(
                 phase: .finished(finish.reason),
                 remaining: 0,
-                until: formatTime(finish.deadline),
+                held: finish.ran,
+                isIndefinite: finish.deadline == nil,
+                until: finish.deadline.map(formatTime) ?? "",
                 minutes: chosenMinutes,
                 batteryFloor: floor,
+                // The session is over, so nothing is held — but whether it was
+                // a lid-closed one still decides which sentence the end gets:
+                // "open the lid and give it air" is advice for a Mac that is
+                // shut, and nonsense for one that is not.
+                lidClosed: finishedWithLid,
+                lid: lidState,
                 resumable: finish.canResume(at: now()) ? finish.remaining : nil,
                 endUnrecorded: finish.endUnrecorded,
                 // A Resume that was refused leaves the card where it was, so

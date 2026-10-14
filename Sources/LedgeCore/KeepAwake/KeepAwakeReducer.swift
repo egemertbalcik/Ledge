@@ -16,7 +16,9 @@ public enum KeepAwakeReducer {
     /// how a laptop cooks in a bag. The timer card clamps to the same upper
     /// bound in minutes.
     public static let minimumMinutes = 5
-    public static let maximumMinutes = 24 * 60
+    /// Seven days. Long enough for a render or a sync left over a weekend,
+    /// short enough that a number arrived at by accident still looks like one.
+    public static let maximumMinutes = 7 * 24 * 60
 
     public static func clamp(minutes: Int) -> Int {
         min(maximumMinutes, max(minimumMinutes, minutes))
@@ -26,6 +28,33 @@ public enum KeepAwakeReducer {
     ///
     /// A Start while one is already running would silently move the deadline,
     /// which is a different thing from what the button says.
+    /// Begins a hold that runs until it is switched off.
+    ///
+    /// Keep Awake is a switch. The timed form below still exists and is what
+    /// the lid-closed mode will use, but the plain card has no deadline: the
+    /// user turned it on, and only the user — or a floor — turns it off.
+    public static func start(
+        from state: KeepAwakeState,
+        now: Date,
+        id: String,
+        bootID: String,
+        lidHoldRequested: Bool = false
+    ) -> KeepAwakeState? {
+        guard !state.isRunning else { return nil }
+        return .running(
+            KeepAwakeSession(
+                id: id,
+                startedAt: now,
+                deadline: nil,
+                total: 0,
+                bootID: bootID,
+                lidHoldRequested: lidHoldRequested
+            )
+        )
+    }
+
+    /// Begins a hold that ends by itself. Kept for the lid-closed mode, where
+    /// a deadline is the thing that bounds a privileged hold.
     public static func start(
         from state: KeepAwakeState,
         minutes: Int,
@@ -83,8 +112,10 @@ public enum KeepAwakeReducer {
     /// The deadline check. Called when the timer fires, on wake, and whenever
     /// the clock moves — the timer firing is evidence of nothing on its own.
     public static func tick(_ state: KeepAwakeState, now: Date) -> KeepAwakeState? {
-        guard let session = state.session, session.hasExpired(at: now) else { return nil }
-        return .finished(finish(session, reason: .timeUp, at: session.deadline))
+        guard let session = state.session, session.hasExpired(at: now),
+              let deadline = session.deadline
+        else { return nil }
+        return .finished(finish(session, reason: .timeUp, at: deadline))
     }
 
     /// Picks the session up again after the user ended it by mistake.
@@ -100,12 +131,14 @@ public enum KeepAwakeReducer {
         bootID: String
     ) -> KeepAwakeState? {
         guard case .finished(let finish) = state, finish.canResume(at: now) else { return nil }
+        // A hold with no deadline resumes as one: there is nothing to count
+        // back to, and it runs until it is switched off again.
         return .running(
             KeepAwakeSession(
                 id: id,
                 startedAt: now,
                 deadline: finish.deadline,
-                total: finish.deadline.timeIntervalSince(now),
+                total: finish.deadline.map { $0.timeIntervalSince(now) } ?? 0,
                 bootID: bootID,
                 lidHoldRequested: false
             )
@@ -146,10 +179,10 @@ public enum KeepAwakeReducer {
         guard session.bootID == bootID else {
             return .ended(finish(session, reason: .macRestarted, at: now))
         }
-        guard !session.hasExpired(at: now) else {
+        if session.hasExpired(at: now), let deadline = session.deadline {
             // Dated to the deadline, not to now: the Mac was free to sleep from
             // the moment the session ran out, and the summary says so.
-            return .ended(finish(session, reason: .ledgeNotRunning, at: session.deadline))
+            return .ended(finish(session, reason: .ledgeNotRunning, at: deadline))
         }
         return .resume(session)
     }

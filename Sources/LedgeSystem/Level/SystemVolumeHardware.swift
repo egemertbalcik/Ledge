@@ -56,6 +56,13 @@ public struct SystemVolumeHardware: VolumeHardware {
         return muted != 0
     }
 
+    /// Whether the element has a mute control, regardless of whether it will
+    /// answer right now.
+    public func hasMute(_ device: AudioObjectID, element: UInt32) -> Bool {
+        var address = Self.address(kAudioDevicePropertyMute, element)
+        return AudioObjectHasProperty(device, &address)
+    }
+
     /// Present *and* writable. A device that reports the property but refuses
     /// to be set is the digital-output case: the write would return an error
     /// and the key would look dead, so it is skipped and the next element

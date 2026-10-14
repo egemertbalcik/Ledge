@@ -35,6 +35,14 @@ public final class ActivityCoordinator {
         _ present: Bool, _ playing: Bool, _ pausedTimerRemaining: TimeInterval?
     ) -> Void = { _, _, _ in }
 
+    /// Every Keep Awake reading, as it is published.
+    ///
+    /// Not `onArrival`, which fires once: a lid-closed hold has to be visible
+    /// outside the notch for the whole of its life, and the thing it is
+    /// visible in has to follow the countdown and the helper's answers as they
+    /// change. Nil means there is no Keep Awake card at all.
+    public var onKeepAwake: (KeepAwakePayload?) -> Void = { _ in }
+
     /// When the current timer session went from ticking to paused, for the
     /// bounded paused-timer rest.
     private var timerPausedSince: TimeInterval?
@@ -503,6 +511,12 @@ public final class ActivityCoordinator {
             $0.id.kind == .timer && $0.id.source == "session"
         }
         presentation.keepAwakeSession = queue.activities.first { $0.id.kind == .keepAwake }
+        onKeepAwake({
+            guard case .keepAwake(let payload)? = presentation.keepAwakeSession?.payload else {
+                return nil
+            }
+            return payload
+        }())
         presentation.privacyActive = queue.activities.first { $0.id.kind == .privacy }
         // The lingering card follows the queue while it lasts: the coordinator
         // decides *whether* a paused track may still be drawn, but which track

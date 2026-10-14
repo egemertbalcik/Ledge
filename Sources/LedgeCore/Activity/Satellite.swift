@@ -64,10 +64,11 @@ extension SatelliteContent {
     /// through two of them is movement that answers nothing — "45m" is the
     /// whole of what the user wants from it. Under a minute the seconds come
     /// back, because that is the one stretch where they change the answer.
+    /// Keep Awake's own, because its span runs to seven days and the timer's
+    /// stops at 99h 59m — which turned a week-long session into "99h 59m" in
+    /// the ear and on the compact face.
     public static func keepAwakeLabel(remaining: TimeInterval) -> String {
-        let total = wholeSeconds(remaining)
-        guard total >= 60, total < 3600 else { return timerLabel(remaining: remaining) }
-        return "\(total / 60)m"
+        KeepAwakeCopy.compactRemainingLabel(remaining)
     }
 
     /// The clamp both labels share. 359_940 is 99h 59m: past that the label

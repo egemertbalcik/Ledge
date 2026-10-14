@@ -184,6 +184,41 @@ public final class VolumeController {
         intents.withLock { $0.reasons(for: device) }
     }
 
+    /// This process's intent ledger, named.
+    ///
+    /// The ledger counts declarations and a count means nothing outside the
+    /// ledger that issued it. A number written to disk and read back by a
+    /// *later launch* compares against a ledger that has counted nothing, and
+    /// the mismatch looked exactly like somebody having acted — so every
+    /// recovered record read as a user decision and was thrown away with the
+    /// device still silenced. That was the failure the comparison exists to
+    /// prevent, reintroduced by the thing preventing it.
+    ///
+    /// So the name travels with the number, and a number from a ledger that
+    /// is not this one is not comparable at all. Unknown, which is not
+    /// evidence that anybody did anything.
+    public nonisolated static let intentIncarnation = UUID().uuidString
+
+    /// When this output was last spoken for, on this ledger's own clock.
+    ///
+    /// Only meaningful alongside `intentIncarnation`, and only as "is this
+    /// later than what I wrote down".
+    public nonisolated static func lastIntentDeclaration(of device: AudioObjectID) -> Int {
+        intents.withLock { $0.lastDeclaration(for: device) }
+    }
+
+    /// Puts back the reasons a device was silent.
+    ///
+    /// For the lid restore only. The two reasons are Ledge's own model of why
+    /// an output has no sound, and the hardware mute cannot carry them: a
+    /// device at a clamped logical zero is silent without the user having
+    /// muted anything, and restoring it through the user-mute path would hand
+    /// them back the red pill they never pressed.
+    public nonisolated static func restoreReasons(_ reasons: MuteReasons,
+                                                  for device: AudioObjectID) {
+        intents.withLock { $0.set(reasons, for: device) }
+    }
+
     /// Whether the user's own mute is in force for this output.
     public nonisolated static func userMuted(_ device: AudioObjectID) -> Bool {
         muteReasons(device).userMuted
@@ -226,7 +261,17 @@ public final class VolumeController {
         let before = muteReasons(device)
         guard let result = writer.apply(level: level, to: device, reasons: before)
         else { return nil }
-        intents.withLock { $0.set(result.reasons, for: device) }
+        // Declared only when the write established what was asked for — the
+        // level *and* the silence. Raising the volume is a request to hear
+        // something, so a scalar that lands while the unmute is refused is
+        // half of a request, not a decision: the device is still exactly as
+        // silent as whatever silenced it, and counting the half as a takeover
+        // released obligations that were still owed.
+        if Self.established(result) {
+            intents.withLock { $0.set(result.reasons, for: device) }
+        } else {
+            intents.withLock { $0.adopt(result.reasons, for: device) }
+        }
         // Only a write that was actually taken has an echo worth ignoring.
         if result.scalarAccepted || result.muteAccepted { noteSelfWrite(on: device) }
         return result
@@ -240,9 +285,52 @@ public final class VolumeController {
         let result = writer.apply(
             userMuted: muted, to: device, reasons: muteReasons(device)
         )
-        intents.withLock { $0.set(result.reasons, for: device) }
+        // A declared desire is not an achieved one. A mute the hardware
+        // refused left the device exactly as Ledge had silenced it, and
+        // counting the attempt as a decision released the undo record for a
+        // silence that was still Ledge's — the output stayed muted with
+        // nothing left that knew how to free it.
+        //
+        // Being *in* the state asked for is the test, not having written
+        // anything: pressing mute on a device the conserve already holds
+        // silent writes nothing and is still the user taking it over.
+        if Self.established(result) {
+            intents.withLock { $0.set(result.reasons, for: device) }
+        } else {
+            intents.withLock { $0.adopt(result.reasons, for: device) }
+        }
         if result.muteAccepted { noteSelfWrite(on: device) }
         return result
+    }
+
+    /// Whether a mute operation actually established what was asked for.
+    ///
+    /// Not "did it write something". Pressing mute on an output the lid
+    /// conserve already holds silent writes nothing at all and is still the
+    /// user taking it over, so an acceptance test would throw that decision
+    /// away. And not "does it read right" alone: a half-muted device's
+    /// aggregate reads unmuted, which would pass an unmute that reached two
+    /// channels out of four.
+    ///
+    /// Both, then: the write completed everywhere it governs, and the device
+    /// is in the state asked for.
+    nonisolated static func established(_ result: VolumeWriteResult) -> Bool {
+        // A level that did not land is not a level anybody set. Whether one
+        // was asked for comes from the result rather than from the call site,
+        // because a caller passing the wrong literal is a defect no test of
+        // this function could ever see.
+        if result.levelRequested && !result.scalarOutcome.isComplete { return false }
+        // Judged against the *composed* request, never against the user's
+        // Boolean. Pressing mute again on a device held silent by logical
+        // zero asks for the user's reason to go and the silence to stay — a
+        // completed decision that leaves the hardware muted, which comparing
+        // against "unmute" reads as a refusal and then undoes.
+        // Every governing control has to have answered. "Not known to be
+        // muted" and "known to be free" reduce to the same Bool, and taking
+        // the first for the second turned an acknowledged write over an
+        // unreadable control into proof the request had landed.
+        guard result.governedKnown else { return false }
+        return result.muteOutcome.isComplete && result.isMuted == result.requested.deviceMuted
     }
 
     /// The level to show for this output, and to step from.

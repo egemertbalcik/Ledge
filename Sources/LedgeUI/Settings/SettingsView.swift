@@ -3,6 +3,21 @@ import SwiftUI
 
 /// Things Settings needs the shell to do for it, so `LedgeUI` stays free of
 /// AppKit and ServiceManagement.
+/// What installing the helper came to, in the words the pane can use.
+///
+/// Its own type in LedgeUI rather than the shell's, because LedgeUI cannot see
+/// ServiceManagement and should not need to: approval pending is not success
+/// and not failure, and that distinction is the whole reason this is not a Bool.
+public enum KeepAwakeHelperSetupOutcome: Equatable, Sendable {
+    case installed
+    /// Registered, and now waiting for the user in System Settings. A daemon
+    /// awaiting approval holds nothing, so this never reads as set up.
+    case needsApproval
+    /// macOS will not install a privileged helper out of this build at all.
+    case unavailable
+    case refused(String)
+}
+
 public struct SettingsActions {
     public var setLaunchAtLogin: (Bool) -> Bool
     public var loginItemStatus: () -> String
@@ -17,6 +32,28 @@ public struct SettingsActions {
     /// one is already running, and a button that does nothing is worse than a
     /// disabled one.
     public var canCheckForUpdates: () -> Bool = { true }
+
+    /// Installs the lid-closed helper, and says what happened.
+    ///
+    /// The one action in Ledge that asks macOS to run something as root, so it
+    /// is reached only from a press and never from a refresh. The default does
+    /// nothing and reports a build that cannot have one, which is what a
+    /// preview and a test should both see.
+    public var installKeepAwakeHelper: () -> KeepAwakeHelperSetupOutcome = { .unavailable }
+
+    /// Opens the System Settings pane where a registered daemon is approved.
+    public var showKeepAwakeHelperApproval: () -> Void = {}
+
+    /// Apps running right now, for picking one onto the agent roster.
+    ///
+    /// Asked for rather than listed, because the roster is a list of apps
+    /// whose preferences Ledge may write and the user should be choosing from
+    /// what is actually on their Mac, not typing bundle ids.
+    public var runningApps: () -> [(id: String, name: String)] = { [] }
+
+    /// The Chromium-family browsers running now, and whether each was started
+    /// with the flags that keep it working behind a shut lid.
+    public var runningChromium: () -> [ChromiumBrowser] = { [] }
 
     /// Whether Accessibility is already granted.
     public var isAccessibilityTrusted: () -> Bool
@@ -54,6 +91,10 @@ public struct SettingsActions {
         quit: @escaping () -> Void,
         checkForUpdates: @escaping () -> Void = {},
         canCheckForUpdates: @escaping () -> Bool = { true },
+        runningApps: @escaping () -> [(id: String, name: String)] = { [] },
+        runningChromium: @escaping () -> [ChromiumBrowser] = { [] },
+        installKeepAwakeHelper: @escaping () -> KeepAwakeHelperSetupOutcome = { .unavailable },
+        showKeepAwakeHelperApproval: @escaping () -> Void = {},
         isAccessibilityTrusted: @escaping () -> Bool = { false },
         requestAccessibility: @escaping () -> Void = {},
         requestPermission: @escaping (PermissionKind) -> Void = { _ in },
@@ -72,6 +113,10 @@ public struct SettingsActions {
         self.quit = quit
         self.checkForUpdates = checkForUpdates
         self.canCheckForUpdates = canCheckForUpdates
+        self.runningApps = runningApps
+        self.runningChromium = runningChromium
+        self.installKeepAwakeHelper = installKeepAwakeHelper
+        self.showKeepAwakeHelperApproval = showKeepAwakeHelperApproval
         self.isAccessibilityTrusted = isAccessibilityTrusted
         self.requestAccessibility = requestAccessibility
         self.requestPermission = requestPermission

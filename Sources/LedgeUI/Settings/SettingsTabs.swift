@@ -165,6 +165,7 @@ struct CardsSettingsTab: View {
     let actions: SettingsActions
     let openPermissions: () -> Void
 
+
     /// One card's row: what it is, and what it shows.
     private func cardRow(_ provider: ProviderDescriptor, trailing: String?) -> some View {
         HStack(spacing: 10) {
@@ -254,6 +255,31 @@ struct CardsSettingsTab: View {
 /// configuration specific to it.
 struct ProviderDetailPane: View {
 
+    /// What the last press of Set Up came to.
+    ///
+    /// Held in the view rather than the model because it is the answer to one
+    /// press, not a fact about the app: reopening Settings should show the
+    /// installation state afresh, not the outcome of something the user did
+    /// last week.
+    @State private var keepAwakeSetup: KeepAwakeHelperSetupOutcome?
+
+    private var roster: AgentRoster { preferences.agentRoster }
+
+    /// Only browsers the user has put on the roster, and only those missing
+    /// the flags. A Chromium window somebody left open is nobody's problem.
+    private var stallingBrowsers: [ChromiumBrowser] {
+        ChromiumAdvice.stalling(actions.runningChromium(), roster: roster)
+    }
+
+    /// A bundle id is not a name. The running app's own name where there is
+    /// one, and the last part of the id where there is not — an app that was
+    /// on the list and has since been uninstalled still has to be removable.
+    private func agentName(_ id: String) -> String {
+        actions.runningApps().first { $0.id == id }?.name
+            ?? id.split(separator: ".").last.map(String.init)
+            ?? id
+    }
+
     let id: String
     @Bindable var preferences: Preferences
     let model: SettingsModel
@@ -323,6 +349,120 @@ struct ProviderDetailPane: View {
                         Text("On battery, a session ends here so your Mac can sleep before it runs out. Plugged in, it runs to the end.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
+                    }
+                    Section(KeepAwakeCopy.lidClosed) {
+                        HStack {
+                            Text(model.keepAwakeHelper == .installed ? "Set up" : "Not set up")
+                            Spacer()
+                            Image(systemName: model.keepAwakeHelper == .installed
+                                ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .foregroundStyle(model.keepAwakeHelper == .installed
+                                    ? .green : .orange)
+                        }
+                        // The whole state in a sentence, including the one
+                        // state that is nobody's fault and cannot be fixed
+                        // from here: macOS will not install a privileged
+                        // helper out of an unsigned build, and saying so is
+                        // more use than a setup button that fails every time.
+                        Text(KeepAwakeCopy.lidInstallation(model.keepAwakeHelper))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Text(KeepAwakeCopy.lidNeedsALength)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        // Only where pressing it could do something. On an
+                        // unsigned build macOS refuses before it begins, and a
+                        // button that fails every time teaches people the
+                        // feature is broken rather than unavailable.
+                        if model.keepAwakeHelper == .notInstalled {
+                            Button("Set Up…") { keepAwakeSetup = actions.installKeepAwakeHelper() }
+                        }
+                        if keepAwakeSetup == .needsApproval {
+                            Text("Ledge has asked to install the helper. It holds nothing until you allow it in System Settings.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            Button("Open Login Items…", action: actions.showKeepAwakeHelperApproval)
+                        }
+                        if case .refused(let reason) = keepAwakeSetup, !reason.isEmpty {
+                            Text(reason)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Section("Agents") {
+                        // The other half of the mode, and the half worth
+                        // explaining: everything else about a shut lid is
+                        // about spending less, and this is the list of things
+                        // that must keep spending.
+                        Text("With the lid shut, macOS winds down anything it thinks nobody is watching — which is everything. These apps are the exception.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        Toggle("Keep these apps at full speed", isOn: $preferences.keepAwakeDisableAppNap)
+                        Text("Changes a setting inside each app, and puts it back when the session ends. Off unless you ask for it.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+
+                        ForEach(roster.bundleIDs, id: \.self) { id in
+                            HStack {
+                                Text(agentName(id))
+                                Spacer()
+                                Button {
+                                    var next = roster
+                                    next.remove(id)
+                                    preferences.agentRoster = next
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Take \(agentName(id)) off the list")
+                            }
+                        }
+
+                        Menu("Add an App…") {
+                            // Only what is running, and only what is not on the
+                            // list already. Typing a bundle id is how you end up
+                            // with an entry that names nothing and fails silently.
+                            let addable = actions.runningApps()
+                                .filter { !roster.carries($0.id) }
+                                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+                            if addable.isEmpty {
+                                Text("Nothing else is running")
+                            }
+                            ForEach(addable, id: \.id) { app in
+                                Button(app.name) {
+                                    var next = roster
+                                    next.add(app.id)
+                                    preferences.agentRoster = next
+                                }
+                            }
+                        }
+                    }
+                    if !stallingBrowsers.isEmpty {
+                        Section("Browsers") {
+                            // A browser-driving agent behind a shut lid fails
+                            // silently: the page is still there, the agent is
+                            // still waiting, and nothing happens.
+                            Text("Chromium slows every window macOS reports as hidden, and a shut lid hides all of them. An agent driving one of these will stall.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                            ForEach(stallingBrowsers, id: \.bundleID) { browser in
+                                HStack {
+                                    Text(browser.name)
+                                    Spacer()
+                                    // Copied, not done. The flags only take
+                                    // effect at launch, so the fix is a restart,
+                                    // and restarting somebody's browser out from
+                                    // under them is the worse surprise.
+                                    Button("Copy Command") {
+                                        actions.copyToClipboard(ChromiumAdvice.launchCommand(for: browser))
+                                    }
+                                    .buttonStyle(.borderless)
+                                }
+                            }
+                            Text("Quit the browser and run that command to start it again with the work kept alive.")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     Section("If Ledge restarts") {
                         // Stated rather than discovered. The alternative is

@@ -46,7 +46,7 @@ public final class BrightnessController {
 
     public init() {}
 
-    public var isSupported: Bool {
+    public nonisolated var isSupported: Bool {
         PrivateSymbol.exists("DisplayServicesGetBrightness", in: .displayServices)
     }
 
@@ -56,7 +56,7 @@ public final class BrightnessController {
     /// clamshell) DisplayServices has no brightness for it — the readout
     /// never appeared and the Levels card seeded a made-up level. The
     /// built-in panel is found by asking; main is only the fallback.
-    private static var mainDisplay: CGDirectDisplayID {
+    private nonisolated static var mainDisplay: CGDirectDisplayID {
         var count: UInt32 = 0
         var ids = [CGDirectDisplayID](repeating: 0, count: 16)
         if CGGetOnlineDisplayList(UInt32(ids.count), &ids, &count) == .success {
@@ -67,7 +67,7 @@ public final class BrightnessController {
         return CGMainDisplayID()
     }
 
-    public func level() -> Double? {
+    public nonisolated func level() -> Double? {
         guard let get = PrivateSymbol.lookup(
             "DisplayServicesGetBrightness",
             in: .displayServices,
@@ -81,7 +81,7 @@ public final class BrightnessController {
     }
 
     @discardableResult
-    public func setLevel(_ level: Double) -> Bool {
+    public nonisolated func setLevel(_ level: Double) -> Bool {
         guard let set = PrivateSymbol.lookup(
             "DisplayServicesSetBrightness",
             in: .displayServices,
@@ -90,7 +90,7 @@ public final class BrightnessController {
         return set(Self.mainDisplay, Float(min(max(level, 0), 1))) == 0
     }
 
-    public func readout() -> HUDReadout? {
+    public nonisolated func readout() -> HUDReadout? {
         guard let level = level() else { return nil }
         return HUDReadout(kind: .brightness, level: level)
     }

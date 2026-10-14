@@ -82,6 +82,26 @@ enum StateGallery {
         let apply: (NotchPresentation) -> Void
     }
 
+    /// One per lid-closed state, built rather than written out, for the same
+    /// reason the finished states are: each is a different sentence, and a
+    /// sentence nobody has looked at is a sentence that reads wrong. These are
+    /// the ones that most need looking at — a refusal truncated on a card 275
+    /// points wide has told the user nothing.
+    ///
+    /// Its own property rather than another term in the gallery's `+` chain:
+    /// the type checker gives up on that expression once it gets long enough.
+    private static let keepAwakeLidStates: [State] = {
+        let lids: [KeepAwakeLidState] = [.holding, .unconfirmed]
+            + KeepAwakeLidCode.allCases.map { KeepAwakeLidState.refused($0) }
+        return lids.map { lid in
+            State(name: "card-keep-awake-lid-\(lid.name)") { presentation in
+                presentation.phase = .expanded
+                presentation.selected = PreviewFixtures.keepAwakeLid(lid)
+                presentation.count = 3
+            }
+        }
+    }()
+
     static let states: [State] = [
         // MARK: Closed and compact
         State(name: "idle") { $0.phase = .idle },
@@ -216,7 +236,7 @@ enum StateGallery {
             presentation.selected = PreviewFixtures.keepAwakeFinished(reason)
             presentation.count = 3
         }
-    } + [
+    } + keepAwakeLidStates + [
         State(name: "card-weather") { presentation in
             presentation.phase = .expanded
             presentation.selected = PreviewFixtures.weather
@@ -379,6 +399,28 @@ extension PreviewFixtures {
             minutes: keepAwakeMinutes,
             batteryFloor: keepAwakeFloor
         ))
+    }
+
+    /// A running session with the lid-closed mode in a given state.
+    ///
+    /// Running rather than ready because that is where every one of these
+    /// sentences appears without being reached for, and because a hold that
+    /// is being held is the case the sentences are about.
+    static func keepAwakeLid(_ state: KeepAwakeLidState) -> Activity {
+        Activity(
+            id: ActivityID(kind: .keepAwake, source: "preview.lid-\(state.name)"),
+            createdAt: 0,
+            payload: .keepAwake(KeepAwakePayload(
+                phase: .running,
+                remaining: 2 * 3600,
+                until: keepAwakeUntil,
+                minutes: keepAwakeMinutes,
+                batteryFloor: keepAwakeFloor,
+                lidHeld: state.isLive,
+                lidClosed: true,
+                lid: state
+            ))
+        )
     }
 
     static func keepAwakeProblem(_ problem: KeepAwakePayload.Problem) -> Activity {

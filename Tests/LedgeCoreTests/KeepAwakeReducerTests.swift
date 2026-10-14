@@ -17,7 +17,10 @@ struct KeepAwakeReducerTests {
     func startClamps() {
         #expect(KeepAwakeReducer.clamp(minutes: 1) == 5)
         #expect(KeepAwakeReducer.clamp(minutes: 60) == 60)
-        #expect(KeepAwakeReducer.clamp(minutes: 10_000) == 24 * 60)
+        #expect(KeepAwakeReducer.clamp(minutes: 100_000) == 7 * 24 * 60,
+                "a week is the longest a session may be")
+        #expect(KeepAwakeReducer.clamp(minutes: 3 * 24 * 60) == 3 * 24 * 60,
+                "and days below it are taken as asked")
 
         let state = running(minutes: 90)
         #expect(state.session?.total == TimeInterval(90 * 60))

@@ -23,7 +23,9 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
     public var id: String
     public var state: State
     public var startedAt: Date
-    public var deadline: Date
+    /// Nil for a hold that runs until it is switched off. A record written by
+    /// an earlier version always carries one, and decodes unchanged.
+    public var deadline: Date?
     public var total: TimeInterval
     public var boot: String
     public var lidHoldRequested: Bool
@@ -38,8 +40,8 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
         id: String,
         state: State,
         startedAt: Date,
-        deadline: Date,
-        total: TimeInterval,
+        deadline: Date? = nil,
+        total: TimeInterval = 0,
         boot: String,
         lidHoldRequested: Bool = false,
         endReason: KeepAwakeEndReason? = nil,

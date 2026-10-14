@@ -52,8 +52,35 @@ private final class FakeVolumeHardware: VolumeHardware, @unchecked Sendable {
         muteByElement[element] = muted
     }
 
+    /// Elements that report a mute and cannot be written.
+    ///
+    /// The topology this fake could not express, and the one three separate
+    /// defects have now come out of: a master that answers, is independent of
+    /// the channels, and is read-only beside them. Reading and writing shared
+    /// one set here, so no test could have a control that says something
+    /// about a device it does not govern.
+    var readOnlyMuteElements: Set<UInt32> = []
+
+    /// Elements that have a control and will not report where it is.
+    ///
+    /// Separate from having no control at all: "there is no master" and "the
+    /// master would not answer" are different facts with opposite
+    /// consequences, and a fake that tied reading to writing could not
+    /// express a control that answers sometimes.
+    var unreadableMuteElements: Set<UInt32> = []
+
+    private var readableMuteElements: Set<UInt32> {
+        muteElements.union(readOnlyMuteElements)
+    }
+
+    func hasMute(_ device: AudioObjectID, element: UInt32) -> Bool {
+        readableMuteElements.contains(element)
+    }
+
     func readMute(_ device: AudioObjectID, element: UInt32) -> Bool? {
-        guard muteElements.contains(element) else { return nil }
+        guard readableMuteElements.contains(element),
+              !unreadableMuteElements.contains(element)
+        else { return nil }
         return muteByElement[element] ?? false
     }
 
@@ -86,14 +113,28 @@ private final class FakeVolumeHardware: VolumeHardware, @unchecked Sendable {
         muteElements.contains(element)
     }
 
+    /// Elements that say yes and do not move — which is all an
+    /// acknowledgement ever promises, and the one shape a status code cannot
+    /// report.
+    var ignoredMuteWrites: Set<UInt32> = []
+
     func writeMute(_ muted: Bool, _ device: AudioObjectID, element: UInt32) -> Bool {
         writes.append(.mute(muted, element: element))
         guard !refusedMuteWrites.contains(element) else { return false }
+        guard !ignoredMuteWrites.contains(element) else { return true }
         muteByElement[element] = muted
         return true
     }
 
     func readScalar(_ device: AudioObjectID) -> Double? { level }
+
+    /// Per element, so a device can acknowledge a write on four channels and
+    /// still have one of them sitting where it was.
+    var levelByElement: [UInt32: Double] = [:]
+    func readScalar(_ device: AudioObjectID, element: UInt32) -> Double? {
+        if let stuck = levelByElement[element] { return stuck }
+        return scalarElements.contains(element) || element == VolumeElement.main ? level : nil
+    }
 }
 
 /// CoreAudio keeps volume and mute as separate controls, a scalar of zero is
@@ -1227,5 +1268,454 @@ struct FirstSightingOfMuteTests {
         ledger.observed(muted: true, level: 0.0625, for: 1, isSelfWrite: false)
         ledger.observed(muted: false, level: 0.0625, for: 1, isSelfWrite: false)
         #expect(ledger.reasons(for: 1).isEmpty)
+    }
+
+    // MARK: - Telling an echo from a decision
+
+    /// The property the lid conserve's whole intent story rests on.
+    ///
+    /// The conserve mutes the hardware and touches no intent. The volume
+    /// watcher may then see that mute and adopt it, producing exactly the
+    /// reasons a person pressing the mute key would — so the *reasons* cannot
+    /// tell the two apart, and the lid coming up has to: one is Ledge's own
+    /// echo, to be corrected, the other is a decision that outranks the
+    /// record.
+    @Test("Adopting what the hardware says is not somebody deciding")
+    func observingDoesNotClaimIntent() {
+        var ledger = MuteIntentLedger()
+        let before = ledger.lastDeclaration(for: 1)
+
+        // Ledge's own mute, noticed a moment later by the watcher.
+        ledger.observed(muted: true, level: 0.5, for: 1, isSelfWrite: false)
+        #expect(ledger.reasons(for: 1).userMuted, "the fixture adopted nothing")
+        #expect(ledger.lastDeclaration(for: 1) == before,
+                "noticing the hardware was recorded as somebody having an opinion")
+
+        // And the other direction, which clears the reasons.
+        ledger.observed(muted: false, level: 0.5, for: 1, isSelfWrite: false)
+        #expect(ledger.reasons(for: 1).isEmpty)
+        #expect(ledger.lastDeclaration(for: 1) == before,
+                "an unmute noticed on the hardware was recorded as a decision")
+    }
+
+    @Test("Declaring what a silence means is somebody deciding")
+    func settingClaimsIntent() {
+        var ledger = MuteIntentLedger()
+        let before = ledger.lastDeclaration(for: 1)
+
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        #expect(ledger.lastDeclaration(for: 1) > before,
+                "the mute key was indistinguishable from the watcher noticing")
+
+        let afterMute = ledger.lastDeclaration(for: 1)
+        // Clearing is a decision too, and so is declaring the same thing
+        // twice: what is being counted is that somebody spoke.
+        ledger.set(.none, for: 1)
+        #expect(ledger.lastDeclaration(for: 1) > afterMute)
+    }
+
+    /// One device's decisions say nothing about another's.
+    @Test("Declarations are per output")
+    func declarationsAreNotShared() {
+        var ledger = MuteIntentLedger()
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        #expect(ledger.lastDeclaration(for: 2) == 0,
+                "a decision about one output was recorded against another")
+    }
+
+    /// An output that is forgotten and comes back has had nothing declared
+    /// about it, and must read that way.
+    ///
+    /// A per-device counter said the opposite: pruning reset it to zero, and
+    /// zero against a remembered one looked like a change. The ledger counts
+    /// on its own clock and the comparison asks *later*, never *different*,
+    /// so a forgotten output is silent on the question rather than lying
+    /// about it.
+    @Test("A forgotten output is not later than anything")
+    func forgottenOutputIsNotADecision() {
+        var ledger = MuteIntentLedger()
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        let noted = ledger.lastDeclaration(for: 1)
+        #expect(noted > 0)
+
+        // Unplugged, pruned, and back — possibly under a new device id.
+        ledger.keepOnly([])
+        #expect(ledger.lastDeclaration(for: 1) == 0)
+        #expect(!(ledger.lastDeclaration(for: 1) > noted),
+                "an output that was forgotten read as one somebody had acted on")
+    }
+
+    /// The reason the clock is the ledger's and not the device's.
+    ///
+    /// A per-device counter restarts at one when an output is forgotten and
+    /// comes back — and one is not later than the two somebody wrote down, so
+    /// a real decision taken after the record would be missed and the user's
+    /// choice overwritten. A ledger-wide clock only ever goes forward, so
+    /// anything declared after a remembered point is later than it, whatever
+    /// happened to the device in between.
+    @Test("A decision after an output was forgotten is still later than the record")
+    func declarationAfterPruningIsStillLater() {
+        var ledger = MuteIntentLedger()
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        ledger.set(MuteReasons(userMuted: false, zeroSilence: false), for: 1)
+        let noted = ledger.lastDeclaration(for: 1)
+
+        // Unplugged and pruned, then back — and now somebody acts on it.
+        ledger.keepOnly([])
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+
+        #expect(ledger.lastDeclaration(for: 1) > noted,
+                "a decision taken after the record was written read as older than it")
+    }
+
+    /// And a declaration about a *different* output does not make this one
+    /// look spoken for, even though the clock they share has moved.
+    @Test("Somebody else's output moving the clock is not a decision about mine")
+    func anotherOutputDoesNotCount() {
+        var ledger = MuteIntentLedger()
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        let noted = ledger.lastDeclaration(for: 1)
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 2)
+        #expect(!(ledger.lastDeclaration(for: 1) > noted),
+                "a decision about another output read as one about this one")
+    }
+
+    /// Adopting a refused attempt's description is not a decision either.
+    @Test("Adopting reasons without claiming them does not move the clock")
+    func adoptDoesNotDeclare() {
+        var ledger = MuteIntentLedger()
+        let before = ledger.lastDeclaration(for: 1)
+        ledger.adopt(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        #expect(ledger.reasons(for: 1).userMuted, "the description was not recorded")
+        #expect(ledger.lastDeclaration(for: 1) == before,
+                "an attempt the hardware refused was recorded as a decision")
+    }
+
+    /// A device that has gone away takes its revision with it, or a Mac that
+    /// has seen forty AirPlay speakers carries forty numbers for ever.
+    @Test("A forgotten output forgets when it was spoken for")
+    func prunedDeclaration() {
+        var ledger = MuteIntentLedger()
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 1)
+        ledger.set(MuteReasons(userMuted: true, zeroSilence: false), for: 2)
+        ledger.keepOnly([2])
+        #expect(ledger.lastDeclaration(for: 1) == 0)
+        #expect(ledger.lastDeclaration(for: 2) > 0)
+    }
+
+    // MARK: - An attempt is not an achievement
+
+    /// What may count as the user taking an output over.
+    ///
+    /// Driven through the production writer rather than fabricated, because
+    /// the interesting cases are compositions the writer produces and a
+    /// hand-made result cannot: a request that leaves the hardware muted on
+    /// purpose, and one whose two halves disagree.
+    @Test("Only a request the hardware actually established counts")
+    func establishedDecisions() {
+        // Ordinary mute of an audible device.
+        var hardware = FakeVolumeHardware()
+        var writer = VolumeWriter(hardware: hardware)
+        var result = writer.apply(userMuted: true, to: 1, reasons: .none)
+        #expect(VolumeController.established(result), "an ordinary mute was not a decision")
+        #expect(result.isMuted)
+
+        // And unmuting it again.
+        result = writer.apply(userMuted: false, to: 1,
+                              reasons: MuteReasons(userMuted: true, zeroSilence: false))
+        #expect(VolumeController.established(result))
+        #expect(!result.isMuted)
+
+        // Pressing mute on a device something else already holds silent: no
+        // write is needed, and it is still the user taking it over.
+        hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: true, to: 1, reasons: .none)
+        #expect(result.muteOutcome == .alreadySettled, "the fixture needed a write after all")
+        #expect(VolumeController.established(result),
+                "a decision that needed no write was thrown away")
+
+        // Clearing only the user's reason while logical zero still holds the
+        // device silent. The hardware stays muted — deliberately, so a device
+        // that clamps zero does not come back audible — and that is a
+        // completed decision, not a refused write.
+        hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: false, to: 1,
+                              reasons: MuteReasons(userMuted: true, zeroSilence: true))
+        #expect(result.muteOutcome == .alreadySettled)
+        #expect(result.isMuted, "the fixture let the device come back audible")
+        #expect(!result.reasons.userMuted, "the user's own reason was not cleared")
+        #expect(result.reasons.zeroSilence, "the reason it is actually silent was lost")
+        #expect(VolumeController.established(result),
+                "clearing the user's reason at logical zero read as a refused write")
+
+        // Refused outright: the device is exactly as somebody else left it.
+        hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        hardware.refusedMuteWrites = [VolumeElement.main]
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: false, to: 1,
+                              reasons: MuteReasons(userMuted: true, zeroSilence: false))
+        #expect(result.isMuted, "the fixture let the refused request through")
+        #expect(!VolumeController.established(result),
+                "a request the hardware refused counted as a decision")
+
+        // And the other direction, which is the one the honoured reasons
+        // cannot see: a *mute* the hardware refused leaves the device
+        // audible, and the honoured set is then blank — so comparing the
+        // device against it agrees with itself and calls the failure a
+        // decision. Only what was asked for can tell.
+        hardware = FakeVolumeHardware()
+        hardware.refusedMuteWrites = [VolumeElement.main]
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: true, to: 1, reasons: .none)
+        #expect(!result.isMuted, "the fixture muted the device after all")
+        #expect(!VolumeController.established(result),
+                "a mute the hardware refused counted as a decision")
+
+        // Acknowledged and ineffective. The write reports complete and the
+        // device never moved — and because it stayed audible the honoured
+        // reasons are blank, so comparing the device against *them* agrees
+        // with itself and calls the failure a decision. Only what was asked
+        // for can tell the difference.
+        hardware = FakeVolumeHardware()
+        hardware.ignoredMuteWrites = [VolumeElement.main]
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: true, to: 1, reasons: .none)
+        #expect(result.muteOutcome == .master, "the fixture did not acknowledge the write")
+        #expect(!result.isMuted, "the fixture muted the device after all")
+        #expect(result.reasons.isEmpty, "the honoured set was supposed to be blank")
+        #expect(!VolumeController.established(result),
+                "an acknowledged write that changed nothing counted as a decision")
+
+        // Half of it. The aggregate reads free for a device muted on one
+        // channel and live on the other, so the readback agrees with an
+        // unmute that only reached half the device.
+        hardware = FakeVolumeHardware()
+        hardware.channelCount = 2
+        hardware.muteElements = [1, 2]
+        hardware.setMuted(true, element: 1)
+        hardware.setMuted(true, element: 2)
+        hardware.refusedMuteWrites = [2]
+        writer = VolumeWriter(hardware: hardware)
+        result = writer.apply(userMuted: false, to: 1,
+                              reasons: MuteReasons(userMuted: true, zeroSilence: false))
+        #expect(result.muteOutcome == .partial, "the fixture did not leave it half muted")
+        #expect(!result.isMuted, "the aggregate was supposed to read free")
+        #expect(!VolumeController.established(result),
+                "an unmute that reached half the device counted as a decision")
+    }
+
+    /// An independent master beside writable channels is a shape this code
+    /// already supports on the write side — `settling` skips the master and
+    /// mutes the channels. The readback then asked the device what it thought,
+    /// and the device answers with that same master: a control that never
+    /// governed the operation, reporting a successfully muted output as
+    /// audible and a completed decision as a refused one.
+    @Test("A read-only master cannot certify channels it never governed")
+    func readOnlyMasterDoesNotCertifyTheChannels() {
+        let hardware = FakeVolumeHardware()
+        hardware.channelCount = 2
+        // A master that exists, answers, and cannot be written.
+        hardware.muteElements = [1, 2]
+        hardware.readOnlyMuteElements = [VolumeElement.main]
+        hardware.setMuted(false, element: VolumeElement.main)
+        // Both governed channels are already silent — Ledge muted them.
+        hardware.setMuted(true, element: 1)
+        hardware.setMuted(true, element: 2)
+        let writer = VolumeWriter(hardware: hardware)
+
+        let result = writer.apply(userMuted: true, to: 1, reasons: .none)
+
+        #expect(result.muteOutcome == .alreadySettled,
+                "the fixture needed a write, so it is not the no-op case")
+        #expect(hardware.readMute(1, element: VolumeElement.main) == false,
+                "the fixture has no master answering for a device it does not govern")
+        #expect(result.isMuted,
+                "an independent master's answer was taken for the channels' state")
+        #expect(result.reasons.userMuted, "the user's reason was blanked by a stray reading")
+        #expect(VolumeController.established(result),
+                "a completed decision on the governed channels read as a refusal")
+    }
+
+    /// Unknown is a third answer, and the one the Bool could not hold.
+    ///
+    /// "Not known to be muted" and "known to be free" reduce to the same
+    /// `false`, and that `false` matched a requested unmute exactly — so an
+    /// acknowledged write over a control that then went quiet read as proof
+    /// the unmute had landed.
+    @Test("A governed control that will not answer says nothing either way")
+    func unreadableGovernedControlIsUnknown() {
+        let hardware = FakeVolumeHardware()
+        hardware.channelCount = 2
+        hardware.muteElements = [1]          // channel two answers nothing
+        hardware.setMuted(true, element: 1)
+
+        #expect(VolumeWriter.silence(of: [1, 2], on: 1, hardware: hardware) == .unknown,
+                "a control nobody could read was counted as an answer")
+        #expect(VolumeWriter.silence(of: [1], on: 1, hardware: hardware) == .silent)
+        hardware.muteElements = [1, 2]
+        hardware.setMuted(false, element: 2)
+        #expect(VolumeWriter.silence(of: [1, 2], on: 1, hardware: hardware) == .mixed,
+                "a device half muted answered as though it agreed with itself")
+        hardware.muteElements = [1]
+        #expect(VolumeWriter.silence(of: [], on: 1, hardware: hardware) == .ungoverned,
+                "a device nobody looked at reported a definite answer")
+
+        hardware.setMuted(false, element: 1)
+        #expect(VolumeWriter.silence(of: [1], on: 1, hardware: hardware) == .free)
+    }
+
+    /// Every control answered, and they disagree.
+    ///
+    /// Certainty was the fix for unknown and is not the whole question: an
+    /// unmute that reached one channel of two has every control answering,
+    /// an aggregate that says "not muted everywhere", and that matched the
+    /// request exactly. Half muted is making sound, and it is not the device
+    /// anybody asked for either.
+    @Test("An unmute that reached half the device is not a decision")
+    func acknowledgedMixedStateIsNotADecision() {
+        let hardware = FakeVolumeHardware()
+        hardware.channelCount = 2
+        hardware.muteElements = [1, 2]
+        hardware.setMuted(true, element: 1)
+        hardware.setMuted(true, element: 2)
+        // Both setters say yes; channel two does not move.
+        hardware.ignoredMuteWrites = [2]
+        let writer = VolumeWriter(hardware: hardware)
+
+        let result = writer.apply(userMuted: false, to: 1,
+                                  reasons: MuteReasons(userMuted: true, zeroSilence: false))
+
+        #expect(result.muteOutcome == .everyChannel,
+                "the fixture refused a setter, which is a different case")
+        #expect(hardware.readMute(1, element: 1) == false)
+        #expect(hardware.readMute(1, element: 2) == true,
+                "the fixture did not leave a channel behind")
+        #expect(VolumeWriter.silence(of: [1, 2], on: 1, hardware: hardware) == .mixed)
+        #expect(!VolumeController.established(result),
+                "an unmute that reached half the device counted as a decision")
+        // And it is drawn as making sound, because it is. A bar that showed
+        // silence over a channel still playing would be the mute key lying in
+        // the other direction.
+        #expect(!result.isMuted, "a device still playing on one channel was drawn as silent")
+        #expect(!result.showsMuted)
+    }
+
+    /// And the whole request, through the writer: acknowledged, ineffective,
+    /// and then unreadable. Three separate ways of knowing nothing, and the
+    /// old reduction turned them into a success.
+    @Test("An acknowledged write over a control that goes quiet is not a decision")
+    func acknowledgedThenUnreadableIsNotADecision() {
+        let hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        // The write is taken and changes nothing, and the control then
+        // refuses to say where it is.
+        hardware.ignoredMuteWrites = [VolumeElement.main]
+        hardware.unreadableMuteElements = [VolumeElement.main]
+        let writer = VolumeWriter(hardware: hardware)
+
+        let result = writer.apply(userMuted: false, to: 1,
+                                  reasons: MuteReasons(userMuted: true, zeroSilence: false))
+
+        #expect(result.muteOutcome == .master, "the fixture did not acknowledge the write")
+        #expect(!result.governedKnown,
+                "a control that would not answer was counted as having answered")
+        #expect(!VolumeController.established(result),
+                "an unreadable control certified an unmute that never happened")
+    }
+
+    /// And the master still answers for a device it really does govern.
+    @Test("A master that governs the device still answers for it")
+    func governingMasterStillAnswers() {
+        let hardware = FakeVolumeHardware()
+        let writer = VolumeWriter(hardware: hardware)
+        let result = writer.apply(userMuted: true, to: 1, reasons: .none)
+        #expect(result.isMuted)
+        #expect(VolumeController.established(result))
+    }
+
+    /// The slider is a composed request, and half of one is not a decision.
+    ///
+    /// Raising the volume is explicitly a request to hear something: the
+    /// writer sets the level and then unmutes. A scalar that lands while the
+    /// unmute is refused leaves the device exactly as silent as it was, and
+    /// counting that as a takeover released obligations still owed.
+    @Test("A slider whose level lands but whose unmute is refused is not a decision")
+    func sliderNeedsBothHalves() {
+        let hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        hardware.refusedMuteWrites = [VolumeElement.main]
+        let writer = VolumeWriter(hardware: hardware)
+
+        guard let result = writer.apply(level: 0.8, to: 1,
+                                        reasons: MuteReasons(userMuted: true,
+                                                             zeroSilence: false)) else {
+            Issue.record("the writer refused the level outright")
+            return
+        }
+
+        #expect(result.scalarOutcome.isComplete, "the fixture never landed the level")
+        #expect(!result.muteOutcome.isComplete, "the fixture never refused the unmute")
+        #expect(result.isMuted, "the device was supposed to still be silent")
+        #expect(!VolumeController.established(result),
+                "half a request counted as a decision")
+    }
+
+    /// And the whole request, which is a decision.
+    @Test("A slider that lands and unmutes is a decision")
+    func sliderThatLandsCounts() {
+        let hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        let writer = VolumeWriter(hardware: hardware)
+
+        guard let result = writer.apply(level: 0.8, to: 1,
+                                        reasons: MuteReasons(userMuted: true,
+                                                             zeroSilence: false)) else {
+            Issue.record("the writer refused the level outright")
+            return
+        }
+        #expect(!result.isMuted)
+        #expect(VolumeController.established(result))
+    }
+
+    /// A clamped device reports a level nobody asked for and is still where it
+    /// was asked to be. The decision is about the silence, not the number.
+    @Test("A device that clamps the level still counts as a decision")
+    func clampedSliderStillCounts() {
+        let hardware = FakeVolumeHardware()
+        hardware.setMuted(true, element: VolumeElement.main)
+        hardware.clampsTo = 0.062
+        let writer = VolumeWriter(hardware: hardware)
+
+        guard let result = writer.apply(level: 0.8, to: 1,
+                                        reasons: MuteReasons(userMuted: true,
+                                                             zeroSilence: false)) else {
+            Issue.record("the writer refused the level outright")
+            return
+        }
+        #expect(result.level == 0.062, "the fixture did not clamp")
+        #expect(VolumeController.established(result),
+                "a clamped readback was treated as a level that did not land")
+    }
+
+    /// A level that is refused is not a decision either, whatever happens to
+    /// the silence afterwards.
+    @Test("A slider the device refuses is not a decision")
+    func refusedSliderIsNotADecision() {
+        let hardware = FakeVolumeHardware()
+        hardware.refusedScalarWrites = [VolumeElement.main]
+        hardware.scalarElements = [VolumeElement.main]
+        let writer = VolumeWriter(hardware: hardware)
+
+        guard let result = writer.apply(level: 0.8, to: 1, reasons: .none) else {
+            Issue.record("the writer returned nothing at all")
+            return
+        }
+        #expect(!result.scalarOutcome.isComplete)
+        #expect(!VolumeController.established(result))
     }
 }

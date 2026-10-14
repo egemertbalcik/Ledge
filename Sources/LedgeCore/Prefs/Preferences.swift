@@ -78,6 +78,20 @@ public enum Prefs {
     /// enough to be out of the way of ordinary work, high enough that the Mac
     /// is handed back with something left to sleep on rather than flat.
     public static let keepAwakeBatteryFloor = PrefKey<Double>("keepAwake.batteryFloor", default: 15)
+    /// The apps whose work is the reason the Mac is being kept awake, newline
+    /// separated. Empty means the shipped roster; a user who clears the list
+    /// entirely gets `AgentRoster([])`, which writes nothing.
+    public static let keepAwakeAgents = PrefKey<String>(
+        "keepAwake.agents", default: AgentRoster.shipped.joined(separator: "\n")
+    )
+    /// Whether Ledge may turn App Nap off for those apps while a lid-closed
+    /// session runs.
+    ///
+    /// Off by default, and it is the only setting in Ledge that writes another
+    /// application's preferences. Somebody has to ask for that.
+    public static let keepAwakeDisableAppNap = PrefKey<Bool>(
+        "keepAwake.disableAppNap", default: false
+    )
 
     // Shelf
     /// Parked file paths, newline-separated. `PrefKey` supports no arrays, and
@@ -279,6 +293,7 @@ public enum Prefs {
         timerWorkMinutes.name, timerShortBreakMinutes.name, timerLongBreakMinutes.name,
         timerAutoAdvance.name, timerRecents.name, shelfPaths.name,
         keepAwakeDefaultMinutes.name, keepAwakeBatteryFloor.name,
+        keepAwakeAgents.name, keepAwakeDisableAppNap.name,
         swipeThreshold.name, naturalSwipe.name,
         disabledProviders.name, enabledProviders.name, weatherCity.name, weatherUnits.name,
         quietDuringFocus.name,
@@ -338,6 +353,18 @@ public final class Preferences {
     }
     public var keepAwakeBatteryFloor: Double {
         didSet { persist(keepAwakeBatteryFloor, Prefs.keepAwakeBatteryFloor) }
+    }
+    public var keepAwakeAgents: String {
+        didSet { persist(keepAwakeAgents, Prefs.keepAwakeAgents) }
+    }
+    public var keepAwakeDisableAppNap: Bool {
+        didSet { persist(keepAwakeDisableAppNap, Prefs.keepAwakeDisableAppNap) }
+    }
+
+    /// The roster as the rest of the app wants it.
+    public var agentRoster: AgentRoster {
+        get { AgentRoster(stored: keepAwakeAgents) }
+        set { keepAwakeAgents = newValue.stored }
     }
     public var shelfPaths: String { didSet { persist(shelfPaths, Prefs.shelfPaths) } }
     public var hudDuration: Double { didSet { persist(hudDuration, Prefs.hudDuration) } }
@@ -421,6 +448,8 @@ public final class Preferences {
         timerRecents = store.value(for: Prefs.timerRecents)
         keepAwakeDefaultMinutes = store.value(for: Prefs.keepAwakeDefaultMinutes)
         keepAwakeBatteryFloor = store.value(for: Prefs.keepAwakeBatteryFloor)
+        keepAwakeAgents = store.value(for: Prefs.keepAwakeAgents)
+        keepAwakeDisableAppNap = store.value(for: Prefs.keepAwakeDisableAppNap)
         shelfPaths = store.value(for: Prefs.shelfPaths)
         hudDuration = store.value(for: Prefs.hudDuration)
         hudEnabled = store.value(for: Prefs.hudEnabled)
@@ -500,6 +529,8 @@ public final class Preferences {
         timerRecents = Prefs.timerRecents.defaultValue
         keepAwakeDefaultMinutes = Prefs.keepAwakeDefaultMinutes.defaultValue
         keepAwakeBatteryFloor = Prefs.keepAwakeBatteryFloor.defaultValue
+        keepAwakeAgents = Prefs.keepAwakeAgents.defaultValue
+        keepAwakeDisableAppNap = Prefs.keepAwakeDisableAppNap.defaultValue
         shelfPaths = Prefs.shelfPaths.defaultValue
         hudDuration = Prefs.hudDuration.defaultValue
         hudEnabled = Prefs.hudEnabled.defaultValue

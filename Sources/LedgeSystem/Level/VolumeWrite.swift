@@ -125,6 +125,40 @@ public struct VolumeWriteResult: Equatable, Sendable {
     /// claims a reason the hardware refused to honour.
     public let reasons: MuteReasons
 
+    /// The mute reasons that were *asked for*, before the hardware had its say.
+    ///
+    /// `reasons` cannot answer whether the request succeeded: it is the
+    /// honoured set, blanked whenever the device came back unmuted, so
+    /// comparing the device against it always agrees with itself. What it
+    /// cannot be compared against is what was wanted.
+    ///
+    /// And the request is composed. Pressing mute again on a device at
+    /// logical zero asks for *the user's reason off, the zero-silence still
+    /// on* — which deliberately leaves the hardware muted, so a device that
+    /// clamps zero does not come back audible. Judged against the user's
+    /// Boolean that is a refused write; judged against this it is what it is,
+    /// a completed decision.
+    public let requested: MuteReasons
+
+    /// Whether a *level* was part of what was asked for.
+    ///
+    /// The scalar outcome cannot say: a mute-only operation reports
+    /// `unsupported` because no level was asked for, and so does a level
+    /// operation on a device with no control to set — opposite meanings from
+    /// the same value. Only the caller knows, so the caller records it here
+    /// rather than leaving every reader of the result to remember.
+    public let levelRequested: Bool
+
+    /// Whether every control that governed the mute actually answered
+    /// afterwards.
+    ///
+    /// `isMuted` cannot carry this: a control that will not say reduces to
+    /// the same `false` a free control gives, and that `false` then matched a
+    /// requested unmute exactly. An acknowledged write and an unreadable
+    /// control is two unknowns, not a success — and it released the record of
+    /// a silence that was still in force.
+    public let governedKnown: Bool
+
     /// Whether a mute write was accepted. False when none was needed.
     public var muteAccepted: Bool { muteOutcome.accepted }
 
@@ -161,6 +195,15 @@ public protocol VolumeHardware: Sendable {
     /// asking the master and taking its silence for "not muted" reported a
     /// successfully muted headset as live, which made the mute key one-way.
     func readMute(_ device: AudioObjectID, element: UInt32) -> Bool?
+
+    /// Whether the element has a mute control at all.
+    ///
+    /// Separate from reading it, because "there is no master" and "the master
+    /// would not answer" are different facts with opposite consequences: the
+    /// first says to look at the channels, the second says nothing is known.
+    /// A failed read standing in for an absent control had an unreadable
+    /// master verified against channels it never wrote.
+    func hasMute(_ device: AudioObjectID, element: UInt32) -> Bool
 
     /// The output channels this device actually has, or nil when it will not
     /// say.
@@ -258,10 +301,12 @@ public struct VolumeWriter: Sendable {
         // unmuting into that is the blast all of this guards against: `wanted`
         // keeps whatever was already holding the output silent.
 
-        let muteOutcome = settle(wanted.deviceMuted, on: device)
+        let settled = settling(wanted.deviceMuted, on: device)
         return readback(
             device, wanted: wanted,
-            scalarOutcome: outcome, muteOutcome: muteOutcome, showsBefore: showsBefore
+            scalarOutcome: outcome, muteOutcome: settled.outcome,
+            governed: settled.governed,
+            levelRequested: true, showsBefore: showsBefore
         )
     }
 
@@ -280,11 +325,13 @@ public struct VolumeWriter: Sendable {
         let showsBefore = reasons.showsMuted && hardware.isOutputMuted(device)
         var wanted = reasons
         wanted.userMuted = userMuted
-        let muteOutcome = settle(wanted.deviceMuted, on: device)
+        let settled = settling(wanted.deviceMuted, on: device)
         return readback(
             device, wanted: wanted,
             scalarOutcome: .unsupported,  // no level was asked for
-            muteOutcome: muteOutcome, showsBefore: showsBefore
+            muteOutcome: settled.outcome,
+            governed: settled.governed,
+            levelRequested: false, showsBefore: showsBefore
         )
     }
 
@@ -294,9 +341,41 @@ public struct VolumeWriter: Sendable {
         wanted: MuteReasons,
         scalarOutcome: ScalarOutcome,
         muteOutcome: MuteOutcome,
+        governed: [UInt32],
+        levelRequested: Bool,
         showsBefore: Bool
     ) -> VolumeWriteResult {
-        let muted = hardware.isOutputMuted(device)
+        // Judged on the controls the write actually governed, not on whatever
+        // the device nominates as its mute control when asked afterwards.
+        //
+        // `isOutputMuted` takes any readable master first, and a master can be
+        // independent of the channels and read-only beside them — a shape this
+        // code already supports on the write side, where `settling` skips it
+        // and mutes the channels. Reading it afterwards judges a completed
+        // channel mute against a control that never governed it, reports the
+        // device as audible, and turns a successful decision into a refused
+        // one. The same mistake twice before, in two other places.
+        // Only when the write actually governed something. A refused or
+        // half-finished settle reports the elements it *would* have used, and
+        // reading those says nothing about a device whose silence is held
+        // somewhere else — the device's own account is the honest answer
+        // there, and it is also the conservative one.
+        let evidence = muteOutcome.isComplete
+            ? Self.silence(of: governed, on: device, hardware: hardware)
+            : .ungoverned
+        // The Bool is for drawing, and unknown draws as not-silent — the
+        // conservative choice for a bar on screen. It is deliberately *not*
+        // the evidence anything is released on; `governedKnown` carries that.
+        let muted: Bool
+        switch evidence {
+        case .silent: muted = true
+        case .free: muted = false
+        // Half muted is making sound, which is what the presentation needs to
+        // say — and it is still not an achieved request, which is what
+        // `governedKnown` says separately.
+        case .mixed: muted = false
+        case .unknown, .ungoverned: muted = hardware.isOutputMuted(device)
+        }
         // A reason the hardware refused to honour is not a reason: a device
         // with no mute control, or one that took the write on only half its
         // channels, is still making sound and must not be drawn — or
@@ -313,21 +392,74 @@ public struct VolumeWriter: Sendable {
             scalarOutcome: scalarOutcome,
             muteOutcome: muteOutcome,
             reasons: honoured,
+            requested: wanted,
+            levelRequested: levelRequested,
+            governedKnown: evidence == .silent || evidence == .free,
             presentationChanged: honoured.showsMuted != showsBefore
         )
     }
 
-    /// Brings every applicable element to the mute state wanted.
+    /// What the controls that governed a write say afterwards.
     ///
-    /// Deliberately not "is the aggregate already right": a half-muted stereo
-    /// device reads as unmuted, so unmuting it looked like a no-op and left one
-    /// channel silent. Each element is compared and written on its own.
-    private func settle(_ muted: Bool, on device: AudioObjectID) -> MuteOutcome {
+    /// Three answers, because the third one is the whole point. A control
+    /// that will not answer is not a free control: collapsing the two made an
+    /// acknowledged-and-then-unreadable unmute into evidence that the unmute
+    /// had landed, which released the undo record over a device still silent.
+    enum GovernedSilence: Equatable {
+        /// Every governing control reads muted.
+        case silent
+        /// They all answered, and every one of them is free.
+        case free
+        /// They all answered and they disagree — some silent, some not.
+        ///
+        /// A device half muted is making sound, and it is also not the device
+        /// anybody asked for. Folding this into `free` let an unmute that
+        /// reached one channel of two certify itself: every control answered,
+        /// the aggregate said "not muted everywhere", and that matched the
+        /// request exactly.
+        case mixed
+        /// One of them would not say, so nothing is known.
+        case unknown
+        /// There were none — the caller falls back on the device's own
+        /// account, which is a presentation answer and not evidence.
+        case ungoverned
+    }
+
+    /// Whether every control that governed a write now reads muted.
+    ///
+    /// Nil when there were none to govern it, which is the caller's cue to
+    /// fall back on whatever the device says about itself. An element that
+    /// will not answer is not silent: unknown must never certify silence, and
+    /// a half-muted device is making sound.
+    static func silence(of governed: [UInt32], on device: AudioObjectID,
+                        hardware: any VolumeHardware) -> GovernedSilence {
+        guard !governed.isEmpty else { return .ungoverned }
+        var sawSilent = false
+        var sawFree = false
+        for element in governed {
+            guard let reading = hardware.readMute(device, element: element) else { return .unknown }
+            if reading { sawSilent = true } else { sawFree = true }
+        }
+        if sawSilent && sawFree { return .mixed }
+        return sawSilent ? .silent : .free
+    }
+
+    /// The same write, and which elements it actually governed.
+    ///
+    /// The second half is the part a restore cannot do without. Choosing the
+    /// topology afterwards from whether a master *exists* verifies the wrong
+    /// control on a device whose master is read-only beside writable channels:
+    /// settle skips that master and writes the channels, and a reassuring
+    /// unchanged master then certifies channels that never moved.
+    func settling(_ muted: Bool,
+                  on device: AudioObjectID) -> (outcome: MuteOutcome, governed: [UInt32]) {
         if hardware.canWriteMute(device, element: VolumeElement.main) {
             if hardware.readMute(device, element: VolumeElement.main) == muted {
-                return .alreadySettled
+                return (.alreadySettled, [VolumeElement.main])
             }
-            if hardware.writeMute(muted, device, element: VolumeElement.main) { return .master }
+            if hardware.writeMute(muted, device, element: VolumeElement.main) {
+                return (.master, [VolumeElement.main])
+            }
             // A master that refuses is not the end of it: some devices expose
             // a read-only master beside settable channels.
         }
@@ -337,21 +469,124 @@ public struct VolumeWriter: Sendable {
         // how a six-channel device with mute on channels 1–2 came to be
         // reported as muted while four channels played on.
         let reported = hardware.channels(of: device)
-        guard !reported.isEmpty else { return .unsupported }
+        guard !reported.isEmpty else { return (.unsupported, []) }
 
         let unsettled = reported.filter { hardware.readMute(device, element: $0) != muted }
-        guard !unsettled.isEmpty else { return .alreadySettled }
+        guard !unsettled.isEmpty else { return (.alreadySettled, reported) }
 
         let writable = unsettled.filter { hardware.canWriteMute(device, element: $0) }
-        guard !writable.isEmpty else { return .unsupported }
+        guard !writable.isEmpty else { return (.unsupported, reported) }
 
         let taken = writable.filter { hardware.writeMute(muted, device, element: $0) }
         // Complete only when every channel that was *not already there* took
         // it — the ones already in the right state need nothing, and the ones
         // with no control were counted into `unsettled` above precisely so
         // they cannot be quietly dropped from the reckoning.
-        if taken.count == unsettled.count { return .everyChannel }
-        return taken.isEmpty ? .refused : .partial
+        if taken.count == unsettled.count { return (.everyChannel, reported) }
+        return (taken.isEmpty ? .refused : .partial, reported)
+    }
+
+    /// The same write, confined to a plan decided earlier.
+    ///
+    /// The unconfined version picks its controls from the hardware as it is
+    /// at the moment of the write, which is right for the slider and wrong
+    /// for anything with an undo record: the conserve journals which controls
+    /// it may touch, and a fallback onto a control outside that list is a
+    /// change nothing recorded. Those are refused here rather than made.
+    ///
+    /// The plan is also the topology — `allowed` is read as the element list,
+    /// not re-derived — so a capability query that answers differently the
+    /// second time cannot silently move the write somewhere else. A master
+    /// that will no longer take the write keeps the obligation outstanding
+    /// instead of handing it to the channels.
+    private func settling(_ muted: Bool, on device: AudioObjectID,
+                          allowed: [UInt32]) -> (outcome: MuteOutcome, governed: [UInt32]) {
+        guard !allowed.isEmpty else { return (.unsupported, []) }
+
+        // Unreadable counts as unsettled, deliberately: a control that will
+        // not say where it is has to be written and then read back, not
+        // assumed to be where it was wanted.
+        let unsettled = allowed.filter { hardware.readMute(device, element: $0) != muted }
+        guard !unsettled.isEmpty else { return (.alreadySettled, allowed) }
+
+        let writable = unsettled.filter { hardware.canWriteMute(device, element: $0) }
+        guard !writable.isEmpty else { return (.unsupported, allowed) }
+
+        let taken = writable.filter { hardware.writeMute(muted, device, element: $0) }
+        guard taken.count == unsettled.count else {
+            return (taken.isEmpty ? .refused : .partial, allowed)
+        }
+        return (allowed == [VolumeElement.main] ? .master : .everyChannel, allowed)
+    }
+
+    /// Which elements a mute write *would* govern, without writing anything.
+    ///
+    /// The same decision `settling` makes, and the one that gets journalled
+    /// before any control is touched. What Ledge can change is what Ledge has
+    /// to read when it asks whether the device is silent; an independent
+    /// read-only master is not that.
+    public func mutedElements(of device: AudioObjectID) -> [UInt32] {
+        if hardware.canWriteMute(device, element: VolumeElement.main) {
+            return [VolumeElement.main]
+        }
+        let reported = hardware.channels(of: device)
+        if reported.contains(where: { hardware.canWriteMute(device, element: $0) }) {
+            return reported
+        }
+        // Nothing Ledge can write. The master, if there is one, is still the
+        // only thing that describes the device.
+        return hardware.hasMute(device, element: VolumeElement.main) ? [VolumeElement.main] : []
+    }
+
+    /// Silences a device, and reads every element it governs to see whether it
+    /// is in the state asked for.
+    ///
+    /// The aggregate `isOutputMuted` answers "is it muted everywhere", and
+    /// false is also what a half-muted device says, and what an unknown one
+    /// says. It can establish that a mute took; it cannot establish that an
+    /// *unmute* did. For a restore — the thing the undo record is discarded on
+    /// — only a per-element reading of the state actually asked for will do.
+    ///
+    /// - Parameter allowed: the journalled plan — the only controls this may
+    ///   write. Nil plans nothing and so writes nothing: a record that cannot
+    ///   say which controls it owns does not get to guess.
+    /// - Returns: the write's outcome, and whether every governed element now
+    ///   reports `muted`. Unknown is never agreement.
+    public func restoreMuteOnly(_ muted: Bool, to device: AudioObjectID,
+                                within allowed: [UInt32]?) -> (outcome: MuteOutcome, agrees: Bool) {
+        // The elements the write itself governed, carried out of the write
+        // rather than guessed at afterwards. Property presence is not
+        // governance: a read-only master sits beside writable channels on
+        // real devices, settle skips it, and verifying it certifies channels
+        // that never moved.
+        guard let allowed else { return (.unsupported, false) }
+        let answer = settling(muted, on: device, allowed: allowed)
+        let outcome = answer.outcome
+        guard outcome.isComplete else { return (outcome, false) }
+        let governing = answer.governed
+        guard !governing.isEmpty else { return (outcome, false) }
+
+        for element in governing {
+            guard let seen = hardware.readMute(device, element: element), seen == muted else {
+                return (outcome, false)
+            }
+        }
+        return (outcome, true)
+    }
+
+    /// A level, and nothing else.
+    ///
+    /// `apply(level:to:reasons:)` is the slider: it keeps the device's mute
+    /// consistent with the level it sets, which is exactly right for somebody
+    /// dragging a control and exactly wrong for putting a level back
+    /// underneath a mute that has to stay. Restoring a device that was muted
+    /// before Ledge touched it went through the slider and unmuted it on the
+    /// way past, making sound at the old level before the mute was put back.
+    ///
+    /// This writes the scalar, judges it against every channel the device
+    /// reports, and leaves silence and intent alone.
+    public func applyScalarOnly(_ value: Double, to device: AudioObjectID) -> ScalarOutcome {
+        writeScalar(min(max(value, 0), 1), to: device)
     }
 
     /// Main element first; a device without one is written per channel.

@@ -25,6 +25,19 @@ struct TransportDispatchTests {
     /// Swaps in a runner that refuses everything, which is exactly what a
     /// player whose queue has filled looks like from here — and unlike holding
     /// real work open, it cannot drift as a consumer drains behind the test.
+    /// Runs the body with `osascript` replaced by a sink.
+    ///
+    /// Without this a test that expects a command to be *queued* queues a real
+    /// one, and a Mac with Spotify open starts playing music because a test
+    /// suite ran. The seam exists for timing tests; every test that admits a
+    /// command needs it.
+    static func withoutTouchingAnyPlayer(_ body: () -> Void) {
+        let original = NowPlayingCommander.runScript
+        NowPlayingCommander.runScript = { _ in }
+        defer { NowPlayingCommander.runScript = original }
+        body()
+    }
+
     private static func withFullQueue(_ body: () -> Void) {
         let original = NowPlayingCommander.commands
         NowPlayingCommander.commands = SerialCommandRunner(capacity: 0)
@@ -296,7 +309,9 @@ struct GlobalTransportTargetingTests {
         // is beside the point — and must not be allowed to refuse it.
         let sent = Dispatches()
         let commander = sent.commander(owner: Self.browser)
-        #expect(commander.send(.playPause, to: Self.spotify) == .queued)
+        TransportDispatchTests.withoutTouchingAnyPlayer {
+            #expect(commander.send(.playPause, to: Self.spotify) == .queued)
+        }
         #expect(sent.commands.isEmpty, "an addressed command was sent globally as well")
     }
 }

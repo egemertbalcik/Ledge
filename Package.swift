@@ -39,7 +39,20 @@ let package = Package(
         ),
 
         // Every private / permission-gated capability, behind protocols.
-        .target(name: "LedgeSystem", dependencies: ["LedgeCore", "LedgeAudioListen"]),
+        // LedgeHelperKit comes in for the XPC contract alone: the app side
+        // needs the protocol and the result codes to talk to the daemon, and
+        // nothing above this line knows there is a daemon at all.
+        .target(name: "LedgeSystem", dependencies: ["LedgeCore", "LedgeAudioListen", "LedgeHelperKit"]),
+
+        // What the root daemon knows: the XPC contract and the state machine
+        // behind it, with nothing privileged in it and nothing of Ledge's own.
+        // Foundation only, so the code that ends up running as root stays
+        // small enough to read in one sitting, and so every interleaving the
+        // lease depends on can be exercised with injected clocks rather than
+        // with a Mac that has to be put to sleep to test it.
+        .target(name: "LedgeHelperKit"),
+
+        .executableTarget(name: "LedgeKeepAwakeHelper", dependencies: ["LedgeHelperKit"]),
 
         // Turns system signals into activities. Testable against stubs.
         .target(name: "LedgeProviders", dependencies: ["LedgeCore", "LedgeSystem"]),
@@ -87,6 +100,8 @@ let package = Package(
             dependencies: ["LedgeProviders", "LedgeCore", "LedgeSystem"]
         ),
         .testTarget(name: "LedgeSystemTests", dependencies: ["LedgeSystem", "LedgeCore"]),
+        .testTarget(name: "LedgeHelperKitTests", dependencies: ["LedgeHelperKit"]),
+        .testTarget(name: "LedgeKeepAwakeHelperTests", dependencies: ["LedgeKeepAwakeHelper"]),
         .testTarget(name: "LedgeUITests", dependencies: ["LedgeUI", "LedgeCore"]),
         .testTarget(name: "LedgeShellTests", dependencies: ["LedgeShell", "LedgeCore", "LedgeProviders", "LedgeUI"]),
     ],

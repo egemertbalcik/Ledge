@@ -28,6 +28,19 @@ check LedgeCore   'AppKit|SwiftUI|IOKit|CoreAudio|CoreMediaIO|CoreBluetooth|Netw
 check LedgeUI     'AppKit|IOKit|CoreAudio|CoreMediaIO|CoreBluetooth|Network|EventKit|IOBluetooth|LedgeAudioListen|LedgeSystem|LedgeShell'
 check LedgeSystem 'SwiftUI|LedgeShell|LedgeUI'
 
+# LedgeHelperKit ends up inside a process that runs as root. Everything it
+# links is something an auditor has to read and something that can go wrong
+# with the whole machine's privileges, so it links Foundation and Security and
+# nothing else — no AppKit, no IOKit, and none of Ledge's own targets.
+check LedgeHelperKit 'AppKit|SwiftUI|IOKit|CoreAudio|CoreMediaIO|CoreBluetooth|Network|EventKit|IOBluetooth|CoreLocation|ServiceManagement|LedgeAudioListen|LedgeCore|LedgeSystem|LedgeProviders|LedgeShell|LedgeUI'
+
+# The daemon binary itself. It may reach for Security, because checking who is
+# calling is its first job, and for os.log, because a root process with nothing
+# to say in the system log cannot be debugged on somebody else's Mac. Nothing
+# else: no window server, no IOKit, and none of Ledge's own targets but the kit
+# it shares with the app.
+check LedgeKeepAwakeHelper 'AppKit|SwiftUI|IOKit|CoreAudio|CoreMediaIO|CoreBluetooth|Network|EventKit|IOBluetooth|CoreLocation|ServiceManagement|LedgeAudioListen|LedgeCore|LedgeSystem|LedgeProviders|LedgeShell|LedgeUI'
+
 # CoreAudio and CoreMediaIO match a listener for removal by the block pointer it
 # was registered with, and Swift cannot hand them the same pointer twice: the
 # listener typedefs import as thick closures, so every crossing mints a new

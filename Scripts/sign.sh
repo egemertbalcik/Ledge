@@ -87,6 +87,30 @@ if [[ -d "$SPARKLE_FW" ]]; then
     echo "signed nested Sparkle.framework"
 fi
 
+# The privileged helper, and the launchd plist that names the requirement it
+# checks its clients against.
+#
+# Both halves of that requirement are derived from the identity being used here
+# and nothing else, which is why this runs now rather than in bundle.sh: the
+# plist must be sealed inside the app, so it cannot be written after signing,
+# and the identity is not known before it. An ad-hoc build has no chain for a
+# requirement to name, so helper-plist.sh removes the helper instead of
+# shipping a daemon that nothing could ever talk to.
+"$ROOT/Scripts/helper-plist.sh" "$APP" "$IDENTITY"
+
+HELPER="$APP/Contents/MacOS/LedgeKeepAwakeHelper"
+if [[ -x "$HELPER" ]]; then
+    # Innermost first, and with its own identifier: the requirement the app
+    # checks the daemon against names `$BUNDLE_ID.keepawake`, and an executable
+    # signed under the app's identifier would fail it. No entitlements — a root
+    # daemon is given no capability it does not need — but the hardened runtime
+    # is not optional for something SMAppService will launch.
+    codesign --force "$TIMESTAMP" --options runtime \
+        --identifier "$BUNDLE_ID.keepawake" \
+        --sign "$IDENTITY" "$HELPER"
+    echo "signed nested LedgeKeepAwakeHelper as $BUNDLE_ID.keepawake"
+fi
+
 ARGS=(--force "$TIMESTAMP" --identifier "$BUNDLE_ID")
 
 if [[ "$IDENTITY" != "-" ]]; then

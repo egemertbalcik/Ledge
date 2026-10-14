@@ -52,9 +52,17 @@ public enum KeepAwakeEndReason: String, Equatable, Sendable, Codable, CaseIterab
 public struct KeepAwakeSession: Equatable, Sendable, Codable {
     public var id: String
     public var startedAt: Date
-    public var deadline: Date
+    /// When the hold ends by itself, or nil when it runs until it is switched
+    /// off.
+    ///
+    /// Keep Awake is a switch, not a timer: it holds until the user says
+    /// otherwise, or until a floor ends it. The deadline stays in the model
+    /// because a record written by an earlier version still carries one, and
+    /// a session read back with one still honours it.
+    public var deadline: Date?
     /// What the user asked for, kept so the Finished summary can say how long
-    /// it ran for rather than how long was left.
+    /// it ran for rather than how long was left. Zero when nothing was asked
+    /// for, which is the switch's own case.
     public var total: TimeInterval
     /// The boot this session belongs to. A session never crosses a restart.
     public var bootID: String
@@ -64,8 +72,8 @@ public struct KeepAwakeSession: Equatable, Sendable, Codable {
     public init(
         id: String = UUID().uuidString,
         startedAt: Date,
-        deadline: Date,
-        total: TimeInterval,
+        deadline: Date? = nil,
+        total: TimeInterval = 0,
         bootID: String,
         lidHoldRequested: Bool = false
     ) {
@@ -77,28 +85,42 @@ public struct KeepAwakeSession: Equatable, Sendable, Codable {
         self.lidHoldRequested = lidHoldRequested
     }
 
-    public func remaining(at now: Date) -> TimeInterval {
-        max(0, deadline.timeIntervalSince(now))
+    /// How long is left, or nil when nothing is counting down.
+    public func remaining(at now: Date) -> TimeInterval? {
+        guard let deadline else { return nil }
+        return max(0, deadline.timeIntervalSince(now))
+    }
+
+    /// How long it has been holding. What a switch has to say instead of a
+    /// countdown.
+    public func elapsed(at now: Date) -> TimeInterval {
+        max(0, now.timeIntervalSince(startedAt))
     }
 
     public func hasExpired(at now: Date) -> Bool {
-        now >= deadline
+        guard let deadline else { return false }
+        return now >= deadline
     }
+
+    /// Whether this one runs until it is switched off.
+    public var isIndefinite: Bool { deadline == nil }
 }
 
 /// How a session ended, and what can still be done about it.
 public struct KeepAwakeFinish: Equatable, Sendable {
     public var reason: KeepAwakeEndReason
     public var endedAt: Date
-    /// What the session had left when it ended, so Resume can offer it.
-    public var remaining: TimeInterval
+    /// What the session had left when it ended, so Resume can offer it. Nil
+    /// when nothing was counting down.
+    public var remaining: TimeInterval?
     /// How long it actually ran.
     public var ran: TimeInterval
     /// The session that ended, kept so Resume starts the same one again.
     public var sessionID: String
     /// The deadline it would have had, so Resume can tell whether there is
-    /// anything left to resume *to*.
-    public var deadline: Date
+    /// anything left to resume *to*. Nil for a hold that ran until it was
+    /// switched off — there is always something to resume to.
+    public var deadline: Date?
     /// True when the end could not be written down (§6.1.1). The card says so,
     /// because a relaunch may bring the session back.
     public var endUnrecorded: Bool
@@ -106,10 +128,10 @@ public struct KeepAwakeFinish: Equatable, Sendable {
     public init(
         reason: KeepAwakeEndReason,
         endedAt: Date,
-        remaining: TimeInterval,
+        remaining: TimeInterval?,
         ran: TimeInterval,
         sessionID: String,
-        deadline: Date,
+        deadline: Date?,
         endUnrecorded: Bool = false
     ) {
         self.reason = reason
@@ -127,7 +149,11 @@ public struct KeepAwakeFinish: Equatable, Sendable {
     /// ahead: resuming into a deadline that has already passed would start a
     /// session that ends in the same breath.
     public func canResume(at now: Date) -> Bool {
-        reason.isUserCancellation && deadline > now
+        guard reason.isUserCancellation else { return false }
+        // A hold with no deadline always has something to resume to: it was
+        // only ever going to stop when somebody stopped it.
+        guard let deadline else { return true }
+        return deadline > now
     }
 }
 
