@@ -6,7 +6,15 @@ import Testing
 
 /// The pane's states, driven entirely from fake data. No store, no hardware,
 /// no notification authorisation.
-@Suite("Devices settings model")
+/// Serialized, like the three suites below it in this file.
+///
+/// Every test here is `@MainActor` and waits for a load that needs the main
+/// actor to finish. Run concurrently with each other on a machine whose main
+/// actor is already contended by the rest of the suite, those waits are racing
+/// for the one thing they all need, and the budget is spent queueing rather
+/// than working. It has timed out twice on a loaded machine and never in
+/// isolation, which is the shape of contention rather than of a bug.
+@Suite("Devices settings model", .serialized)
 @MainActor
 struct DevicesSettingsModelTests {
 
@@ -54,20 +62,24 @@ struct DevicesSettingsModelTests {
     /// a parallel suite that bet loses often enough to be useless.
     private func settle(
         _ model: DevicesSettingsModel,
-        upTo seconds: TimeInterval = 5
+        upTo seconds: TimeInterval = 20
     ) async throws {
         try await waitUntil(upTo: seconds) { model.hasLoaded }
     }
 
     /// Waits for whatever the test is actually about.
     private func waitUntil(
-        upTo seconds: TimeInterval = 5,
+        upTo seconds: TimeInterval = 20,
         _ condition: @MainActor () -> Bool
     ) async throws {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline, !condition() {
             try await Task.sleep(for: .milliseconds(10))
         }
+        // Giving up quietly is worse than failing: the test goes on to compare
+        // whatever the half-built model happens to hold, and reports that
+        // instead of the wait that never finished.
+        try #require(condition(), "waited \(seconds)s and it never came true")
     }
 
     @Test("A new installation shows an empty state, distinct from not-yet-loaded")
@@ -316,14 +328,16 @@ struct DeviceRuleWriteTests {
         /// parallel suite that bet loses: this asserted after 300ms on a write
         /// that normally takes 30, and failed about one run in six.
         func wait(
-            upTo seconds: TimeInterval = 5,
+            upTo seconds: TimeInterval = 20,
             until condition: @escaping @Sendable ([Double]) -> Bool
-        ) async {
+        ) async throws {
             let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline {
                 if condition(thresholds) { return }
                 try? await Task.sleep(for: .milliseconds(10))
             }
+            try #require(condition(thresholds),
+                         "waited \(seconds)s and the write never landed: \(thresholds)")
         }
     }
 
@@ -356,7 +370,7 @@ struct DeviceRuleWriteTests {
 
         // The last value of the drag is 0.25; wait for it rather than for a
         // fixed interval.
-        await writes.wait { $0.last == 0.25 }
+        try await writes.wait { $0.last == 0.25 }
 
         let landed = writes.thresholds
         #expect(!landed.isEmpty)
@@ -392,7 +406,7 @@ struct DeviceRuleWriteTests {
         // The user closes the window immediately afterwards.
         model.cancel()
 
-        await writes.wait { $0.contains(0.3) }
+        try await writes.wait { $0.contains(0.3) }
         #expect(
             writes.thresholds.contains(0.3),
             "closing the pane threw away a rule change the user had just made"
@@ -675,13 +689,17 @@ struct DevicesPaneLifecycleTests {
         model.select(paneID)
         model.select(other)                      // the user moves on
 
-        // Waited for, not slept through: a fixed interval is a bet on how
-        // fast the machine is, and under a parallel suite that bet loses.
-        let deadline = Date().addingTimeInterval(5)
+        // Waited for, not slept through — and waited for as long as the rest
+        // of this file waits. Five seconds was its own number, smaller than
+        // the twenty every other wait here allows, and on a loaded machine it
+        // was the only one that ran out. The assertion then read as a
+        // selection bug rather than as a machine that had not got round to it.
+        let deadline = Date().addingTimeInterval(20)
         while model.selected?.id != other, Date() < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(model.selected?.id == other)
+        try #require(model.selected?.id == other,
+                     "waited 20s and the selection never moved")
 
         // And give the slow first read every chance to land wrongly.
         try await Task.sleep(for: .milliseconds(250))
