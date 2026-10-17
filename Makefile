@@ -142,11 +142,17 @@ appcast:
 	    --download-url-prefix $(RELEASE_URL_PREFIX) $(DIST_DIR)
 	@echo "appcast at $(DIST_DIR)/appcast.xml"
 
+## Install to /Applications, not ~/Applications.
+##
+## SMAppService will not register a privileged daemon out of a bundle in a
+## user's home directory, so the lid-closed helper is simply unavailable from
+## ~/Applications — and unavailable in the quiet way, where the button is there
+## and the registration fails. Everything else worked fine from either, which
+## is why it lived in the home directory for so long.
 install: sign
-	@rm -rf ~/Applications/Ledge.app
-	@mkdir -p ~/Applications
-	@cp -R $(APP) ~/Applications/
-	@echo "installed to ~/Applications/Ledge.app"
+	@rm -rf /Applications/Ledge.app
+	@cp -R $(APP) /Applications/
+	@echo "installed to /Applications/Ledge.app"
 
 clean:
 	rm -rf .build "$(BUILD_ROOT)"
