@@ -51,6 +51,15 @@ public enum KeepAwakeLidCode: String, Equatable, Sendable, Codable, CaseIterable
 public enum KeepAwakeHelperInstallation: String, Equatable, Sendable, Codable {
     case unsignedBuild
     case notInstalled
+    /// Registered with macOS, and waiting for the user to allow it.
+    ///
+    /// Its own state rather than a flavour of `notInstalled`, which is what it
+    /// used to be. The reasoning for folding it in was sound as far as it went
+    /// — an unapproved daemon holds nothing, so saying "set up" would promise a
+    /// hold that cannot happen — but it left the two states that need
+    /// *different things from the user* looking identical. Somebody who has
+    /// just pressed Set Up was told to go and press Set Up.
+    case needsApproval
     case installed
 }
 
@@ -65,6 +74,15 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
     case unsignedBuild
     /// The helper is not set up yet. A one-time setup away.
     case notInstalled
+    /// Set up, and waiting for the user to allow it in System Settings.
+    case needsApproval
+    /// Asked for, and the daemon has never answered — so nothing is held.
+    ///
+    /// Not `unconfirmed`. That one means the Mac is very probably held and
+    /// Ledge cannot prove it; this one means it is not held at all. They were
+    /// the same state for a while, and the card told somebody their Mac was
+    /// almost certainly staying awake while nothing was keeping it awake.
+    case unreachable
     /// Installed, nothing held, and the mode can be switched on.
     case off
     /// Held, and the daemon said so.
@@ -78,6 +96,23 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
     /// the one thing they might do about it — open the lid — is the exact
     /// thing the mode exists to save them.
     case unconfirmed
+    /// Asked for, accepted, and not yet applied.
+    ///
+    /// The daemon answers a hold once its lease is on disk and *before* it
+    /// runs the privileged write, so an acceptance is not a hold. This shared
+    /// a case with `unconfirmed` and therefore shared its sentence — "it
+    /// almost certainly still stands" — which is true of a hold that was
+    /// established and has gone quiet and false of one that has never been
+    /// established at all. Same drawing, different sentence: one says keep
+    /// the lid open a moment longer, the other says you may shut it.
+    case applying
+    /// Asked for, got through, and nothing can vouch for it now.
+    ///
+    /// Accepted and never confirmed, or confirmed longer ago than the lease.
+    /// Between `unconfirmed`, which says the hold almost certainly stands,
+    /// and `unreachable`, which says nothing is held: both of those were
+    /// being said about this, and both were claims nobody could make.
+    case cannotTell
     /// The daemon answered, and the answer was no.
     case refused(KeepAwakeLidCode)
 
@@ -86,10 +121,29 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
     /// `unconfirmed` counts. The Mac is being held awake under a lease that
     /// has not lapsed, so every part of the app that asks "is this on" — the
     /// menu-bar item above all — must answer yes.
+    /// Whether the daemon has *said* it holds this Mac.
+    ///
+    /// Only `.holding`. `.unconfirmed` is a hold that was asked for and not
+    /// answered — the daemon may have taken it and lost the reply — and
+    /// treating that as evidence is how the card came to draw a filled
+    /// switch, a countdown and "nothing is being held" at the same time.
+    /// `isLive` is the looser question and still has its uses; this is the
+    /// one anything claiming protection must ask.
+    public var isConfirmed: Bool { self == .holding }
+
     public var isLive: Bool {
         switch self {
-        case .holding, .unconfirmed: true
-        case .unsignedBuild, .notInstalled, .off, .refused: false
+        // `applying` counts. The lease is on the daemon's disk, so the Mac
+        // is as held as a lease can make it; what has not happened yet is the
+        // privileged write.
+        case .holding, .unconfirmed, .applying: true
+        // `cannotTell` is not live: nothing may tell the user their Mac is
+        // covered on the strength of it. Whether they need a *control* is a
+        // different question, and `needsAWayOut` is where that is asked —
+        // answering it here took the menu-bar item away from somebody whose
+        // lid was already shut over a hold that may well have been standing.
+        case .cannotTell: false
+        case .unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .refused: false
         }
     }
 
@@ -102,7 +156,14 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         switch self {
         case .off: true
         case .refused(let code): code.isWorthRetrying
-        case .holding, .unconfirmed, .unsignedBuild, .notInstalled: false
+        // Unreachable is offerable again: the daemon not answering once is
+        // a reason to try, not a reason no press will change.
+        case .unreachable: true
+        // Worth another press: taking the hold again is exactly what
+        // resolves not knowing.
+        case .cannotTell: true
+        case .holding, .unconfirmed, .applying,
+             .unsignedBuild, .notInstalled, .needsApproval: false
         }
     }
 
@@ -112,9 +173,13 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         switch self {
         case .unsignedBuild: "unsigned-build"
         case .notInstalled: "not-installed"
+        case .needsApproval: "needs-approval"
+        case .unreachable: "unreachable"
         case .off: "off"
         case .holding: "holding"
         case .unconfirmed: "unconfirmed"
+        case .applying: "applying"
+        case .cannotTell: "cannot-tell"
         case .refused(let code): "refused-\(code.rawValue)"
         }
     }
@@ -130,7 +195,35 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
     /// A hold that is live, or one that was asked for and refused, is about
     /// *this session*. "Not set up" and "this build can't" are about the app,
     /// and a session that is running was plainly started without them.
-    public var belongsOnARunningCard: Bool { isLive || isRefusal }
+    /// Whether a running card has to say this.
+    ///
+    /// `unreachable` belongs here above all: a session that asked for the lid
+    /// and never got it looks exactly like a healthy one otherwise, and the
+    /// user shuts the lid on it. A refusal at least arrives as an answer to
+    /// something they pressed; this arrives as silence.
+    /// Whether the user needs a way to end this, whatever it is.
+    ///
+    /// Live *or* unknown. A hold nobody can vouch for may still be holding
+    /// the Mac, and the one surface that exists when the lid is already shut
+    /// is the menu-bar item — so taking it away on uncertainty leaves the
+    /// person it was built for with no way out at all.
+    public var needsAWayOut: Bool {
+        switch self {
+        // Nothing was ever asked for here, so there is nothing to end.
+        case .off, .notInstalled, .needsApproval, .unsignedBuild: false
+        // Everything else. A hold that is live, one nothing can vouch for,
+        // one the daemon stopped answering about — and a *renewal* that was
+        // refused, which is the case this was written without: the daemon
+        // can answer `busy` to a renewal while the lease it refused to renew
+        // is still standing, and reading that as "nothing to end" took the
+        // menu-bar item away from a Mac that was being held.
+        case .holding, .unconfirmed, .applying, .cannotTell, .unreachable, .refused: true
+        }
+    }
+
+    public var belongsOnARunningCard: Bool {
+        isLive || isRefusal || self == .unreachable || self == .cannotTell
+    }
 
     /// Whether the helper exists to be talked to at all. Settings asks this to
     /// decide between "set it up" and "there is nothing to set up here".
@@ -177,9 +270,23 @@ public struct KeepAwakeLidBadge: Equatable, Sendable {
     ///   nothing is counting down.
     public static func badge(for state: KeepAwakeLidState,
                              remaining: String?) -> KeepAwakeLidBadge? {
-        guard state.isLive else { return nil }
-        let headline = remaining.map(KeepAwakeCopy.lidMenuHeadline(remaining:))
-            ?? KeepAwakeCopy.lidMenuHeadlineOpenEnded
+        guard state.needsAWayOut else { return nil }
+        // Live is not confirmed. An unconfirmed hold keeps its item — the
+        // lease is taken and the user must be able to end it — but it does
+        // not get the headline that says the lid is covered.
+        let headline: String
+        if state.isConfirmed {
+            headline = remaining.map(KeepAwakeCopy.lidMenuHeadline(remaining:))
+                ?? KeepAwakeCopy.lidMenuHeadlineOpenEnded
+        } else if state == .cannotTell || state.isRefusal || state == .unreachable {
+            // The item is here so the hold can be ended, not to say it is
+            // working. A renewal the daemon refused leaves a lease that may
+            // well be standing, and this is the only surface once the lid is
+            // down.
+            headline = KeepAwakeCopy.lidMenuHeadlineCannotTell
+        } else {
+            headline = KeepAwakeCopy.lidMenuHeadlineUnconfirmed(remaining: remaining)
+        }
         return KeepAwakeLidBadge(
             // One symbol for both live states. A different glyph for
             // `unconfirmed` would read as a different feature at the size a
@@ -225,7 +332,14 @@ public struct KeepAwakeLidUnavailable: KeepAwakeLidHolding {
     private let reading: KeepAwakeLidState
 
     public init(_ installation: KeepAwakeHelperInstallation = .notInstalled) {
-        reading = installation == .unsignedBuild ? .unsignedBuild : .notInstalled
+        // Each state keeps its own name here too. The same collapse lived in
+        // both places, so fixing one would have left the other telling an
+        // approved helper it was missing.
+        reading = switch installation {
+        case .unsignedBuild: .unsignedBuild
+        case .needsApproval: .needsApproval
+        case .notInstalled, .installed: .notInstalled
+        }
     }
 
     public func state() async -> KeepAwakeLidState { reading }

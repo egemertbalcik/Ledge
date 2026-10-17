@@ -31,6 +31,29 @@ struct BluetoothAnnounceTests {
             name: "27\" Smart Monitor M5", minorType: "Display"
         ))
     }
+
+    /// "Headphones" contains "phone", so the Continuity filter discarded every
+    /// pair of headphones `system_profiler` reported — and the profiler is the
+    /// only source of their battery levels and of the addresses macOS actually
+    /// pairs them under. A Mac paired with two sets of AirPods had neither in
+    /// its catalogue, while five records sat under randomised LE addresses
+    /// that the native notifications had supplied instead.
+    @Test("Headphones are not filtered as phones")
+    func headphonesAreNotPhones() {
+        #expect(IOBluetoothDeviceSource.isAnnounceworthy(
+            name: "Ege AirPods", minorType: "Headphones"
+        ))
+        #expect(IOBluetoothDeviceSource.isAnnounceworthy(
+            name: "Jabra Evolve", minorType: "Headset"
+        ))
+        #expect(IOBluetoothDeviceSource.isAnnounceworthy(
+            name: "SoundLink", minorType: "Hands-free Audio"
+        ))
+        // And what the filter is actually for still goes.
+        #expect(!IOBluetoothDeviceSource.isAnnounceworthy(
+            name: "Mystery", minorType: "Smartphone"
+        ))
+    }
 }
 
 /// Non-Apple Continuity noise: LE-linked Android phones and smartwatches also

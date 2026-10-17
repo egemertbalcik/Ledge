@@ -34,3 +34,7 @@ docs/audits/
 
 # Scratch work — concepts, mockups, anything mid-thought.
 work/
+
+# Briefs handed to the other agents working on this app. Scaffolding for a
+# conversation, not a record of the app.
+.ledge-briefs/

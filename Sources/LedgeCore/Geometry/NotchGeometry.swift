@@ -853,13 +853,16 @@ public struct NotchLayout: Sendable, Equatable {
                 ))
             )
         case .levels:
-            // Two labelled Control-Centre bars. Wide enough for a long output
-            // name; short — there is nothing below the second bar.
-            //
-            // 148 was two and a half points *short*: the brightness row ran
-            // into the page dots' band rather than stopping above it. Twelve
-            // more clears them without the card growing a visible margin.
-            return CGSize(width: base.width, height: max(base.height, 160))
+            // It measures itself, like the Clock and the simple cards. A fixed
+            // height was right when it was two bars and nothing else, and
+            // wrong the moment the card could hold one row or four — an
+            // output, a built-in panel, an external one, and a sentence under
+            // any of them. At 160 the external display's explanation ran
+            // through the page dots and off the bottom of the card.
+            return CGSize(
+                width: base.width,
+                height: simpleCardHeight(cardContentHeight, notchHeight: notchHeight)
+            )
         case .event:
             // As deep as the month on show, and no deeper. The height covers
             // the *whole* card including the cutout allowance the content is

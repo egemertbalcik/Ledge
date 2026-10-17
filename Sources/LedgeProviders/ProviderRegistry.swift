@@ -74,9 +74,15 @@ public enum ProviderRegistry {
     ///   their existing reads already saw; nothing here adds a scan, a query
     ///   or a timer. nil in tests and the preview, where the catalogue is not
     ///   part of what is being exercised.
+    /// - Parameter paired: the shared answer to "what is this Mac paired
+    ///   with". The Bluetooth provider fills it from reads it already makes;
+    ///   the proximity provider and the catalogue read it to tell the user's
+    ///   hardware from a passer-by's. Defaults to one nobody has answered,
+    ///   which is the honest state for the preview and for tests.
     public static func all(
         observations: (any DeviceObservationSink)? = nil,
         catalogue: DeviceCatalogueStore? = nil,
+        paired: PairedDeviceRegistry = PairedDeviceRegistry(),
         nowPlayingProvider: @escaping @MainActor () -> any ActivityProvider,
         weatherCity: @escaping @MainActor () -> String = { "" },
         timerProvider: @escaping @MainActor () -> any ActivityProvider = { TimerProvider() },
@@ -84,6 +90,16 @@ public enum ProviderRegistry {
         // the preview — need not build a store.
         shelfProvider: @escaping @MainActor () -> any ActivityProvider = {
             ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in }))
+        },
+        /// Handed out so the shell can ask it to publish again: brightness
+        /// has no change notification, so a brightness key moves the screen
+        /// and tells nobody.
+        levelsProvider: @escaping @MainActor () -> any ActivityProvider = { LevelsProvider() },
+        /// Handed out for the one thing only the shell knows: whether the
+        /// camera that just started is Ledge's own self-view, which the card
+        /// must not announce as news.
+        privacyProvider: @escaping @MainActor () -> any ActivityProvider = {
+            PrivacyProvider(source: SystemRecordingSource())
         },
         // Defaults to a store in a scratch directory, for the same reason.
         notesProvider: @escaping @MainActor () -> any ActivityProvider = {
@@ -146,7 +162,13 @@ public enum ProviderRegistry {
                 // still runs, it just stops noticing changes as they happen.
                 permission: .bluetooth,
                 permissionIsOptional: true,
-                make: { BluetoothProvider(source: IOBluetoothDeviceSource(), observations: observations) }
+                make: {
+                    BluetoothProvider(
+                        source: IOBluetoothDeviceSource(),
+                        observations: observations,
+                        paired: paired
+                    )
+                }
             ),
 
             ProviderRegistration(
@@ -165,7 +187,16 @@ public enum ProviderRegistry {
                 // the behaviour that actually shipped. The scan is still gated on
                 // the Bluetooth permission, and the toggle is in Settings.
                 permission: .bluetooth,
-                make: { AirPodsProximityProvider(observations: observations) }
+                make: {
+                    AirPodsProximityProvider(
+                        observations: observations,
+                        paired: paired,
+                        // So ownership can be established even when the
+                        // Bluetooth card — the usual reader of the paired
+                        // list — is switched off.
+                        inventory: IOBluetoothDeviceSource()
+                    )
+                }
             ),
 
             ProviderRegistration(
@@ -275,7 +306,7 @@ public enum ProviderRegistry {
                 displayName: "Sound & Brightness",
                 kind: .levels,
                 permission: nil,
-                make: { LevelsProvider() }
+                make: levelsProvider
             ),
 
             ProviderRegistration(
@@ -315,7 +346,7 @@ public enum ProviderRegistry {
                 // Reading a device's running state starts no capture session, so
                 // this triggers no TCC prompt and needs no permission.
                 permission: nil,
-                make: { PrivacyProvider(source: SystemRecordingSource()) }
+                make: privacyProvider
             ),
         ]
 
@@ -352,7 +383,8 @@ public enum ProviderRegistry {
     public static func descriptors(
         _ registrations: [ProviderRegistration],
         isEnabled: (String) -> Bool,
-        isPermitted: (PermissionKind) -> Bool
+        isPermitted: (PermissionKind) -> Bool,
+        wasSwitchedOnByHand: (String) -> Bool = { _ in false }
     ) -> [ProviderDescriptor] {
         registrations.map { registration in
             ProviderDescriptor(
@@ -362,7 +394,9 @@ public enum ProviderRegistry {
                 permission: registration.permission,
                 isEnabled: isEnabled(registration.id),
                 isAvailable: registration.permissionIsOptional
-                    || (registration.permission.map(isPermitted) ?? true)
+                    || (registration.permission.map(isPermitted) ?? true),
+                permissionIsOptional: registration.permissionIsOptional,
+                wasSwitchedOnByHand: wasSwitchedOnByHand(registration.id)
             )
         }
     }

@@ -290,27 +290,63 @@ struct NotesStoreTests {
         #expect(await store.list().isEmpty, "whitespace is not content")
     }
 
-    /// A discarded note is set aside like a deleted one, not unlinked.
-    @Test("Discarding sets the file aside rather than destroying it")
+    /// A discarded note that *had* been written is set aside, not unlinked.
+    @Test("Discarding sets a written file aside rather than destroying it")
     func discardIsRecoverable() async {
         let dir = scratch()
         let store = NotesStore(directory: dir, now: { 1 })
         let note = await store.create()
+        // Typed into, so there is a file at all. A note that was never typed
+        // into is never written, which is the rule the test below pins.
+        await store.update(note.id, text: AttributedString("something"))
         await store.flush()
         await store.discardIfEmpty(note.id)
+        // It is not empty any more, so nothing is discarded — and that is
+        // right: `discardIfEmpty` is for a blank, not for writing.
+        #expect(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("\(note.id).json").path
+        ), "a note with words in it was thrown away by a discard")
+
+        // Now one that really is empty and really was written: the window
+        // flushes a blank on its way out, and a file from an older build is
+        // on the disk either way.
+        let blank = await store.create()
+        await store.update(blank.id, text: AttributedString("x"))
+        await store.update(blank.id, text: AttributedString(""))
+        await store.flush()
+        await store.discardIfEmpty(blank.id)
         let aside = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
             .filter { $0.contains("discarded") } ?? []
-        #expect(aside.count == 1)
+        #expect(aside.count == 1, "a written blank was unlinked rather than set aside")
     }
 
-    /// A note that was created and never typed into must still reach the disk.
-    @Test("Creating a note schedules it to be written")
-    func createSchedulesAWrite() async throws {
+    /// The rule the owner asked for: an Untitled note nobody typed into must
+    /// never be saved at all.
+    @Test("A note that was never typed into never reaches the disk")
+    func anEmptyNoteIsNeverWritten() async throws {
+        // `create` used to mark the note dirty and schedule both writes, with
+        // a comment saying that was deliberate. The result was a collection
+        // filling with Untitled blanks: every press of New note that was then
+        // thought better of left a file behind, and All Notes opened on one.
         let dir = scratch()
         let store = NotesStore(directory: dir, now: { 1 })
         let note = await store.create()
         await store.flush()
-        #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(note.id).json").path))
+        #expect(!FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("\(note.id).json").path
+        ), "an empty note was written")
+
+        // And it is still openable and listable in this session, because it is
+        // the note the window has just put a cursor in.
+        #expect(await store.body(note.id) != nil)
+        #expect(await store.list().contains { $0.id == note.id })
+
+        // The first word is what makes it a note.
+        await store.update(note.id, text: AttributedString("the first word"))
+        await store.flush()
+        #expect(FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("\(note.id).json").path
+        ), "a note that was typed into did not reach the disk")
     }
 
     /// The summary travels in every payload and into the index, so it must

@@ -33,7 +33,10 @@ struct KeepAwakeCopyTests {
             .contains("20%"))
         #expect(KeepAwakeCopy.finished(.timeUp, at: "17:40", floor: 15, lidClosed: false)
             .contains("17:40"))
-        #expect(KeepAwakeCopy.readyLidHeld(floor: 20).contains("20%"))
+        // The resting card is a switch and says no number at all now; the
+        // one place a battery floor is still printed is under the lid-closed
+        // mode's length boxes, which is what this guards.
+        #expect(KeepAwakeCopy.lidEndsAt(floor: 20).contains("20%"))
     }
 
     @Test("Nothing promises that an ended session never comes back")
@@ -52,7 +55,11 @@ struct KeepAwakeCopyTests {
     func failures() {
         for line in [KeepAwakeCopy.assertionRefused, KeepAwakeCopy.startNotSaved] {
             #expect(line.contains("nothing changed"))
-            #expect(line.contains("Try Start again"))
+            // "Try Start again" while the card had a Start button on it. It
+            // is a switch now, and copy that names a control the card does not
+            // have is worse than copy that names none.
+            #expect(line.contains("Try again"))
+            #expect(!line.contains("Start"), "the card has no Start button to try again")
         }
     }
 }

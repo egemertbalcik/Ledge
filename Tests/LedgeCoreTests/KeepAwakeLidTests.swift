@@ -14,7 +14,7 @@ import Testing
 struct KeepAwakeLidTests {
 
     private static let everyState: [KeepAwakeLidState] =
-        [.unsignedBuild, .notInstalled, .off, .holding, .unconfirmed]
+        [.unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .holding, .unconfirmed]
             + KeepAwakeLidCode.allCases.map { .refused($0) }
 
     // MARK: - The nine codes
@@ -130,6 +130,32 @@ struct KeepAwakeLidTests {
         }
     }
 
+    /// The press that cannot start anything is the press that most has to say
+    /// something, and this is what makes that true by construction rather than
+    /// by the card remembering to.
+    ///
+    /// The card keeps a slot for this sentence that nothing else can occupy,
+    /// and pressing Lid closed in a state that cannot arm fills it. That only
+    /// works if there is always a sentence to put there — so: anything that
+    /// cannot arm has a reason, and the only state with no reason is the one
+    /// that can. A previous build had the two collapsed into one line shared
+    /// with the ready card's failure sentence, and a standing failure from an
+    /// earlier session took the line, dropped the reason, and left the button
+    /// doing nothing visible at all.
+    @Test("Anything that cannot arm has a reason to give")
+    func refusalAlwaysExplains() {
+        for state in Self.everyState {
+            if state.mayArm || state.isLive { continue }
+            #expect(KeepAwakeCopy.lid(state)?.isEmpty == false,
+                    "\(state) cannot arm and cannot say why")
+        }
+        // And the converse, which is what stops the rule above from being
+        // satisfied by giving every state a sentence: off is the one state
+        // with nothing to explain, and it is offerable.
+        #expect(KeepAwakeLidState.off.mayArm)
+        #expect(KeepAwakeCopy.lid(.off) == nil)
+    }
+
     /// A running card is about this session. "Not set up" and "this build
     /// can't" are about the app, and a session that is running was plainly
     /// started without either being in the way.
@@ -160,12 +186,47 @@ struct KeepAwakeLidTests {
     /// is off — so the notch, which is the whole of Ledge's UI, does not
     /// exist. Without this item the user has no feedback that their Mac is
     /// being held awake and no way to stop it without opening the lid.
-    @Test("There is an item exactly while the hold is live")
+    @Test("There is an item exactly while there is something to end")
     func theItemFollowsTheHold() {
+        // `isLive` was the rule and it was the wrong question. The item is
+        // not a status light, it is the *only* way to end a hold once the lid
+        // is down — so it has to follow whether there may be something to
+        // end, which is not the same as whether the daemon last said yes.
+        // A renewal answered `busy` leaves the lease it refused to renew
+        // standing, and the item vanished over a Mac that was being held.
         for state in Self.everyState {
             let badge = KeepAwakeLidBadge.badge(for: state, remaining: "2h 14m")
-            #expect((badge != nil) == state.isLive,
-                    "\(state): the menu-bar item does not follow the hold")
+            #expect((badge != nil) == state.needsAWayOut,
+                    "\(state): the menu-bar item does not follow what there is to end")
+        }
+        // The four that mean nothing was ever asked for, spelled out, so a
+        // state added to the enum has to be thought about rather than
+        // inheriting an answer.
+        for state: KeepAwakeLidState in [.off, .notInstalled, .needsApproval, .unsignedBuild] {
+            #expect(KeepAwakeLidBadge.badge(for: state, remaining: nil) == nil,
+                    "\(state.name): an item for a hold nobody asked for")
+        }
+        for state: KeepAwakeLidState in [.holding, .unconfirmed, .applying, .cannotTell,
+                                         .unreachable, .refused(.busy), .refused(.foreign)] {
+            #expect(KeepAwakeLidBadge.badge(for: state, remaining: nil) != nil,
+                    "\(state.name): no way out of a hold that may be standing")
+        }
+    }
+
+    @Test("Only a confirmed hold is announced as covering the lid")
+    func onlyConfirmedPromisesTheLid() {
+        // The item exists for every state above; what it *says* is a
+        // different question. Promising "awake with the lid shut" over an
+        // unconfirmed or refused renewal is the one overclaim that could cost
+        // somebody their work, because the menu bar is what they are looking
+        // at when the lid is already down.
+        let confirmed = KeepAwakeLidBadge.badge(for: .holding, remaining: "2h 14m")
+        #expect(confirmed?.headline == KeepAwakeCopy.lidMenuHeadline(remaining: "2h 14m"))
+        for state: KeepAwakeLidState in [.cannotTell, .unreachable,
+                                         .refused(.busy), .refused(.foreign)] {
+            let badge = KeepAwakeLidBadge.badge(for: state, remaining: "2h 14m")
+            #expect(badge?.headline == KeepAwakeCopy.lidMenuHeadlineCannotTell,
+                    "\(state.name) promised the lid was covered")
         }
     }
 

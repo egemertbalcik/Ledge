@@ -21,6 +21,18 @@ public actor DeviceCatalogueStore {
     private let url: URL
     private let now: @Sendable () -> Date
 
+    /// What the Mac is paired with, as last read from the Bluetooth stack.
+    ///
+    /// The catalogue's test of ownership, and deliberately a *shared, nullable*
+    /// answer rather than a set this actor keeps for itself: the question is
+    /// "has anything asked the system yet", and a store holding its own empty
+    /// set could not tell that apart from "paired with nothing".
+    private let paired: PairedDeviceRegistry
+
+    /// The paired reading this store has already acted on, so an unchanged
+    /// answer costs a comparison and nothing else.
+    private var appliedPairedGeneration: Int?
+
     private var catalogue: DeviceCatalogue
     private var loaded = false
     private var writeTask: Task<Void, Never>?
@@ -91,12 +103,18 @@ public actor DeviceCatalogueStore {
 
     /// - Parameter url: where the catalogue lives. Injected so tests never
     ///   touch the real Application Support directory.
+    /// - Parameter paired: the shared paired-device answer. Defaults to one
+    ///   nobody has answered, which is the honest state for a store built
+    ///   without a Bluetooth stack behind it: it judges nothing until it is
+    ///   told something.
     public init(
         url: URL = DeviceCatalogueStore.defaultURL(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        paired: PairedDeviceRegistry = PairedDeviceRegistry()
     ) {
         self.url = url
         self.now = now
+        self.paired = paired
         self.catalogue = DeviceCatalogue()
     }
 
@@ -138,6 +156,10 @@ public actor DeviceCatalogueStore {
             // does not present retired records until something happens to be
             // observed.
             pruneDevices(now: now())
+            // A record written as `connected` describes the moment the app was
+            // last killed, not now. Corrected before anything can read it.
+            decayStalePresence(now: now())
+            applyPairedAnswer()
         } catch {
             Self.log.error("device catalogue unreadable: \(error.localizedDescription, privacy: .public)")
             quarantine(reason: "corrupt")
@@ -155,6 +177,12 @@ public actor DeviceCatalogueStore {
 
     public func snapshot() -> DeviceCatalogue {
         load()
+        // The paired list can be answered long after launch — the Bluetooth
+        // provider has to start, and `system_profiler` takes a second or two.
+        // Checked here as well as on the way in so the settings pane shows the
+        // swept catalogue the moment the answer lands, rather than whenever a
+        // device next happens to be observed.
+        applyPairedAnswer()
         return catalogue
     }
 
@@ -176,6 +204,7 @@ public actor DeviceCatalogueStore {
 
     public func record(_ observation: DeviceObservation) async {
         load()
+        applyPairedAnswer()
         let at = observation.observedAt
         // A rotating identifier is canonicalised, so one logical device keeps
         // one record — with its history, its latches, its pinning and the
@@ -205,6 +234,15 @@ public actor DeviceCatalogueStore {
             // A rename is a rename, not a new device.
             record.name = observation.name
         } else {
+            // Nothing is admitted to the catalogue that the Mac is not paired
+            // with. This is where the strangers got in: a connect notification
+            // for a randomised LE address, or an advertisement from a pair of
+            // earbuds two tables away, created a record that then lived for
+            // ever.
+            guard mayCreate(id) else {
+                Self.log.debug("ignored an unowned device observation")
+                return
+            }
             record = DeviceRecord(
                 id: id, name: observation.name,
                 firstSeen: at, lastSeen: at
@@ -215,8 +253,20 @@ public actor DeviceCatalogueStore {
             isAttaching = couldAttach && observation.presence == .connected
         }
 
-        record.lastSeen = at
-        record.presence = observation.presence
+        // Never backwards. A reading of the paired list takes seconds, so one
+        // sampled before an advertisement can arrive after it — and moving
+        // the record's clock back made the newer evidence look like the older
+        // one everywhere that asks how fresh this device is.
+        record.lastSeen = max(record.lastSeen, at)
+        // An observation that says `unknown` is one that did not look: an
+        // advertisement says "in range" and nothing about attachment. Letting
+        // it overwrite a presence something actually observed turned a device
+        // known to be connected into a device nothing can say anything about,
+        // every time its case was opened nearby. The record's freshness is
+        // what qualifies the old answer; see `DeviceRecord.status(now:)`.
+        if observation.presence != .unknown || record.presence == .unknown {
+            record.presence = observation.presence
+        }
         // The source is the only thing that knows how the device is drawn.
         record.symbolName = observation.symbolName
         record.isApple = observation.isApple
@@ -224,12 +274,29 @@ public actor DeviceCatalogueStore {
         // An observation carrying no levels — a disconnect, say — must not
         // erase what was last known. The record keeps the old readings and
         // the derived freshness is what says they are old.
-        if !observation.readings.isEmpty { record.readings = observation.readings }
+        //
+        // Per component, and by when each was *observed*: a complete reading
+        // of the paired list is legitimately accepted for its membership
+        // while its battery levels are older than an advertisement that
+        // arrived in the meantime. Replacing the lot put a stale level back
+        // on screen — and into the history and the alert decision — stamped
+        // with its honest old time, which nothing downstream was comparing.
+        let previousReadings = record.readings
+        if !observation.readings.isEmpty {
+            record.readings = Self.freshest(record.readings, observation.readings)
+        }
 
         // Decide alerts from the state we already hold, and remember what was
         // said so a reconnect or a restart cannot say it again.
         var canonicalObservation = observation
         canonicalObservation.deviceID = id
+        // From the readings that are actually news, for the same reason the
+        // display takes them: an older sample is not a crossing, and feeding
+        // one to the engine released a latch and let the *next* advertisement
+        // announce the same low battery a second time.
+        canonicalObservation.readings = Self.newsOnly(
+            observation.readings, against: previousReadings
+        )
         let (decided, alertState) = BatteryAlertEngine.evaluate(
             state: record.alertState,
             observation: canonicalObservation,
@@ -532,6 +599,196 @@ public actor DeviceCatalogueStore {
         return catalogue.history[DeviceCatalogue.historyKey(id)] ?? []
     }
 
+    // MARK: - Ownership
+
+    /// Whether a device may *enter* the catalogue.
+    ///
+    /// A device belongs here if the Mac is paired with it, or if it is this
+    /// Mac. Everything else is a passer-by: the radio hears every device in
+    /// the room, and hearing one is not evidence of whose it is.
+    ///
+    /// The one concession is to not-knowing. Until something has read the
+    /// paired list there is no paired set to be absent from, and refusing
+    /// everything in that window would mean a connect arriving before the
+    /// first `system_profiler` returns went unrecorded. So an address gets the
+    /// benefit of the doubt *only* while the question is unanswerable — and
+    /// the sweep that runs on the first real answer removes anything that got
+    /// in on that basis and should not have.
+    ///
+    /// An over-the-air identity gets no such benefit even then. A proximity
+    /// advertisement cannot establish ownership however long one waits, so
+    /// there is no doubt to give it the benefit of; the only reason it is
+    /// allowed through with no answer at all is that `DeviceObservations`
+    /// refuses to produce one in that state, and this is the backstop rather
+    /// than the gate.
+    private func mayCreate(_ id: DeviceIdentity) -> Bool {
+        guard let answer = paired.current else { return true }
+        switch id.source {
+        case .thisMac:
+            return true
+        case .bluetoothAddress:
+            return answer.contains(id)
+        case .peripheralUUID, .proximityName:
+            // Keyed on something heard over the air. Nothing the Mac is
+            // paired with is ever filed under one of these — a paired device
+            // has an address — so there is nothing to match against.
+            return false
+        }
+    }
+
+    /// Acts on a paired-list reading, once per reading.
+    ///
+    /// Everything that depends on knowing what the Mac owns happens here, and
+    /// nothing happens at all until `current` is non-nil: a store that has not
+    /// been told must change nothing, or launch would delete the catalogue
+    /// before the Bluetooth stack had finished starting up.
+    private func applyPairedAnswer() {
+        guard let answer = paired.current,
+              answer.generation != appliedPairedGeneration
+        else { return }
+        appliedPairedGeneration = answer.generation
+
+        reconcilePresence(with: answer)
+        sweepUnownedRecords(with: answer)
+    }
+
+    /// Brings stored attachment back in line with what macOS says.
+    ///
+    /// A full paired reading is the only thing that can retire a stale
+    /// `connected`: the catalogue held five devices claiming to be attached
+    /// while the system reported one. Presence is only ever *lowered* here —
+    /// an upgrade belongs to an observation, which carries the readings and
+    /// the alert evaluation a connection deserves.
+    private func reconcilePresence(with answer: PairedDeviceRegistry.Answer) {
+        for index in catalogue.devices.indices {
+            let record = catalogue.devices[index]
+            guard record.id.source == .bluetoothAddress, record.presence == .connected
+            else { continue }
+
+            if let device = answer.device(for: record.id) {
+                // macOS lists it and says it is not connected. That is an
+                // observation, not an inference, so `disconnected` is honest.
+                if !device.isConnected { catalogue.devices[index].presence = .disconnected }
+                // The paired list is the authority on the name. A record
+                // showing "AirPods 4 (ANC)" for earbuds the user renamed
+                // "Ege AirPods" is showing a name from the air, not from the
+                // Mac.
+                if !device.name.isEmpty { catalogue.devices[index].name = device.name }
+            } else {
+                // Not in the paired list at all — a pinned ghost, or a record
+                // from before this rule. Nothing can be claimed about a device
+                // the system does not list, and `connected` is a claim.
+                catalogue.devices[index].presence = .unknown
+            }
+        }
+    }
+
+    /// The readings that say something the record did not already know.
+    ///
+    /// Anything whose component is already held with a *newer* sample is
+    /// dropped: it is not a crossing, a recovery, or a change — it is an
+    /// older look at the same cell, arriving late.
+    public static func newsOnly(
+        _ arriving: [BatteryReading],
+        against held: [BatteryReading]
+    ) -> [BatteryReading] {
+        var byComponent: [BatteryComponent: BatteryReading] = [:]
+        for reading in held { byComponent[reading.component] = reading }
+        return arriving.filter { reading in
+            guard let previous = byComponent[reading.component] else { return true }
+            return reading.observedAt >= previous.observedAt
+        }
+    }
+
+    /// The newest reading of each component.
+    ///
+    /// A component the arriving observation does not mention keeps what was
+    /// known; one it mentions with an older sample time keeps the newer
+    /// value. Equal times take the arriving one, which is the same source
+    /// re-reporting.
+    public static func freshest(
+        _ existing: [BatteryReading],
+        _ arriving: [BatteryReading]
+    ) -> [BatteryReading] {
+        var byComponent: [BatteryComponent: BatteryReading] = [:]
+        for reading in existing { byComponent[reading.component] = reading }
+        for reading in arriving {
+            if let held = byComponent[reading.component], held.observedAt > reading.observedAt {
+                continue
+            }
+            byComponent[reading.component] = reading
+        }
+        // Stable, so a record's cells do not shuffle between writes.
+        return byComponent.values.sorted {
+            ($0.component.sortOrder, $0.component.label) < ($1.component.sortOrder, $1.component.label)
+        }
+    }
+
+    /// Drops the records the Mac is not paired with. The one-off cleanup, and
+    /// the standing rule, in one pass.
+    ///
+    /// Two exemptions, both the user's own doing: a pinned record and one with
+    /// customised alerts were deliberately configured, and silently deleting
+    /// somebody's configuration is worse than leaving a row they can remove
+    /// themselves.
+    private func sweepUnownedRecords(with answer: PairedDeviceRegistry.Answer) {
+        let before = catalogue.devices.count
+        var dropped: [DeviceIdentity] = []
+        catalogue.devices.removeAll { record in
+            guard !record.isPinned, !record.alerts.isCustomised else { return false }
+            guard record.id != .thisMac else { return false }
+            // A record a shipped version of Ledge keyed by model id goes
+            // like any other record the Mac is not paired with: it never
+            // could be in that list, since it was never a Bluetooth address.
+            //
+            // Decided rather than overlooked. Those records hold a battery
+            // history and a hidden flag that nothing carries forward, and
+            // the owner chose to let them go — the device itself comes back
+            // the moment it connects, under the identity it should have had
+            // all along, and a record somebody pinned or gave their own
+            // alert rules is already exempt two lines above. What goes is an
+            // old chart and a hidden flag, for a feature that had barely
+            // shipped when the identity changed.
+            guard !answer.contains(record.id) else { return false }
+            dropped.append(record.id)
+            return true
+        }
+        guard !dropped.isEmpty || catalogue.needsOwnershipSweep else { return }
+
+        for id in dropped {
+            let key = DeviceCatalogue.historyKey(id)
+            guard !catalogue.retainedHistory.contains(key) else { continue }
+            catalogue.history[key] = nil
+        }
+        if !dropped.isEmpty {
+            Self.log.notice("""
+                device catalogue: dropped \(dropped.count, privacy: .public) of \
+                \(before, privacy: .public) records the Mac is not paired with
+                """)
+        }
+        // Recorded on disk, so the file says it has been through this.
+        catalogue.version = DeviceCatalogue.currentVersion
+        scheduleWrite()
+    }
+
+    /// Stops a stored `connected` from outliving the evidence for it.
+    ///
+    /// The paired reading above is the real correction; this is the backstop
+    /// for when there is none — Bluetooth switched off, the provider disabled,
+    /// a catalogue reloaded hours after the app was killed. A record nothing
+    /// has spoken for in longer than its source's freshness window cannot
+    /// honestly still claim an attachment, so it becomes `unknown` — never
+    /// `disconnected`, which would be an event nobody saw.
+    private func decayStalePresence(now: Date) {
+        for index in catalogue.devices.indices {
+            let record = catalogue.devices[index]
+            guard record.presence == .connected,
+                  record.isStale(now: now, sourceIsLive: catalogue.sourceIsLive(record.id))
+            else { continue }
+            catalogue.devices[index].presence = .unknown
+        }
+    }
+
     // MARK: - Maintenance
 
     private func runMaintenanceIfDue() {
@@ -542,6 +799,7 @@ public actor DeviceCatalogueStore {
         lastMaintenance = at
 
         pruneDevices(now: at)
+        decayStalePresence(now: at)
 
         for (key, samples) in catalogue.history {
             let kept = BatteryHistory.pruned(samples, now: at)
@@ -618,6 +876,7 @@ public actor DeviceCatalogueStore {
     /// Forces a maintenance pass. For tests and for an explicit tidy.
     public func runMaintenance() {
         load()
+        applyPairedAnswer()
         lastMaintenance = nil
         runMaintenanceIfDue()
         scheduleWrite()

@@ -44,7 +44,9 @@ struct KeepAwakeCardRenderTests {
                 // Both Ready faces, and the running one: the length is on all
                 // three and each has a different amount of room for it.
                 let faces: [(String, KeepAwakeCardView)] = [
-                    ("resting", KeepAwakeCardView(payload: payload(minutes: minutes))),
+                    // Not the resting face: it is a switch with no length on
+                    // it at all now, and `lengthIsNotOnTheRestingFace` below
+                    // is what holds that line.
                     ("asking", KeepAwakeCardView(
                         payload: payload(minutes: minutes), startsAsking: true,
                         draft: KeepAwakeSpan(totalMinutes: minutes)
@@ -65,6 +67,24 @@ struct KeepAwakeCardRenderTests {
                     }
                 }
             }
+        }
+    }
+
+    /// The plain mode is a switch and runs until it is switched off, so there
+    /// is no length for the resting card to show — and a card that draws one
+    /// anyway is a card promising an end it will not keep. Drawn rather than
+    /// read off the source, because "nothing on screen moves with the length"
+    /// is not a thing the source says anywhere.
+    @Test("No length reaches the resting face")
+    func lengthIsNotOnTheRestingFace() {
+        for width in Self.widths {
+            let sizes = Set(
+                [KeepAwakeReducer.minimumMinutes, 45, 24 * 60, KeepAwakeReducer.maximumMinutes]
+                    .compactMap { drawn(KeepAwakeCardView(payload: payload(minutes: $0)),
+                                        width: width)?.height }
+            )
+            #expect(sizes.count == 1,
+                    "the resting card changed shape with the length at \(width): \(sizes)")
         }
     }
 
@@ -195,7 +215,7 @@ struct KeepAwakeLidRenderTests {
     private static let widths: [CGFloat] = [260, 275, 283, 320]
 
     private static let everyState: [KeepAwakeLidState] =
-        [.unsignedBuild, .notInstalled, .off, .holding, .unconfirmed]
+        [.unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .holding, .unconfirmed]
             + KeepAwakeLidCode.allCases.map { .refused($0) }
 
     private func drawn(_ view: some View, width: CGFloat) -> CGSize? {
@@ -261,11 +281,16 @@ struct KeepAwakeLidRenderTests {
         }
     }
 
-    /// A setup prompt on the resting card would be shouted at everyone who has
-    /// not set the helper up — which, until there is anything to set up, is
-    /// everyone. So "not set up" waits to be reached for, and a refusal, which
-    /// is the answer to something that was already done, does not.
-    @Test("Not set up waits to be asked; a refusal does not")
+    /// Every state the lid switch cannot be moved out of explains itself,
+    /// unasked.
+    ///
+    /// This used to be the other way round: "not set up" stayed silent until
+    /// the mode was reached for, so that a setup prompt was not shouted at
+    /// everyone who had never wanted it. That reasoning died with the capsule
+    /// button it was written for. The mode is a switch now, and a switch that
+    /// is drawn dimmed and refuses to move with no reason beside it is the
+    /// dead control this card keeps being redrawn to be rid of.
+    @Test("A switch that will not move says why")
     func whatSpeaksUnasked() {
         func height(_ lid: KeepAwakeLidState, note: Bool) -> CGFloat {
             let card = KeepAwakeCardView(
@@ -277,12 +302,54 @@ struct KeepAwakeLidRenderTests {
             return renderer.nsImage?.size.height ?? 0
         }
         let standing = height(.off, note: false)
-        #expect(height(.notInstalled, note: false) == standing,
-                "a setup prompt is being shouted at a card nobody asked a question of")
-        #expect(height(.notInstalled, note: true) > standing,
-                "reaching for the mode explained nothing")
-        #expect(height(.refused(.foreign), note: false) > standing,
-                "a refusal waited to be asked about, so nothing explains it")
+        for lid: KeepAwakeLidState in [.notInstalled, .needsApproval, .unsignedBuild,
+                                       .unreachable, .refused(.foreign)] {
+            #expect(height(lid, note: false) > standing,
+                    "\(lid.name) leaves its switch unexplained")
+        }
+        // And the press changes nothing, because there was nothing left to say.
+        #expect(height(.notInstalled, note: true) == height(.notInstalled, note: false),
+                "the sentence is already there; reaching for it must not add a second")
+    }
+
+    /// The bug this design was drawn to make impossible.
+    ///
+    /// The lid sentence and the ready card's own failure sentence used to
+    /// share one line, and the failure outranked the lid. So somebody whose
+    /// last session had failed — which is exactly the person most likely to be
+    /// reaching for the other mode — pressed Lid closed and the card did
+    /// nothing at all. No sentence, no question, no change: a dead button.
+    ///
+    /// Each has its own slot now, and the only way to prove that is to draw
+    /// the card with both at once and measure it. Every state the row can
+    /// refuse from, over every failure the card can already be showing.
+    @Test("A press that cannot start anything always says why, whatever else the card is saying")
+    func theReachAlwaysExplains() {
+        func height(_ lid: KeepAwakeLidState, _ problem: KeepAwakePayload.Problem?) -> CGFloat {
+            let card = KeepAwakeCardView(
+                payload: KeepAwakePayload(phase: .ready, minutes: 60, lid: lid,
+                                          problem: problem),
+                // What the press sets, which is the only thing the press sets.
+                lidNote: true
+            )
+            let renderer = ImageRenderer(content: card.frame(width: 275))
+            renderer.scale = 1
+            return renderer.nsImage?.size.height ?? 0
+        }
+        // Every state that cannot arm and is not already holding. `off` is the
+        // one that can, and it is the yardstick: a card showing the same
+        // failure and no lid sentence.
+        let refusing = Self.everyState.filter { !$0.mayArm && !$0.isLive }
+        #expect(!refusing.isEmpty)
+        for lid in refusing {
+            for problem in [nil] + KeepAwakePayload.Problem.allCases.map({ $0 }) {
+                let silent = height(.off, problem)
+                let spoken = height(lid, problem)
+                let over = problem?.rawValue ?? "no problem"
+                let said = "\(lid) over \(over): the press said nothing (\(spoken) against \(silent))"
+                #expect(silent > 0 && spoken > silent, "\(said)")
+            }
+        }
     }
 
     /// The island is sized from what the card measures, and a sentence that

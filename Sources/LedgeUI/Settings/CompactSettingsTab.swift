@@ -10,16 +10,34 @@ public struct CompactSettingsTab: View {
     @Bindable var preferences: Preferences
     let geometry: NotchGeometry
 
-    public init(preferences: Preferences, geometry: NotchGeometry) {
+    public init(
+        preferences: Preferences,
+        geometry: NotchGeometry,
+        highlighted: String? = nil,
+        widthDraft: Binding<CGFloat>,
+        leadingDraft: Binding<CGFloat>,
+        trailingDraft: Binding<CGFloat>
+    ) {
         self.preferences = preferences
         self.geometry = geometry
+        self.highlighted = highlighted
+        self._widthDraft = widthDraft
+        self._leadingDraft = leadingDraft
+        self._trailingDraft = trailingDraft
     }
 
-    /// Drafts, seeded from the live preferences on appear. The sliders edit
-    /// these; the island keeps its current look until Apply.
-    @State private var widthDraft: CGFloat = NotchLayout.defaultEarWidth
-    @State private var leadingDraft: CGFloat = 0
-    @State private var trailingDraft: CGFloat = 0
+    /// Drafts, owned by whoever shows this pane.
+    ///
+    /// They used to be `@State` here, seeded on every appearance — so
+    /// switching to another Tuning tab and back silently threw away an
+    /// unapplied edit, which is the one thing this draft-and-Apply shape
+    /// exists to prevent.
+    /// A row a search result asked to be shown.
+    var highlighted: String?
+
+    @Binding var widthDraft: CGFloat
+    @Binding var leadingDraft: CGFloat
+    @Binding var trailingDraft: CGFloat
 
     private var isDirty: Bool {
         widthDraft != preferences.earWidth
@@ -27,58 +45,75 @@ public struct CompactSettingsTab: View {
             || trailingDraft != preferences.earTrailingOffset
     }
 
+    /// Whether everything — draft and applied — is already at the default.
+    /// Checked on both, or Reset would disable itself while the island was
+    /// still at somebody else's width with the sliders back at the default.
     private var isDefault: Bool {
         widthDraft == NotchLayout.defaultEarWidth
             && leadingDraft == 0 && trailingDraft == 0
+            && preferences.earWidth == NotchLayout.defaultEarWidth
+            && preferences.earLeadingOffset == 0 && preferences.earTrailingOffset == 0
     }
 
     public var body: some View {
-        Form {
-            Section("Adjust") {
+        SettingsPage(scrollTo: highlighted) {
+            Section {
                 LabeledSlider("Ear width", value: $widthDraft, in: 36...90, format: "%.0f")
+                .searchRow("earWidth", highlighted: highlighted)
                 LabeledSlider("Leading nudge", value: $leadingDraft, in: -20...20, format: "%.0f")
+                .searchRow("earLeadingOffset", highlighted: highlighted)
                 LabeledSlider("Trailing nudge", value: $trailingDraft, in: -20...20, format: "%.0f")
                 HStack {
-                    Text("Positive nudges move content toward the cutout. Width also adjusts open cards; Calendar keeps a wider month grid.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
                     Spacer()
-                    Button("Reset") {
+                    // Resets *and* applies, in one press. It used to put the
+                    // sliders back and leave the island exactly as it was,
+                    // waiting for a second press on Apply — a button labelled
+                    // Reset that reset nothing anybody could see.
+                    Button("Reset to Defaults") {
                         widthDraft = NotchLayout.defaultEarWidth
                         leadingDraft = 0
                         trailingDraft = 0
+                        apply()
                     }
-                    .disabled(isDefault)
-                    Button("Apply") {
-                        preferences.earWidth = widthDraft
-                        preferences.earLeadingOffset = leadingDraft
-                        preferences.earTrailingOffset = trailingDraft
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!isDirty)
+                    .disabled(isDefault && !isDirty)
+                    Button("Apply", action: apply)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!isDirty)
                 }
+            } header: {
+                Text("Adjust")
+            } footer: {
+                SettingsNote("Positive nudges move content toward the cutout. Width also sets every open card's width; Calendar keeps a wider month grid. Nothing moves in the real notch until you press Apply — the preview below is live.")
             }
 
-            Section("Preview — the hatched block is the hardware notch") {
+            Section {
                 ForEach(Self.samples, id: \.title) { sample in
                     HStack(spacing: 10) {
                         Text(sample.title)
-                            .font(.system(size: 11))
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                             .frame(width: 110, alignment: .leading)
                         Spacer(minLength: 0)
                         previewRow(sample.activity)
                     }
                 }
+            } header: {
+                Text("Preview")
+            } footer: {
+                SettingsNote("The hatched block is the hardware notch. Nothing may draw there.")
             }
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .onAppear {
-            widthDraft = preferences.earWidth
-            leadingDraft = preferences.earLeadingOffset
-            trailingDraft = preferences.earTrailingOffset
-        }
+        // No reseeding on appearance: the drafts belong to the pane that
+        // owns this one, and it seeds them once. Copying the applied values
+        // back on every appearance is what used to discard an edit the
+        // moment somebody looked at another tab.
+        
+    }
+
+    private func apply() {
+        preferences.earWidth = widthDraft
+        preferences.earLeadingOffset = leadingDraft
+        preferences.earTrailingOffset = trailingDraft
     }
 
     /// One island at draft dimensions: black body, the real ears view inside,

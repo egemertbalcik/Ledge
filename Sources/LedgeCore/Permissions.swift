@@ -70,6 +70,16 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     /// soon as the answer arrives. Accessibility is the exception: its prompt
     /// is only a shortcut, and the switch itself lives in System Settings.
     public var isGrantedInSystemSettings: Bool { self == .accessibility }
+
+    /// Whether asking for this one answers before the call returns.
+    ///
+    /// Most of them do: the system dialog is modal to the app, and the
+    /// request comes back with the answer. Location does not —
+    /// `requestWhenInUseAuthorization` returns as soon as it has *asked*,
+    /// and the answer arrives later through the manager's delegate. A caller
+    /// that treats the return as the answer takes the prompt's own spinner
+    /// away while macOS is still asking, and offers to ask again.
+    public var answersBeforeReturning: Bool { self != .location }
 }
 
 public enum PermissionStatus: String, Equatable, Sendable {
@@ -91,6 +101,19 @@ public enum PermissionStatus: String, Equatable, Sendable {
     /// launch it). Not "unavailable": open Music or Spotify and it can be.
     case notApplicableNow
 
+    /// Decided by a configuration profile rather than by the person using the
+    /// Mac. Kept apart from `denied`, which it used to be folded into: a
+    /// refusal has a remedy — the switch in System Settings — and this does
+    /// not. Sending somebody to a greyed-out switch is worse than telling
+    /// them who can change it.
+    case restricted
+
+    /// Granted, but not enough of it. Calendar's add-only access lets Ledge
+    /// write events and not read them, so the card it exists for stays
+    /// hidden. It used to be reported as a denial, which told somebody who
+    /// had said yes that they had said no.
+    case addOnly
+
     public var isUsable: Bool { self == .granted }
 
     public var summary: String {
@@ -100,6 +123,8 @@ public enum PermissionStatus: String, Equatable, Sendable {
         case .notDetermined: "Not requested"
         case .unavailable: "Unavailable on this Mac"
         case .notApplicableNow: "Open Music or Spotify to grant"
+        case .restricted: "Managed by this Mac's administrator"
+        case .addOnly: "Add-only access"
         }
     }
 }
@@ -136,13 +161,34 @@ public struct ProviderDescriptor: Identifiable, Equatable, Sendable {
     /// blocked on a permission that has not been granted.
     public let isAvailable: Bool
 
+    /// Whether that permission only *improves* this card rather than
+    /// deciding whether it exists.
+    ///
+    /// The difference is a promise: "Needs Calendar" means the card is
+    /// hidden without it, and "Works better with Location" means the weather
+    /// still arrives, from a city you choose. Both were headed "Permission",
+    /// which said neither.
+    public let permissionIsOptional: Bool
+
+    /// Whether this card is on because somebody switched it on, rather than
+    /// because it is on by default.
+    ///
+    /// The difference is what the Cards badge counts. Counting every enabled
+    /// card that cannot run put a badge on a fresh Mac for Caps Lock — on by
+    /// default, needs Accessibility, and Accessibility is a question the tour
+    /// lets you decline at no cost. A badge for a card you never asked for,
+    /// waiting on a permission you just declined, is the app asking again.
+    public let wasSwitchedOnByHand: Bool
+
     public init(
         id: String,
         displayName: String,
         kind: ActivityKind,
         permission: PermissionKind?,
         isEnabled: Bool,
-        isAvailable: Bool
+        isAvailable: Bool,
+        permissionIsOptional: Bool = false,
+        wasSwitchedOnByHand: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -150,5 +196,7 @@ public struct ProviderDescriptor: Identifiable, Equatable, Sendable {
         self.permission = permission
         self.isEnabled = isEnabled
         self.isAvailable = isAvailable
+        self.permissionIsOptional = permissionIsOptional
+        self.wasSwitchedOnByHand = wasSwitchedOnByHand
     }
 }

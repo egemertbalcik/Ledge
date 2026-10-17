@@ -250,6 +250,71 @@ struct KeepAwakeProviderTests {
         #expect(r.journal.stored?.state == .running, "A's retry must not undo B")
     }
 
+    @Test("The scheduled retry records the end after the provider is torn down")
+    func retryOutlivesTeardown() async throws {
+        // Switching the card off is `end` and then teardown, in that order and
+        // a moment apart. If the end did not reach the disk, the retries are
+        // the only thing left that can record it — and they used to be held
+        // weakly, so the teardown that always follows made every one of them a
+        // no-op. The record stayed `running` and the next launch resumed a
+        // session the user had switched off.
+        //
+        // Deliberately not `retryTick()`: the hook calls `flushDesired`
+        // directly and so could never have caught this. What is under test is
+        // the work item the provider actually schedules.
+        let log = KeepAwakeLog()
+        let clock = TestClock()
+        let assertion = FakeSleepAssertion(log: log)
+        let journal = MemoryKeepAwakeJournal(log: log, stored: nil)
+        let stone = MemoryTombstone(log: log, value: nil)
+        let power = StubPowerSource(
+            value: PowerSnapshot(percentage: 0.80, isCharging: false, isPluggedIn: false,
+                                 isLowPower: false, timeRemaining: nil)
+        )
+        let thermal = StubThermalSource()
+        let writer = KeepAwakeJournalWorker(journal, observeAdmissions: { _ in })
+
+        // Scoped so the only strong reference to the provider is gone before
+        // the first retry is due.
+        do {
+            var queue = ["A"]
+            let provider = KeepAwakeProvider(
+                now: { clock.now },
+                assertion: assertion,
+                power: power,
+                thermal: thermal,
+                journal: writer,
+                tombstone: stone,
+                bootID: "boot-A",
+                hasNotchPanel: { true },
+                makeID: { queue.isEmpty ? UUID().uuidString : queue.removeFirst() },
+                formatTime: { _ in "17:40" }
+            )
+            _ = await provider.begin(minutes: 60)
+            #expect(journal.stored?.state == .running)
+
+            // Neither half of the end lands: the journal refuses the write and
+            // the tombstone refuses the name. The retry is all there is.
+            journal.failWrites = 1
+            stone.fails = true
+            await provider.end(reason: .turnedOff)
+            #expect(journal.stored?.state == .running, "the end did not reach the disk")
+            #expect(stone.value == nil, "nor did the name")
+
+            // The disk comes back, and then the card is switched off.
+            stone.fails = false
+            provider.stop()
+        }
+
+        // The first retry is due a second out. Wait past it rather than
+        // ticking it by hand — the schedule is the thing being tested.
+        try await Task.sleep(for: .milliseconds(1600))
+
+        #expect(journal.stored?.state == .ended,
+                "the retry must record the end even though nothing holds the provider")
+        #expect(journal.stored?.endReason == .turnedOff)
+    }
+
     @Test("End A fails, Start B fails too, and A's retry records A — never B")
     func retryAfterBothFail() async {
         // The case the owner asked for. B never started: nothing was acquired

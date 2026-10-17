@@ -21,8 +21,19 @@ private enum PreviewShell {
             loginItemStatus: { "Enabled" },
             copyToClipboard: { _ in },
             quit: {},
+            // Enough of a roster for the Keep Awake pane to have rows and a
+            // menu with something in it.
+            runningApps: {
+                [
+                    (id: "com.apple.dt.Xcode", name: "Xcode"),
+                    (id: "com.google.Chrome", name: "Google Chrome"),
+                    (id: "com.figma.Desktop", name: "Figma"),
+                ]
+            },
+            runningChromium: {
+                [ChromiumBrowser(bundleID: "com.google.Chrome", name: "Google Chrome", isProtected: false)]
+            },
             isAccessibilityTrusted: { true },
-            requestAccessibility: {},
             requestPermission: { _ in },
             openPermissionSettings: { _ in },
             refreshPermissions: {},
@@ -34,6 +45,11 @@ private enum PreviewShell {
 
     static var model: SettingsModel {
         let m = SettingsModel()
+        // Somewhere for the Accessibility guide's tile to point at. Without a
+        // location the guide draws "Move Ledge to Applications first", which
+        // is a state worth reviewing but not the common one.
+        m.appLocation = "/Applications/Ledge.app"
+
         m.permissions = [
             PermissionRow(kind: .accessibility, status: .granted),
             PermissionRow(kind: .automation, status: .granted),
@@ -42,17 +58,120 @@ private enum PreviewShell {
             PermissionRow(kind: .location, status: .notDetermined),
             PermissionRow(kind: .focusStatus, status: .granted),
         ]
+        // LEDGE_ONBOARDING_HANDOFF=accessibility draws the guide instead of
+        // the list, which is the state nobody can reach by clicking around a
+        // preview: it needs System Settings to be open.
+        if let kind = ProcessInfo.processInfo.environment["LEDGE_ONBOARDING_HANDOFF"],
+           let permission = PermissionKind(rawValue: kind) {
+            m.handoff = PermissionHandoff(
+                kind: permission,
+                phase: ProcessInfo.processInfo.environment["LEDGE_ONBOARDING_BACK"] == "1"
+                    ? .back : .waiting,
+                isFirstTime: true
+            )
+            m.permissions = m.permissions.map {
+                $0.kind == permission ? PermissionRow(kind: $0.kind, status: .notDetermined) : $0
+            }
+            if m.handoff?.phase == .waiting {
+                m.beganHandoff(for: permission, isFirstTime: true)
+            }
+        }
+        // Every card the app registers, so the Cards pane is looked at at
+        // its real length rather than at four rows. The states that are easy
+        // to get wrong are in here on purpose: a card that is on and blocked,
+        // a card that is off and blocked, and a card that is simply off.
         m.providers = [
-            ProviderDescriptor(id: "nowplaying", displayName: "Now Playing", kind: .nowPlaying,
-                               permission: .automation, isEnabled: true, isAvailable: true),
-            ProviderDescriptor(id: "timer", displayName: "Timer", kind: .timer,
-                               permission: nil, isEnabled: true, isAvailable: true),
-            ProviderDescriptor(id: "weather", displayName: "Weather", kind: .weather,
-                               permission: .location, isEnabled: true, isAvailable: true),
-            ProviderDescriptor(id: "calendar", displayName: "Calendar", kind: .event,
-                               permission: .calendars, isEnabled: false, isAvailable: false),
+            Self.provider("nowplaying", "Music", .nowPlaying, .automation),
+            Self.provider("battery", "Battery", .power, nil),
+            Self.provider("bluetooth", "AirPods & Devices", .device, .bluetooth),
+            Self.provider("airpods-proximity", "AirPods Case Opens", .device, .bluetooth),
+            Self.provider("devicealerts", "Device Battery Alerts", .device, nil),
+            Self.provider("audioroute", "Where Sound Goes", .device, nil),
+            Self.provider("bluetooth-power", "Bluetooth On & Off", .device, .bluetooth),
+            Self.provider("keyboard", "Keyboard Layout", .keyboard, nil),
+            // On, and waiting: the one state the row has to say something
+            // about.
+            Self.provider("capslock", "Caps Lock", .keyboard, .accessibility, available: false),
+            Self.provider("calendar", "Calendar", .event, .calendars, enabled: false, available: false),
+            Self.provider("focus", "Focus Modes", .focus, .focusStatus),
+            Self.provider("weather", "Weather", .weather, .location),
+            Self.provider("levels", "Sound & Brightness", .levels, nil),
+            Self.provider("timer", "Timer & Stopwatch", .timer, nil),
+            Self.provider("keep-awake", "Keep Awake", .keepAwake, nil, enabled: false),
+            Self.provider("shelf", "File Shelf", .shelf, nil),
+            Self.provider("notes", "Notes", .notes, nil),
+            Self.provider("privacy", "Camera & Mic", .privacy, nil),
         ]
+        m.mediaSource = .systemWide(host: "MediaRemote")
+        m.keepAwakeHelper = .needsApproval
+        m.devices = devices
         return m
+    }
+
+    private static func provider(
+        _ id: String, _ name: String, _ kind: ActivityKind, _ permission: PermissionKind?,
+        enabled: Bool = true, available: Bool = true
+    ) -> ProviderDescriptor {
+        ProviderDescriptor(
+            id: id, displayName: name, kind: kind, permission: permission,
+            isEnabled: enabled, isAvailable: available
+        )
+    }
+
+    /// A catalogue with the states the Devices pane has to draw: this Mac
+    /// charging, a disconnected mouse, and a pinned set of earbuds nobody has
+    /// heard from in a while.
+    static var devices: DevicesSettingsModel {
+        let now = Date()
+        var built = DeviceCatalogue()
+        built.devices = [
+            DeviceRecord(
+                id: .thisMac, name: "MacBook Pro", presence: .connected,
+                readings: [BatteryReading(component: .main, level: 0.88, charging: .charging, observedAt: now)],
+                firstSeen: now.addingTimeInterval(-86_400),
+                lastSeen: now.addingTimeInterval(-30)
+            ),
+            DeviceRecord(
+                id: .bluetooth("airpods"), name: "AirPods Pro", presence: .connected,
+                readings: [
+                    BatteryReading(component: .left, level: 0.62, observedAt: now),
+                    BatteryReading(component: .right, level: 0.58, observedAt: now),
+                    BatteryReading(component: .case, level: 0.93, observedAt: now),
+                ],
+                firstSeen: now.addingTimeInterval(-86_400),
+                lastSeen: now.addingTimeInterval(-45), isPinned: true
+            ),
+            DeviceRecord(
+                id: .bluetooth("mouse"), name: "Magic Mouse", presence: .disconnected,
+                readings: [BatteryReading(component: .main, level: 0.21, observedAt: now.addingTimeInterval(-7200))],
+                firstSeen: now.addingTimeInterval(-864_000), lastSeen: now.addingTimeInterval(-7200)
+            ),
+        ]
+        let catalogue = built
+        // A day of readings per earbud, falling slowly, so the chart has a
+        // line rather than the "not enough history yet" sentence.
+        let samples: [BatterySample] = built.devices[1].readings.flatMap { reading in
+            (0..<48).map { step in
+                BatterySample(
+                    component: reading.component,
+                    level: min(1, reading.level + Double(47 - step) * 0.008),
+                    charging: .notCharging,
+                    at: now.addingTimeInterval(-Double(step) * 1800),
+                    isConnected: true
+                )
+            }
+        }
+        let model = DevicesSettingsModel(
+            actions: .init(load: { catalogue }, history: { _ in samples })
+        )
+        model.load()
+        // LEDGE_SETTINGS_DEVICE=airpods opens one device's page, which is the
+        // only way to look at it without clicking — and the pane that had the
+        // least looking at.
+        if let wanted = ProcessInfo.processInfo.environment["LEDGE_SETTINGS_DEVICE"] {
+            model.select(DeviceIdentity.bluetooth(wanted))
+        }
+        return model
     }
 
     static var geometry: NotchGeometry {
@@ -83,7 +202,10 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         let only = ProcessInfo.processInfo.environment["LEDGE_GALLERY_ONLY"]
         let size: NSSize = switch only {
         case "settings": NSSize(width: 700, height: 560)
-        case "onboarding": NSSize(width: 480, height: 596)
+        case "onboarding": NSSize(
+            width: OnboardingView.contentSize.width,
+            height: OnboardingView.contentSize.height
+        )
         case "layout": NSSize(width: 700, height: 680)
         default: NSSize(width: 560, height: 1000)
         }
@@ -137,13 +259,14 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
                 self?.tourPage = 0
                 self?.window?.close()
             },
-            deferTour: { [weak self] in self?.window?.close() },
-            startPage: tourPage,
-            onPage: { [weak self] in self?.tourPage = $0 }
+            startStep: TourStep(rawValue: tourPage) ?? .hover
         ))
         hosting.sizingOptions = []
         window.contentView = hosting
-        let size = NSSize(width: 480, height: 596)
+        let size = NSSize(
+            width: OnboardingView.contentSize.width,
+            height: OnboardingView.contentSize.height
+        )
         window.setContentSize(size)
         window.contentMinSize = size
         window.contentMaxSize = size
@@ -365,6 +488,8 @@ struct GalleryView: View {
     /// of what the type-checker will chew.
     @ViewBuilder
     private var compactPaneSection: some View {
+        // The drafts belong to whoever shows the pane; the preview is that
+        // owner here, and it starts them at the defaults.
         CompactSettingsTab(
             preferences: Preferences(store: MemoryPreferenceStore()),
             geometry: NotchGeometry(
@@ -372,10 +497,17 @@ struct GalleryView: View {
                 notchSize: CGSize(width: 180, height: 32),
                 notchCenterX: 735,
                 isHardwareNotch: true
-            )
+            ),
+            widthDraft: $earWidthDraft,
+            leadingDraft: $earLeadingDraft,
+            trailingDraft: $earTrailingDraft
         )
         .frame(width: 560, height: 860)
     }
+
+    @State private var earWidthDraft = NotchLayout.defaultEarWidth
+    @State private var earLeadingDraft: CGFloat = 0
+    @State private var earTrailingDraft: CGFloat = 0
 
     /// The timer's ears at several points through a countdown, which is the
     /// only way to see a dial actually move without waiting out a session.
@@ -466,14 +598,7 @@ struct GalleryView: View {
                     kind: .levels, phase: .expanded,
                     base: CGSize(width: PreviewFixtures.cardWidth, height: 0)
                 ).height) {
-                    LevelsCardView(actions: LevelsActions(
-                        outputs: { [AudioOutputOption(
-                            id: 1, name: "MacBook Pro Speakers", isCurrent: true, level: 0.55
-                        )] },
-                        displays: { [DisplayLevelOption(
-                            id: 1, name: "Built-in Display", isCurrent: true, isBuiltIn: true, level: 0.8
-                        )] }
-                    ))
+                    LevelsCardView(rows: PreviewFixtures.levelRows())
                 }
             }
         }
@@ -646,16 +771,7 @@ struct GalleryView: View {
                 } else if only == "levels" {
                     section("Levels card") {
                         card {
-                            LevelsCardView(actions: LevelsActions(
-                                outputs: { [AudioOutputOption(
-                                    id: 1, name: "MacBook Pro Speakers",
-                                    isCurrent: true, level: 0.55
-                                )] },
-                                displays: { [DisplayLevelOption(
-                                    id: 1, name: "Built-in Display",
-                                    isCurrent: true, isBuiltIn: true, level: 0.8
-                                )] }
-                            ))
+                            LevelsCardView(rows: PreviewFixtures.levelRows())
                             .frame(width: PreviewFixtures.cardWidth)
                         }
                     }
@@ -848,6 +964,16 @@ struct GalleryView: View {
     }
 }
 
+/// The hour every preview and every export is drawn at.
+///
+/// 2026-09-14 09:41:00 UTC — the hour Apple puts on every device it ships.
+/// Nonisolated on purpose: both the gallery, which is main-actor, and the
+/// fixtures, which are not, have to agree about what day it is, and the day
+/// they disagreed about put a Join capsule beside "No events".
+enum PreviewClock {
+    static let fixed = Date(timeIntervalSince1970: 1_789_378_860)
+}
+
 /// Invented sample data. Deliberately generic so nothing here is mistaken for
 /// real content.
 enum PreviewFixtures {
@@ -955,9 +1081,16 @@ enum PreviewFixtures {
         payload: .event(eventPayload)
     )
 
-    /// The day the preview is being looked at, so today's column has
-    /// something in it whenever the gallery is rendered.
-    static let todayDay = Calendar.current.component(.day, from: Date())
+    /// The day these fixtures call "today".
+    ///
+    /// The gallery's own fixed clock, not the wall clock. Read from `Date()`,
+    /// today's two events were filed under the real day number while the card
+    /// was drawn at 14 September — so the one exported calendar card showed a
+    /// green Join capsule beside "No events / This day is clear", which is a
+    /// state the app cannot produce. It also made the export differ from
+    /// yesterday's for no reason anyone could act on, which is exactly what
+    /// `gallery.sh` fails the build over.
+    static let todayDay = Calendar.current.component(.day, from: PreviewClock.fixed)
 
     static let timerFinished = Activity(
         id: ActivityID(kind: .timer, source: "finished"),
@@ -1056,11 +1189,26 @@ enum PreviewFixtures {
                         MonthDayEntry(title: "Dinner with the visiting team", time: "19:30"),
                     ]),
                 ]),
-                MonthWindow(year: 2026, month: 9, eventDays: [2], events: [
-                    MonthDayEvents(day: 2, entries: [
-                        MonthDayEntry(title: "September kickoff", time: "09:00"),
-                    ]),
-                ]),
+                // Today lives in this window, not only in the flat fields
+                // above: the card reads the window whenever there is one, and
+                // the flat list is a fallback for payloads written before
+                // windows existed. With today missing from here, the one
+                // exported calendar card showed a Join capsule beside "No
+                // events" — a state the app itself cannot produce.
+                MonthWindow(
+                    year: 2026,
+                    month: 9,
+                    eventDays: [2, Self.todayDay].sorted(),
+                    events: [
+                        MonthDayEvents(day: 2, entries: [
+                            MonthDayEntry(title: "September kickoff", time: "09:00"),
+                        ]),
+                        MonthDayEvents(day: Self.todayDay, entries: [
+                            MonthDayEntry(title: "Standup", time: "09:30"),
+                            MonthDayEntry(title: "Design review", time: "11:00"),
+                        ]),
+                    ]
+                ),
             ]
     )
 
@@ -1224,11 +1372,28 @@ enum PreviewFixtures {
         return TimerPayload(label: "Timer", remaining: 0, total: 0)
     }
 
-    static let levels = Activity(
-        id: ActivityID(kind: .levels, source: "preview"),
-        createdAt: 0,
-        payload: .levels(LevelsPayload(volume: 0.55, brightness: 0.8))
-    )
+    static let levels = levelsCard()
+
+    /// The card, with rows. It used to be photographed with none, so every
+    /// picture of it was two empty bars over a fixture that said 55% and 80%.
+    static func levelsCard(
+        volume: Double? = 0.55,
+        muted: Bool = false,
+        external: Bool = false,
+        note: LevelRow.Note? = nil,
+        brightness: Double? = 0.8,
+        tag: String = "preview"
+    ) -> Activity {
+        Activity(
+            id: ActivityID(kind: .levels, source: tag),
+            createdAt: 0,
+            payload: .levels(LevelsPayload(
+                volume: volume ?? 0, brightness: brightness ?? 0, isMuted: muted,
+                rows: levelRows(volume: volume, muted: muted, external: external,
+                                note: note, brightness: brightness)
+            ))
+        )
+    }
 
     /// The stopwatch face, running with two laps — the fixture's clock is
     /// the wall clock, so it counts up live in the gallery.

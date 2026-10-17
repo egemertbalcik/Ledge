@@ -46,6 +46,24 @@ extension Font {
     /// The same, one step down. 11/semibold rounded.
     public static let cardSmallFigure = Font.system(size: 11, weight: .semibold, design: .rounded)
 
+    /// The one figure on a card that is the point of the card: the time left
+    /// on a hold that ends. 24/semibold rounded, tabular, so the digits do not
+    /// shuffle as they count. One step up from `cardHeadline`, and used once
+    /// per card at most — a card with two of these has no subject.
+    public static let cardDisplay = Font.system(size: 24, weight: .semibold, design: .rounded)
+
+    /// A sentence on a card, as against a label. 11/medium.
+    ///
+    /// `cardCaption` is 10/semibold, which is right for one word under a
+    /// title and wrong for three facts stacked in a column: at that weight
+    /// and size they set as one grey block and the reader cannot find the
+    /// seams.
+    public static let cardNote = Font.system(size: 11, weight: .medium)
+
+    /// A level, as a readout beside its own line. 15/semibold rounded,
+    /// tabular, so 9 and 100 do not shuffle the row as a drag goes past them.
+    public static let levelValue = Font.system(size: 15, weight: .semibold, design: .rounded)
+
     /// A badge: caps lock's ON, a count in a pill. 10/bold.
     public static let cardBadge = Font.system(size: 10, weight: .bold)
 }

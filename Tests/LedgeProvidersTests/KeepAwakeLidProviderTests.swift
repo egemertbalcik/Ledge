@@ -108,6 +108,57 @@ struct KeepAwakeLidProviderTests {
         Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
+    // MARK: - What the payload claims is held
+
+    /// The card draws its lid switch from `payload.lidHeld`, so what that
+    /// word means decides whether the card can lie.
+    ///
+    /// It used to be `lidState.isLive`, and `isLive` includes `.unconfirmed`
+    /// — a hold that was asked for and never answered. So the card's
+    /// "asked for but not confirmed" state could not fire in the running app
+    /// at all: the drawing predicate had been changed and the evidence behind
+    /// it had not. Every picture of it was a gallery fixture that set
+    /// `lidHeld` by hand, which is why it looked fixed and was not.
+    @Test("Only a confirmed hold is reported as held")
+    func onlyConfirmedCountsAsHeld() async {
+        let lid = FakeLid(arming: .holding)
+        let r = rig(lid)
+        #expect(await r.provider.begin(minutes: 30, lidClosed: true))
+        // Waited for rather than assumed: the arm is tracked work, and asking
+        // before it lands reads the resting answer and proves nothing.
+        await wait(for: { r.provider.lidReading == .holding }, "the confirmed reading")
+        #expect(r.provider.payload.lidHeld, "a daemon that said it holds must be reported as holding")
+
+        // The daemon goes quiet. The hold may well still stand — that is
+        // exactly why this is not `off` — but nothing has said so.
+        lid.rests(.unconfirmed)
+        await r.provider.refreshLid()
+        #expect(r.provider.payload.lid == .unconfirmed)
+        #expect(!r.provider.payload.lidHeld,
+                "an unanswered request is not evidence of protection")
+        #expect(r.provider.payload.lidClosed,
+                "and it is still the mode the user asked for")
+    }
+
+    @Test("Every reading says whether it is evidence of a hold")
+    func whatCountsAsEvidence() async {
+        // Stated once, here, rather than left to each caller's reading of
+        // `isLive`. The two questions differ in exactly one case and that
+        // case is the whole bug.
+        for state: KeepAwakeLidState in [.holding] {
+            #expect(state.isConfirmed, "\(state.name) is the daemon saying yes")
+        }
+        for state: KeepAwakeLidState in [.unconfirmed, .unreachable, .off, .notInstalled,
+                                         .needsApproval, .unsignedBuild,
+                                         .refused(.foreign), .refused(.busy)] {
+            #expect(!state.isConfirmed, "\(state.name) is not the daemon saying yes")
+        }
+        #expect(KeepAwakeLidState.unconfirmed.isLive,
+                "unconfirmed is still live — it is uncertainty, not a refusal")
+        #expect(!KeepAwakeLidState.unconfirmed.isConfirmed,
+                "and uncertainty is not evidence")
+    }
+
     // MARK: - Asked for, or not
 
     /// The plain switch is the lid-open mode. It must not quietly take a
@@ -181,15 +232,31 @@ struct KeepAwakeLidProviderTests {
         #expect(KeepAwakeCopy.lid(r.provider.payload.lid)?.isEmpty == false)
     }
 
-    /// Silence is not death. The daemon drops a hold on its own lease, not on
-    /// our inability to reach it, so the card must go on reporting a hold.
-    @Test("A silent daemon leaves the card saying the hold stands")
-    func silenceStillReadsAsHeld() async {
+    /// Silence is not death, and it is not proof either.
+    ///
+    /// The daemon drops a hold on its own lease, not on our inability to
+    /// reach it, so the card must not say the hold is gone. But it must not
+    /// say it stands, which is what `lidHeld` means to everything that reads
+    /// it: this flag draws the switch. The two halves live apart now — the
+    /// flag says what is confirmed, the sentence says what is likely — and
+    /// the card renders the request in its own third position rather than as
+    /// On. Before the split, `lidHeld` was true here and the card drew a
+    /// filled switch, a countdown and "nothing is being held" together.
+    @Test("A silent daemon is reported as neither held nor let go")
+    func silenceIsNeitherHeldNorGone() async {
         let lid = FakeLid(arming: .unconfirmed)
         let r = rig(lid)
         #expect(await r.provider.begin(minutes: 90, lidClosed: true))
         await wait(for: { r.provider.lidReading == .unconfirmed }, "the unconfirmed reading")
-        #expect(r.provider.payload.lidHeld, "an unconfirmed hold is still a hold")
+
+        #expect(!r.provider.payload.lidHeld,
+                "silence is not evidence, and this flag is what draws the switch On")
+        #expect(r.provider.payload.lidClosed,
+                "the mode the user asked for has not changed")
+        #expect(r.provider.payload.lid == .unconfirmed,
+                "and the reading itself is what the sentence is written from")
+        #expect(KeepAwakeCopy.lid(.unconfirmed)?.isEmpty == false,
+                "silence must still be explained in words")
     }
 
     // MARK: - Letting go
@@ -563,5 +630,76 @@ struct KeepAwakeSideEffectTests {
 
         #expect(lid.disarmedSessions == [started],
                 "the release did not name the session it belonged to")
+    }
+}
+
+/// The reading has to happen before anybody reaches for the mode.
+///
+/// It only ever happened while a lid session ran or just after one ended, so
+/// the state sat at its initial `.notInstalled` until a session had been run —
+/// and a session could not be run, because the card said it was not set up. A
+/// helper that was installed, approved and running as root was reported as
+/// missing, with no way out of the loop.
+@MainActor
+@Suite("Keep Awake, knowing about the lid before it is asked for", .serialized)
+struct KeepAwakeLidFirstReadingTests {
+
+    private func wait(for condition: @MainActor () -> Bool, _ what: Comment,
+                      sourceLocation: SourceLocation = #_sourceLocation) async {
+        for _ in 0 ..< 2_000 {
+            if condition() { return }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
+    }
+
+    private func provider(_ lid: FakeLid) -> KeepAwakeProvider {
+        let log = KeepAwakeLog()
+        return KeepAwakeProvider(
+            now: { Date(timeIntervalSince1970: 1_000) },
+            assertion: FakeSleepAssertion(log: log),
+            power: StubPowerSource(value: PowerSnapshot(
+                percentage: 0.8, isCharging: false, isPluggedIn: false,
+                isLowPower: false, timeRemaining: nil)),
+            thermal: StubThermalSource(),
+            journal: MemoryKeepAwakeJournal(log: log),
+            tombstone: MemoryTombstone(log: log),
+            bootID: "boot-A",
+            lid: lid,
+            makeID: { "A" },
+            formatTime: { _ in "17:40" }
+        )
+    }
+
+    @Test("Starting asks what the lid-closed mode can do")
+    func startsByAsking() async {
+        let lid = FakeLid(resting: .off)
+        let p = provider(lid)
+        let stream = p.start()
+        defer { p.stop() }
+
+        await wait(for: { p.lidReading == .off }, "the first reading")
+        #expect(p.lidReading == .off,
+                "the card would say 'not set up' for a helper that is ready")
+        withExtendedLifetime(stream) {}
+    }
+
+    /// Whether the helper is allowed is decided in System Settings, where
+    /// Ledge is not. A reading taken at launch is stale the moment somebody
+    /// approves it, and without asking again the only way to notice was to
+    /// quit and reopen.
+    @Test("Asking again notices an approval that happened elsewhere")
+    func noticesALaterApproval() async {
+        let lid = FakeLid(resting: .notInstalled)
+        let p = provider(lid)
+        let stream = p.start()
+        defer { p.stop() }
+        await wait(for: { p.lidReading == .notInstalled }, "the first reading")
+
+        lid.rests(.off)
+        await p.refreshLid()
+        #expect(p.lidReading == .off, "an approval outside Ledge was never noticed")
+        withExtendedLifetime(stream) {}
     }
 }

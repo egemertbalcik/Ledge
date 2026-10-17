@@ -40,3 +40,24 @@ public enum MeetingJoin {
         return startsIn > -assumedLength
     }
 }
+
+public extension EventPayload {
+
+    /// The link to join this meeting, if it is being offered right now.
+    ///
+    /// Here rather than in the card, because two layers have to agree about
+    /// it. The card draws Join and the camera segment from it; the shell
+    /// needs the same answer for a card it cannot see — a readout standing
+    /// over the calendar takes the view off screen, and a meeting that ends
+    /// behind one would otherwise leave a camera running in a frame whose
+    /// only control had gone with the capsule.
+    var joinLink: URL? {
+        guard hasEvent,
+              let link = meetingURL,
+              let url = URL(string: link),
+              url.scheme != nil,
+              MeetingJoin.isOffered(startsIn: startsIn, endsIn: endsIn, hasLink: true)
+        else { return nil }
+        return url
+    }
+}

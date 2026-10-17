@@ -32,6 +32,8 @@
 	<string>Ledge shows connection and battery for your AirPods and other Bluetooth devices.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>Ledge shows your next event and a calendar in the notch.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Ledge shows your camera, mirrored, in the notch before you join a meeting.</string>
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>Ledge parks new screenshots on its shelf, so it needs to read them where macOS saves them.</string>
 	<key>NSDocumentsFolderUsageDescription</key>

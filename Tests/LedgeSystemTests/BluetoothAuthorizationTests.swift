@@ -98,10 +98,13 @@ private final class BluetoothAccessProbe {
                     name: "Disconnected speaker", address: "DD:EE:FF:11:22:33",
                     isConnected: false
                 )
-                return [
-                    self.headphones.address: self.headphones,
-                    disconnected.address: disconnected,
-                ]
+                return (
+                    devices: [
+                        self.headphones.address: self.headphones,
+                        disconnected.address: disconnected,
+                    ],
+                    sampledAt: 0
+                )
             }
         )
     }

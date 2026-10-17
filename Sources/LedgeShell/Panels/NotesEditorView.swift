@@ -1,5 +1,6 @@
 import LedgeCore
 import LedgeSystem
+import LedgeUI
 import SwiftUI
 
 /// What the editor is editing.
@@ -184,6 +185,15 @@ final class NotesEditorModel: ObservableObject {
     var characterCount: Int { String(text.characters).count }
 
     func load(_ body: NoteBody) {
+        // Whatever was over the note goes with it, in the same change. The
+        // All Notes list used to be dismissed first and the note loaded
+        // afterwards, so pressing New note there played two animations back to
+        // back — the list leaving, then the note arriving — which is the
+        // unsmooth moment the owner felt rather than the new note itself.
+        overlay = .none
+        query = ""
+        findQuery = ""
+        highlighted = 0
         // The caller sets the note's id immediately after this, and the order
         // matters: `onChange` in the view fires on a later pass, and if the id
         // were still the previous note's then this note's text would be saved
@@ -452,7 +462,10 @@ struct NotesEditorView: View {
                     model.dismissOverlay()
                     model.onOpenNote?(summary.id)
                 },
-                dismiss: { model.dismissOverlay() }
+                dismiss: { model.dismissOverlay() },
+                // No dismiss here: loading the note takes the list away as
+                // part of the same change, where dismissing first made two.
+                create: { model.onCommand?(.newNote) }
             ) { index, isHighlighted in
                 if let summary = model.listedNotes[safe: index] {
                     NotesListRow(summary: summary,

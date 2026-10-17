@@ -1,5 +1,6 @@
 import LedgeCore
 import LedgeSystem
+import LedgeUI
 import SwiftUI
 
 /// What is open in the note window, if not the note.
@@ -35,19 +36,6 @@ enum NotesOverlay: Equatable {
 
 /// The ink this window is drawn in.
 ///
-/// Gathered in one place because three surfaces share it. Everything is an
-/// opacity of white over the island's own black except one amber, which marks
-/// the row the keys are pointed at and nothing else — a window that is
-/// otherwise colourless can say "here" with very little.
-enum NoteInk {
-    static let text = Color.white.opacity(0.92)
-    static let muted = Color.white.opacity(0.45)
-    static let faint = Color.white.opacity(0.28)
-    static let raised = Color.white.opacity(0.055)
-    static let edge = Color.white.opacity(0.10)
-    static let mark = Color(red: 0.95, green: 0.72, blue: 0.38)
-}
-
 /// A search field, a list, and the keys that drive them.
 ///
 /// Laid out as a place rather than a popup: it takes the window's body, the
@@ -67,6 +55,12 @@ struct NotesPaletteView<Row: View>: View {
     @Binding var followingKeys: Bool
     let run: (Int) -> Void
     let dismiss: () -> Void
+    /// Makes a note from here, when there is such a thing to do.
+    ///
+    /// All Notes is where somebody goes looking for a note, and finding none
+    /// worth opening is exactly when they want a new one — and the only way
+    /// out was Escape, back to the card, to press New note there.
+    var create: (() -> Void)?
     @ViewBuilder let row: (Int, Bool) -> Row
 
     @FocusState private var searching: Bool
@@ -151,6 +145,25 @@ struct NotesPaletteView<Row: View>: View {
             Hint(keys: "↑↓", label: "Move")
             Hint(keys: "↵", label: overlay == .notes ? "Open" : "Run")
             Spacer(minLength: 0)
+            if let create {
+                // Beside the keys, not instead of them: this line is the only
+                // place in the app where the keys can be learnt, and the one
+                // thing somebody wants from a list they found nothing in is a
+                // new note.
+                Button(action: create) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(NoteInk.mark)
+                        Text(NotesCopy.newNote)
+                            .font(.system(size: 11))
+                            .foregroundStyle(NoteInk.text)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("n", modifiers: .command)
+            }
             Hint(keys: "esc", label: "Back")
         }
         .padding(.horizontal, 16)

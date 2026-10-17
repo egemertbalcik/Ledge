@@ -2,100 +2,81 @@ import LedgeCore
 import SwiftUI
 
 /// When to say something about this device's batteries.
+///
+/// The rows of the detail pane's Alerts section — the section itself belongs
+/// to the pane, so this adds no heading of its own.
 struct AlertRulesSection: View {
 
     @Bindable var model: DevicesSettingsModel
     let record: DeviceRecord
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Alerts").font(.headline)
-
-            if record.id.ownsItsOwnAlerting {
-                // The engine refuses to alert for this device, so an editable
-                // rule here would be a control that either does nothing or —
-                // once edited — announces the same dip twice, alongside the
-                // warnings this Mac already gives.
-                ownAlertingNote
-            } else {
-                rulesEditor
-            }
+        if record.id.ownsItsOwnAlerting {
+            // The engine refuses to alert for this device, so an editable
+            // rule here would be a control that either does nothing or —
+            // once edited — announces the same dip twice, alongside the
+            // warnings this Mac already gives.
+            SettingsNote("""
+                This Mac's battery warnings come from Ledge's own battery card, which \
+                has both a low and a critical level. Ledge does not add a second alert \
+                for it.
+                """)
+        } else {
+            rulesEditor
         }
     }
 
-    private var ownAlertingNote: some View {
-        Text(
-            """
-            This Mac's battery warnings come from Ledge's own battery card, \
-            which has both a low and a critical level. Ledge does not add a \
-            second alert for it.
-            """
-        )
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
+    @ViewBuilder
     private var rulesEditor: some View {
-        VStack(alignment: .leading, spacing: 10) {
-
-            ForEach(Array(configuration.rules.enumerated()), id: \.element.id) { index, rule in
-                RuleRow(
-                    rule: rule,
-                    canCharge: supportsCharged(rule.component),
-                    deviceName: record.name,
-                    onChange: { updated in replace(updated, at: index) },
-                    onDelete: { remove(at: index) },
-                    onPreview: {
-                        // A notification-only preview with permission not yet
-                        // granted would otherwise be a button that silently
-                        // does nothing. Previewing is one of the two moments
-                        // the user has asked for notifications, so it is one
-                        // of the two moments it is right to ask.
-                        if rule.delivery.contains(.notification) {
-                            Task {
-                                _ = await model.requestNotificationAuthorization()
-                                model.preview(rule, deviceName: record.name)
-                            }
-                        } else {
+        ForEach(Array(configuration.rules.enumerated()), id: \.element.id) { index, rule in
+            RuleRow(
+                rule: rule,
+                canCharge: supportsCharged(rule.component),
+                deviceName: record.name,
+                onChange: { updated in replace(updated, at: index) },
+                onDelete: { remove(at: index) },
+                onPreview: {
+                    // A notification-only preview with permission not yet
+                    // granted would otherwise be a button that silently does
+                    // nothing. Previewing is one of the two moments the user
+                    // has asked for notifications, so it is one of the two
+                    // moments it is right to ask.
+                    if rule.delivery.contains(.notification) {
+                        Task {
+                            _ = await model.requestNotificationAuthorization()
                             model.preview(rule, deviceName: record.name)
                         }
-                    },
-                    enableNotificationDelivery: {
-                        // By id, applied to the configuration as it is when
-                        // the answer arrives: the prompt is modal to nothing,
-                        // and edits made while it was up must survive.
-                        Task {
-                            guard await model.requestNotificationAuthorization() else { return }
-                            model.enableNotificationDelivery(ruleID: rule.id, for: record.id)
-                        }
-                    },
-                    disableNotifications: { model.notificationDeliveryWasDisabled() }
-                )
-                Divider()
-            }
+                    } else {
+                        model.preview(rule, deviceName: record.name)
+                    }
+                },
+                enableNotificationDelivery: {
+                    // By id, applied to the configuration as it is when the
+                    // answer arrives: the prompt is modal to nothing, and
+                    // edits made while it was up must survive.
+                    Task {
+                        guard await model.requestNotificationAuthorization() else { return }
+                        model.enableNotificationDelivery(ruleID: rule.id, for: record.id)
+                    }
+                },
+                disableNotifications: { model.notificationDeliveryWasDisabled() }
+            )
+        }
 
-            HStack {
-                Button("Add Low Alert") { add(kind: .low) }
-                Button("Add Charged Alert") { add(kind: .charged) }
-                    .disabled(!supportsAnyCharging)
-                    .help(supportsAnyCharging
-                          ? "Tells you when this device finishes charging."
-                          : "This device does not report whether it is charging, so a charged alert could never be certain.")
-            }
-            .padding(.top, 2)
+        HStack {
+            Button("Add Low Alert") { add(kind: .low) }
+            Button("Add Charged Alert") { add(kind: .charged) }
+                .disabled(!supportsAnyCharging)
+                .help(supportsAnyCharging
+                      ? "Tells you when this device finishes charging."
+                      : "This device does not report whether it is charging, so a charged alert could never be certain.")
+        }
 
-            if !configuration.isCustomised {
-                Text("Using Ledge's default: one alert at 20%, in the notch.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            if !supportsAnyCharging {
-                Text("This device reports a level but not whether it is charging, so Ledge will not guess when it is full.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        if !configuration.isCustomised {
+            SettingsNote("Using Ledge's default: one alert at 20%, in the notch.")
+        }
+        if !supportsAnyCharging {
+            SettingsNote("This device reports a level but not whether it is charging, so Ledge will not guess when it is full.")
         }
     }
 
@@ -171,7 +152,7 @@ private struct RuleRow: View {
     private var canFire: Bool { controls.canFire }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Toggle(isOn: Binding(
                     get: { rule.isEnabled && canFire },
@@ -179,7 +160,6 @@ private struct RuleRow: View {
                 )) {
                     Text(rule.kind == .low ? "Low battery" : "Charged")
                 }
-                .toggleStyle(.switch)
                 // A rule that cannot fire cannot be switched on: the control
                 // would claim an alert the hardware can never give. Delete and
                 // the battery picker stay live, which is how the row is
@@ -194,26 +174,22 @@ private struct RuleRow: View {
                 Button(role: .destructive, action: onDelete) {
                     Image(systemName: "minus.circle")
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
                 .accessibilityLabel("Remove this alert")
             }
 
-            HStack {
-                Text("At")
-                Slider(
-                    value: Binding(
-                        get: { rule.threshold },
-                        set: { var copy = rule; copy.setThreshold($0); onChange(copy) }
-                    ),
-                    in: rule.kind == .low ? 0.05...0.5 : 0.5...1.0
-                )
-                .frame(maxWidth: 200)
-                .disabled(!controls.canEditThreshold)
-                .accessibilityLabel("\(rule.kind == .low ? "Low" : "Charged") threshold")
-                Text("\(Int((rule.threshold * 100).rounded()))%")
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-            }
+            // The same slider as every other percentage in the window, rather
+            // than a bare one with the number hung off its end.
+            LabeledSlider(
+                "At",
+                value: Binding(
+                    get: { rule.threshold * 100 },
+                    set: { var copy = rule; copy.setThreshold($0 / 100); onChange(copy) }
+                ),
+                in: rule.kind == .low ? 5...50 : 50...100,
+                format: "%.0f%%"
+            )
+            .disabled(!controls.canEditThreshold)
 
             Picker("Battery", selection: Binding(
                 get: { rule.component },
@@ -236,15 +212,10 @@ private struct RuleRow: View {
             .disabled(!controls.canChooseDelivery)
 
             if !canFire {
-                Text("This battery does not report a charging state, so this alert cannot fire. Choose another battery, or remove the alert.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
+                SettingsStatus("This battery does not report a charging state, so this alert cannot fire. Choose another battery, or remove the alert.", .attention)
             }
             if rule.delivery.isEmpty {
-                Text("With neither of these ticked the alert is off.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                SettingsNote("With neither of these ticked the alert is off.")
             }
         }
         .padding(.vertical, 4)

@@ -28,9 +28,15 @@ struct HUDReadoutTests {
         #expect(HUDReadout(kind: .volume, level: 0.9).symbolName == "speaker.wave.3.fill")
     }
 
-    @Test("Silence and mute both show the crossed-out speaker")
+    @Test("Only mute shows the crossed-out speaker")
     func mutedGlyph() {
-        #expect(HUDReadout(kind: .volume, level: 0).symbolName == "speaker.slash.fill")
+        // Turned all the way down and muted are two separate facts and this
+        // glyph belongs to the second alone. Sharing it drew mute at a level
+        // of zero on the card, the ears and the satellite — and made pressing
+        // volume-up from there look like unmuting, which is a different act.
+        #expect(HUDReadout(kind: .volume, level: 0).symbolName == "speaker.fill")
+        #expect(HUDReadout(kind: .volume, level: 0, isMuted: true).symbolName
+                    == "speaker.slash.fill")
         // Muted at a non-zero level still reads as muted, which is the state
         // the user actually cares about.
         #expect(HUDReadout(kind: .volume, level: 0.8, isMuted: true).symbolName == "speaker.slash.fill")
@@ -78,7 +84,9 @@ struct LevelGlyphTests {
     @Test("A display is never off, so brightness has no slashed rung")
     func brightnessHasNoOffState() {
         #expect(HUDReadout.brightnessSymbol(level: 0) == "sun.min.fill")
-        #expect(HUDReadout.volumeSymbol(level: 0, isMuted: false) == "speaker.slash.fill")
+        // And volume at zero is not off either: it is a speaker with nothing
+        // coming out of it, which is a plain speaker.
+        #expect(HUDReadout.volumeSymbol(level: 0, isMuted: false) == "speaker.fill")
     }
 
     @Test("Muted wins over whatever the scalar says")
@@ -141,13 +149,19 @@ struct VolumeMuteStateTests {
         #expect(HUDReadout(kind: .volume, level: 0, isMuted: false).isMuted == false)
     }
 
-    /// Still the crossed-out speaker at zero either way — which is what macOS
-    /// shows too, and is honest: there is no sound. Only the red pill differs.
-    @Test("The glyph says silent at zero whatever the mute state")
-    func glyphIsSilentAtZero() {
+    /// Zero and muted differ in the glyph as well as in the pill.
+    ///
+    /// They were the same symbol on the reasoning that both mean no sound.
+    /// They do, and they are still not the same state: one is undone by
+    /// turning the volume up and the other by pressing the mute key, and a
+    /// control that shows them alike cannot say which.
+    @Test("Zero and muted do not share a glyph")
+    func zeroIsNotMute() {
         #expect(
             HUDReadout.volumeSymbol(level: 0, isMuted: false)
-                == HUDReadout.volumeSymbol(level: 0, isMuted: true)
+                != HUDReadout.volumeSymbol(level: 0, isMuted: true)
         )
+        #expect(HUDReadout.volumeSymbol(level: 0, isMuted: false) == "speaker.fill")
+        #expect(HUDReadout.volumeSymbol(level: 0, isMuted: true) == "speaker.slash.fill")
     }
 }

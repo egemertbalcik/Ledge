@@ -100,8 +100,14 @@ public struct ActivityCardView: View {
                 isCompactWidth: isCompactWidth
             )
             .measuredContent(activity.id, onContentHeight)
-        case .levels:
-            LevelsCardView(actions: levelsActions, isCompactWidth: isCompactWidth, liveLevel: liveLevel)
+        case .levels(let payload):
+            LevelsCardView(payload: payload, actions: levelsActions,
+                           isCompactWidth: isCompactWidth)
+                // Measured, like every other card. Without this the island
+                // gave it a fixed height and anything that grew — a second
+                // display, a sentence under a row — was clipped away by the
+                // card's own shape.
+                .measuredContent(activity.id, onContentHeight)
         case .shelf(let payload):
             ShelfCardView(payload: payload, actions: shelfActions, isCompactWidth: isCompactWidth)
                 .measuredContent(activity.id, onContentHeight)
@@ -237,7 +243,8 @@ public struct ActivityCardView: View {
     private var subtitle: String {
         switch activity.payload {
         case .nowPlaying(let payload): payload.artist
-        case .device(let payload): payload.isConnected ? "Connected" : "Disconnected"
+        case .device(let payload):
+            payload.isConnected.map { $0 ? "Connected" : "Disconnected" } ?? ""
         case .power(let payload): payload.isLowPower ? "Low Power Mode" : ""
         case .focus(let payload): payload.isActive ? "Focus On" : "Focus Off"
         case .event(let payload): payload.hasEvent ? payload.location : "No events today"
@@ -255,7 +262,9 @@ public struct ActivityCardView: View {
             // What the card would say in full, one state at a time. A running
             // hold says when it ends; a finished one says what happened.
             switch payload.phase {
-            case .ready: payload.problem == nil ? KeepAwakeCopy.readyLidOpen : ""
+            // The switch's position, not a sentence about the lid: the card
+            // this stands in for is a switch now, and the row has one line.
+            case .ready: payload.problem == nil ? KeepAwakeCopy.off : ""
             case .running: KeepAwakeCopy.runningUntil(payload.until)
             case .finished(let reason):
                 KeepAwakeCopy.finished(reason, at: payload.until,
@@ -281,7 +290,10 @@ public struct ActivityCardView: View {
         case .keyboard(let payload):
             payload.code.isEmpty ? nil : payload.code
         case .keepAwake(let payload):
-            payload.isRunning ? SatelliteContent.keepAwakeLabel(remaining: payload.remaining) : nil
+            payload.isRunning
+                ? SatelliteContent.keepAwakeLabel(
+                    remaining: payload.isIndefinite ? nil : payload.remaining)
+                : nil
         case .focus, .message, .weather, .shelf, .privacy, .levels, .notes:
             nil
         }

@@ -51,7 +51,7 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
     /// Ready: the last attempt failed, and why. Nil when nothing is wrong.
     public var problem: Problem?
 
-    public enum Problem: String, Equatable, Sendable, Codable {
+    public enum Problem: String, Equatable, Sendable, Codable, CaseIterable {
         case assertionRefused
         case startNotSaved
         case journalUnreadable

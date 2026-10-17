@@ -8,9 +8,32 @@ public struct RecordingState: Equatable, Sendable {
     public var camera: Bool
     public var microphone: Bool
 
-    public init(camera: Bool = false, microphone: Bool = false) {
+    /// Which video devices are running, by their system unique IDs.
+    ///
+    /// Identity rather than a count, because the only honest way for Ledge to
+    /// keep quiet about its own self-view is to name the device it opened and
+    /// report every other one exactly as before. A count cannot do that: it
+    /// cannot tell whether the camera that just started is Ledge's or
+    /// somebody else's, and it is wrong in both directions — hiding another
+    /// application's camera that started first, or announcing Ledge's own as
+    /// a stranger's when a preview is closed and reopened quickly.
+    ///
+    /// What it still cannot answer: whether a *second* application is reading
+    /// the same device Ledge is. macOS reports a device as running, not who
+    /// is reading it. In that one case Ledge stays quiet and macOS's own
+    /// indicator is the one that speaks.
+    public var cameraIDs: Set<String>
+
+    public init(
+        camera: Bool = false,
+        microphone: Bool = false,
+        cameraIDs: Set<String>? = nil
+    ) {
         self.camera = camera
         self.microphone = microphone
+        // A test that says "a camera is on" without naming it gets a stand-in
+        // identity, so the arithmetic above still has something to subtract.
+        self.cameraIDs = cameraIDs ?? (camera ? ["unnamed.camera"] : [])
     }
 
     public var isActive: Bool { camera || microphone }
@@ -202,10 +225,10 @@ public final class SystemRecordingSource: RecordingSource {
         // enumeration is the slower half of a sweep — paying for it on every
         // audio event is most of what made a busy Mac expensive. A session with
         // nothing cached yet still reads both: a missing answer is not an answer.
-        let knownCamera: Bool? = includeCamera ? nil : cache.withLock { c in
-            c.activeSession == session ? c.value?.camera : nil
+        let knownCamera: Set<String>? = includeCamera ? nil : cache.withLock { c in
+            c.activeSession == session ? c.value?.cameraIDs : nil
         }
-        let state = sweepHardware(knownCamera: knownCamera)
+        let state = sweepHardware(knownCameras: knownCamera)
         // Recorded here rather than at the one call site that coalesces, so
         // every sweep counts towards the rate limit however it was reached.
         // The opening reading of a session is taken directly, and leaving it
@@ -222,13 +245,15 @@ public final class SystemRecordingSource: RecordingSource {
 
     /// The reading itself. Injectable so a test can hold a sweep open across a
     /// stop without a camera or a microphone in use.
-    private nonisolated func sweepHardware(knownCamera: Bool? = nil) -> RecordingState {
+    private nonisolated func sweepHardware(knownCameras: Set<String>? = nil) -> RecordingState {
         if let injectedSweep { return injectedSweep() }
         let holders = Self.inputHolders()
         logHoldersIfChanged(holders)
+        let cameras = knownCameras ?? Self.runningCameraIDs()
         return RecordingState(
-            camera: knownCamera ?? Self.isAnyCameraRunning(),
-            microphone: Self.microphoneHeld(by: holders)
+            camera: !cameras.isEmpty,
+            microphone: Self.microphoneHeld(by: holders),
+            cameraIDs: cameras
         )
     }
 
@@ -300,7 +325,45 @@ public final class SystemRecordingSource: RecordingSource {
     }
 
     private nonisolated static func isAnyCameraRunning() -> Bool {
-        videoDevices().contains { isVideoDeviceRunning($0) }
+        !runningCameraIDs().isEmpty
+    }
+
+    /// Which video devices are running right now, by unique ID.
+    ///
+    /// The same enumeration as before plus one string read per running
+    /// device — a Mac has two or three of them — and that string is what
+    /// lets Ledge keep quiet about the camera it opened itself without
+    /// keeping quiet about anybody else's.
+    ///
+    /// A device whose ID cannot be read still counts, under a name made from
+    /// its object ID: a camera Ledge cannot name is one it cannot claim.
+    nonisolated static func runningCameraIDs() -> Set<String> {
+        var running: Set<String> = []
+        for device in videoDevices() where isVideoDeviceRunning(device) {
+            running.insert(videoDeviceID(device) ?? "cmio.\(device)")
+        }
+        return running
+    }
+
+    /// A video device's system-wide unique ID — the same string
+    /// `AVCaptureDevice.uniqueID` reports for it.
+    private nonisolated static func videoDeviceID(_ device: CMIOObjectID) -> String? {
+        var address = CMIOObjectPropertyAddress(
+            mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceUID),
+            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
+            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain)
+        )
+        guard CMIOObjectHasProperty(device, &address) else { return nil }
+        var uid: CFString? = nil
+        var used: UInt32 = 0
+        let status = withUnsafeMutablePointer(to: &uid) { pointer in
+            CMIOObjectGetPropertyData(
+                device, &address, 0, nil,
+                UInt32(MemoryLayout<CFString?>.size), &used, pointer
+            )
+        }
+        guard status == noErr, let uid else { return nil }
+        return uid as String
     }
 
     /// A cheap trigger for the expensive answer.

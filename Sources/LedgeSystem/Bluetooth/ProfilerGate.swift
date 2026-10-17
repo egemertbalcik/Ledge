@@ -22,7 +22,15 @@ actor ProfilerGate<Value: Sendable> {
     private let now: @Sendable () -> TimeInterval
 
     private var inFlight: Task<Value, Never>?
-    private var cached: (value: Value, at: TimeInterval)?
+    /// `at` is when the run finished, for the freshness window; `sampledAt`
+    /// is when it *began*, which is the oldest the data can be. They are
+    /// different questions and the second one is the one callers need: an
+    /// answer handed to a caller who asked after the run started describes
+    /// the world as it was before they asked.
+    private var cached: (value: Value, at: TimeInterval, sampledAt: TimeInterval)?
+
+    /// When the run now in flight began.
+    private var inFlightSince: TimeInterval = 0
 
     /// - Parameters:
     ///   - freshness: how long an answer may be reused. Short — this is for
@@ -37,23 +45,36 @@ actor ProfilerGate<Value: Sendable> {
         self.run = run
     }
 
-    func value() async -> Value {
+    /// The answer, and when the work that produced it began.
+    ///
+    /// The second half matters wherever the answer is compared against
+    /// something else that happened: a shared or reused result describes the
+    /// world at the moment it was sampled, not at the moment it was handed
+    /// over. Stamping it with the latter made a two-second-old reading look
+    /// newer than an event that happened in between — which is how a paired
+    /// list sampled before a connect undid that connect.
+    func reading() async -> (value: Value, sampledAt: TimeInterval) {
         if let cached, now() - cached.at < freshness {
-            return cached.value
+            return (cached.value, cached.sampledAt)
         }
         if let inFlight {
             // Someone else is already asking. Wait for their answer rather than
             // starting a second process to compute the same thing.
-            return await inFlight.value
+            let since = inFlightSince
+            return (await inFlight.value, since)
         }
 
+        let startedAt = now()
         let task = Task { [run] in await run() }
         inFlight = task
+        inFlightSince = startedAt
         let value = await task.value
         inFlight = nil
-        cached = (value, now())
-        return value
+        cached = (value, now(), startedAt)
+        return (value, startedAt)
     }
+
+    func value() async -> Value { await reading().value }
 
     /// Tests: how many times the underlying work actually ran is counted by the
     /// caller's own closure; this only reports whether one is in flight.

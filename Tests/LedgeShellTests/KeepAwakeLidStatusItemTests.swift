@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import LedgeCore
+import ServiceManagement
 import Testing
 
 @testable import LedgeShell
@@ -123,7 +124,7 @@ struct KeepAwakeHelperInstallTests {
         let reading = KeepAwakeHelperInstall.reading(
             isDistributable: false,
             hasDaemonPlist: { asked += 1; return true },
-            isRegistered: { asked += 1; return true }
+            registration: { asked += 1; return .enabled }
         )
         #expect(reading == .unsignedBuild)
         #expect(asked == 0, "a build that cannot install was asked about installing")
@@ -135,20 +136,45 @@ struct KeepAwakeHelperInstallTests {
         let reading = KeepAwakeHelperInstall.reading(
             isDistributable: true,
             hasDaemonPlist: { false },
-            isRegistered: { registered += 1; return true }
+            registration: { registered += 1; return .enabled }
         )
         #expect(reading == .notInstalled)
         #expect(registered == 0, "launchd was asked about a daemon that is not in the bundle")
     }
 
-    /// Anything but `enabled` is not installed. A daemon waiting for approval
-    /// holds nothing, and a card saying it was set up would be promising a
-    /// hold that cannot happen.
-    @Test("Only a registered daemon counts as set up")
+    /// Only an enabled daemon is set up: one waiting for approval holds
+    /// nothing, and saying it was set up would promise a hold that cannot
+    /// happen.
+    @Test("Only an enabled daemon counts as set up")
     func onlyEnabledCounts() {
         #expect(KeepAwakeHelperInstall.reading(isDistributable: true, hasDaemonPlist: { true },
-                                               isRegistered: { false }) == .notInstalled)
+                                               registration: { .enabled }) == .installed)
+        for other: SMAppService.Status in [.notRegistered, .notFound, .requiresApproval] {
+            #expect(KeepAwakeHelperInstall.reading(isDistributable: true, hasDaemonPlist: { true },
+                                                   registration: { other }) != .installed,
+                    "a status other than enabled was taken as set up")
+        }
+    }
+
+    /// The state this whole distinction exists for. Waiting for approval needs
+    /// something different from the user than not being set up does — and
+    /// folded together, somebody who had just pressed Set Up was told to go
+    /// and press Set Up.
+    @Test("Waiting for approval is its own answer, not 'not set up'")
+    func approvalIsItsOwnState() {
         #expect(KeepAwakeHelperInstall.reading(isDistributable: true, hasDaemonPlist: { true },
-                                               isRegistered: { true }) == .installed)
+                                               registration: { .requiresApproval }) == .needsApproval)
+        #expect(KeepAwakeHelperInstall.reading(isDistributable: true, hasDaemonPlist: { true },
+                                               registration: { .notRegistered }) == .notInstalled)
+    }
+
+    /// And the sentences differ, which is the whole point of the state.
+    @Test("Each state says something different to do")
+    func eachStateSaysSomethingDifferent() {
+        let said = [KeepAwakeHelperInstallation.unsignedBuild, .notInstalled,
+                    .needsApproval, .installed].map(KeepAwakeCopy.lidInstallation)
+        #expect(Set(said).count == said.count, "two states say the same thing: \(said)")
+        #expect(KeepAwakeCopy.lidInstallation(.needsApproval).contains("Login Items"),
+                "the approval sentence does not name where to go")
     }
 }

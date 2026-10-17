@@ -53,6 +53,10 @@ final class FakeSleepAssertion: SleepAssertion {
     /// How many times an assertion has been taken, so a test can tell one
     /// session from two.
     private(set) var acquireCount = 0
+    /// How many times it has been given back. `isHeld` at the end of an
+    /// operation cannot tell "never let go" from "let go and taken again",
+    /// and the difference between those two is a Mac that slept.
+    private(set) var releaseCount = 0
 
     init(log: KeepAwakeLog) { self.log = log }
 
@@ -61,6 +65,12 @@ final class FakeSleepAssertion: SleepAssertion {
             log.record(.acquireRefused)
             return false
         }
+        // The production assertion re-arms rather than taking a second one
+        // when it is already held (`IOPMSleepAssertion.acquire`). A fake that
+        // took a fresh assertion instead could not reproduce the path a mode
+        // change depends on — the hold surviving because nothing ever asked
+        // for a new one.
+        guard !isHeld else { return rearm(timeout: timeout) }
         isHeld = true
         acquireCount += 1
         lastTimeout = timeout
@@ -77,6 +87,7 @@ final class FakeSleepAssertion: SleepAssertion {
 
     func release() {
         guard isHeld else { return }
+        releaseCount += 1
         isHeld = false
         log.record(.release)
     }

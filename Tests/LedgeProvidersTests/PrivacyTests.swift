@@ -205,3 +205,262 @@ struct ProviderDefaultEnablementTests {
         #expect(preferences.isProviderEnabled("airpods", defaultEnabled: false))
     }
 }
+
+/// What Ledge's own privacy card is allowed to say while Ledge itself is
+/// showing the user their own face.
+///
+/// The watcher can only see that *a* camera is running, never whose, so
+/// without this the self-view would announce itself — a card reading "Camera
+/// in use" over a live picture of the person reading it.
+@Suite("The privacy card and Ledge's own camera")
+@MainActor
+struct PrivacySelfViewTests {
+
+    private func collect(
+        _ provider: PrivacyProvider,
+        while body: () async -> Void
+    ) async -> [ProviderEvent] {
+        let stream = provider.start()
+        await body()
+        provider.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        return events
+    }
+
+    @Test("Ledge's own self-view is not announced")
+    func ownCameraIsQuiet() async {
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+        }
+
+        #expect(events.isEmpty, "the picture is the indicator; a card about it is noise")
+    }
+
+    @Test("A camera that wins the race to start is still announced")
+    func foreignCameraWinsTheRace() async {
+        // Reported by review: between the press and Ledge's own hardware
+        // appearing, another application's camera can be the first thing in
+        // the reading. Counted, that first camera looked like Ledge's and was
+        // hidden; named, it is a stranger's and is not.
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["studio.display"]))
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected the other application's camera to be published")
+            return
+        }
+        #expect(payload.cameraActive)
+    }
+
+    @Test("A preview closed and reopened is still Ledge's own camera")
+    func rapidReopenIsStillOurs() async {
+        // The other direction the count got wrong: a preview closed and
+        // reopened before the watcher saw the gap announced Ledge's own
+        // camera as a stranger's.
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+            provider.selfViewChanged(false)
+            provider.selfViewChanged(true, device: "built-in.front")
+            // The watcher never saw a reading without the camera in it.
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+            await provider.settleCover()
+        }
+
+        #expect(events.isEmpty, "Ledge must not announce its own preview")
+    }
+
+    @Test("Another application on the same camera is announced")
+    func sharedCameraIsAnnounced() async {
+        // The one thing a device's running state cannot say — whether
+        // somebody else is reading the same lens — comes from
+        // `isInUseByAnotherApplication`. When it says yes, nothing is
+        // covered: a picture in the notch explains Ledge's own use of a
+        // camera, not anybody else's.
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(
+            source: source,
+            now: { 100 },
+            uncoverGrace: 0.2,
+            sharedWithAnotherApp: { true }
+        )
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected the shared camera to be published")
+            return
+        }
+        #expect(payload.cameraActive)
+    }
+
+    @Test("Another application joining and leaving the same camera is noticed both ways")
+    func sharingChangesAreNoticed() async {
+        // Reported by review: whether somebody else is on Ledge's camera
+        // moves while the hardware reading does not — the same device is
+        // running throughout — so a dedupe that looked only at the reading
+        // skipped the change, and the card hid a camera for as long as the
+        // preview lasted.
+        var shared = false
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(
+            source: source,
+            now: { 100 },
+            uncoverGrace: 0.2,
+            sharedWithAnotherApp: { shared }
+        )
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+
+            // A meeting app takes the same camera. Nothing about the devices
+            // changes; only who is reading one.
+            shared = true
+            provider.recheck()
+
+            // And lets go again.
+            shared = false
+            provider.recheck()
+        }
+
+        let kinds = events.map { event -> String in
+            switch event {
+            case .publish: "publish"
+            case .retract: "retract"
+            default: "other"
+            }
+        }
+        #expect(
+            kinds == ["publish", "retract"],
+            "the card appears when the camera is shared and goes when it is not (got \(kinds))"
+        )
+    }
+
+    @Test("A camera that starts while the preview is up is announced")
+    func foreignCameraArrivingDuringThePreview() async {
+        // The moment a privacy indicator exists for: something else reaches
+        // for a camera while the user is looking at their own face.
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front", "studio.display"]))
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected the second camera to be published")
+            return
+        }
+        #expect(payload.cameraActive)
+    }
+
+    @Test("A camera somebody else already had is still announced")
+    func foreignCameraSurvivesTheCover() async {
+        // The cover is only ever about a change Ledge caused. Something else
+        // was already recording when the segment was pressed, and that is
+        // exactly what the card exists to say.
+        let source = StubRecordingSource(value: RecordingState(camera: true, cameraIDs: ["studio.display"]))
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            // Ledge's own camera joins the one already running.
+            source.set(RecordingState(camera: true, microphone: true, cameraIDs: ["studio.display", "built-in.front"]))
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected a published privacy card")
+            return
+        }
+        #expect(payload.cameraActive)
+    }
+
+    @Test("The microphone is never covered")
+    func microphoneIsNeverCovered() async {
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, microphone: true, cameraIDs: ["built-in.front"]))
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected a published privacy card")
+            return
+        }
+        #expect(payload.micActive)
+        #expect(payload.cameraActive == false, "only Ledge's own camera is covered")
+    }
+
+    @Test("A meeting app taking the camera at Join is announced")
+    func handoverIsAnnounced() async {
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+
+            // Join: Ledge lets go, and the meeting app takes the camera
+            // before Ledge's own session has finished stopping. The cover
+            // waits for one honest reading rather than ending on the spot —
+            // and the reading says the camera is still on, so the card says
+            // so too.
+            provider.selfViewChanged(false)
+            // Waited out, not slept out: when the cover ends, the reading —
+            // which still says a camera is on, because the meeting app has
+            // it — is the one the card acts on.
+            await provider.settleCover()
+        }
+
+        guard case .publish(let activity)? = events.last,
+              case .privacy(let payload) = activity.payload else {
+            Issue.record("expected the handover to be published")
+            return
+        }
+        #expect(payload.cameraActive)
+    }
+
+    @Test("Closing the self-view with nothing else running publishes nothing")
+    func quietAfterClosing() async {
+        let source = StubRecordingSource()
+        let provider = PrivacyProvider(source: source, now: { 100 }, uncoverGrace: 0.2)
+
+        let events = await collect(provider) {
+            provider.selfViewChanged(true, device: "built-in.front")
+            source.set(RecordingState(camera: true, cameraIDs: ["built-in.front"]))
+            // Ledge's session stops, and the watcher catches up.
+            source.set(RecordingState(camera: false, cameraIDs: []))
+            provider.selfViewChanged(false)
+            await provider.settleCover()
+        }
+
+        #expect(events.isEmpty)
+    }
+
+}

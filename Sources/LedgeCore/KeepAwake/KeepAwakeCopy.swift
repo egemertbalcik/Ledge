@@ -12,25 +12,43 @@ public enum KeepAwakeCopy {
 
     // MARK: - Ready
 
-    public static let readyLidOpen = "Closing the lid will still put your Mac to sleep."
-    public static func readyLidHeld(floor: Int) -> String {
-        "Stays awake with the lid closed, until the battery reaches \(floor)%."
-    }
+    /// Where the card is, in a word, beside the title.
+    ///
+    /// It used to be a sentence — "Closing the lid will still put your Mac to
+    /// sleep" — which is two lines of caveat about a mode nobody has reached
+    /// for, on a card 275 points wide. The caveat is carried by the rail
+    /// instead: a stop past Awake is a better explanation of what Awake does
+    /// not do than a sentence saying so.
+    public static let off = "Off"
+    /// The other way the switch can be set. Nothing on the resting card draws
+    /// it — a hold that is on wears the running face — but a control with one
+    /// legible position is not a switch.
+    public static let on = "On"
+
+
+    /// The lid-closed row, read aloud, when the mode has nothing of its own to
+    /// say. When it does, the sentence it has is the better hint and is used
+    /// instead.
+    public static let lidRowHint = "Hold your Mac awake with the lid shut, for a set length"
 
     /// The assertion was refused, so nothing changed. Phrased as something to
     /// try again rather than as a fault, because there is nothing to fix.
+    ///
+    /// "Try Start again" is what this said while the card had a Start button
+    /// on it. It is a switch now, and copy that names a control the card does
+    /// not have is worse than copy that names none.
     public static let assertionRefused =
-        "macOS didn't accept the request to stay awake, so nothing changed. Try Start again."
+        "macOS wouldn't allow it, so nothing changed. Try again."
 
     /// The journal refused the start write. Nothing was acquired.
     public static let startNotSaved =
-        "Ledge couldn't save the session, so nothing changed. Try Start again."
+        "Ledge couldn't save the session, so nothing changed. Try again."
 
     /// Enough sessions are waiting to be written down that starting another
     /// would risk losing the record of one. Says what has to happen rather
     /// than asking for a retry that cannot work yet.
     public static let tooManyUnsaved =
-        "Ledge still can't write to the disk, so it won't start another session until it can."
+        "Ledge still can't write to the disk, so it won't start another session."
 
     // MARK: - Running
 
@@ -40,10 +58,6 @@ public enum KeepAwakeCopy {
     /// a switch, and this is the honest answer to "until when".
     public static let runningUntilSwitchedOff = "Until you switch it off"
 
-    /// How long an open-ended hold has been running. "Awake for 2h 14m" reads
-    /// as a fact about the Mac; the same number without it reads as a
-    /// countdown, which is the one thing it is not.
-    public static func heldFor(_ label: String) -> String { "Awake for \(label)" }
 
     /// What is left, in the units it was set in.
     ///
@@ -91,6 +105,12 @@ public enum KeepAwakeCopy {
     public static func resumed(remaining: String, until time: String) -> String {
         "Keep Awake resumed. \(remaining) left, until \(time)."
     }
+
+    /// Resumed with no end to resume to. The timed sentence read "Keep Awake
+    /// resumed. On left, until ." once the label it was handed stopped being
+    /// a duration — a time and an "until" are both wrong for a hold that runs
+    /// until it is switched off.
+    public static let resumedIndefinitely = "Keep Awake resumed. Until you switch it off."
 
     // MARK: - Finished
 
@@ -143,15 +163,91 @@ public enum KeepAwakeCopy {
 
     /// Shown once when the journal could not be read at all.
     public static let journalUnreadable =
-        "Ledge couldn't read the last Keep Awake session, so it didn't resume it."
+        "Ledge couldn't read the last session, so it didn't resume it."
 
     // MARK: - Settings
 
     // MARK: - Lid closed
 
-    /// The subordinate mode's name, on the card and in Settings. Two words,
-    /// because it has to sit beside Start without competing with it.
-    public static let lidClosed = "Lid closed"
+    /// The stronger mode's name, on the card and in Settings.
+    ///
+    /// Off, Coffee, Espresso. The rail's whole argument is that the third stop
+    /// is a *stronger* version of the second rather than a separate setting,
+    /// and one strength ladder everybody already knows says that in two words
+    /// — which "Lid shut", "Lid closed" and "Away" could not, because each of
+    /// them named a mechanism or a circumstance and left the relationship
+    /// between the stops to be worked out.
+    ///
+    /// It also finally earns the glyph: this card has been drawn with a cup on
+    /// it since the day it was written.
+    ///
+    /// The lid is still said out loud where there is room: the line under the
+    /// rail, the preview on a press, the menu-bar item, and every sentence
+    /// about the hold.
+    public static let lidClosed = "Espresso"
+
+    // MARK: - The rail
+
+    /// The three stops, in the order they promise more. The third contains the
+    /// second: you cannot hold a Mac awake through a shut lid without holding
+    /// it awake.
+    public static let railOff = "Off"
+    public static let railAwake = "Coffee"
+
+    /// Under the rail, always. What the stop the card is on actually means
+    /// for this Mac, in one line, so the card never has to be decoded.
+    /// At rest, the card's one line says what the card is *for* rather than
+    /// restating the stop the bead is already sitting on.
+    ///
+    /// It used to say "Your Mac sleeps as usual." — true, and a description of
+    /// the state somebody can see. Nothing on the resting card named the one
+    /// thing nobody can guess: that the far stop holds the Mac awake through a
+    /// shut lid. Same length, and now it teaches the card.
+    public static let consequenceOff = "\(lidClosed) keeps your Mac awake with the lid shut."
+    public static let consequenceAwake = "Shutting the lid still sleeps your Mac."
+    public static func consequenceTimed(until time: String) -> String {
+        "Ends at \(time). Then your Mac can sleep again."
+    }
+
+    /// What a press would do, shown on hover and on keyboard focus before
+    /// anybody commits to it. The asymmetry between the two ways out of the
+    /// lid mode — stepping back keeps the Mac awake, the clock running out
+    /// does not — is the thing the old two-switch card could not say.
+    public static let previewToAwake = "Stays awake until you switch it off."
+    public static let previewToOffFromAwake = "Lets your Mac sleep again."
+    public static let previewToOffFromLid = "Ends now. Your Mac can sleep again."
+    public static let previewDropLid = "Drops the lid. Stays awake, with no end time."
+    public static func previewRetryLid(until time: String) -> String {
+        "Asks the helper again. The end time stays \(time)."
+    }
+
+    /// The rail label under the third stop while a request is in the air, and
+    /// after one that was refused or never answered.
+    /// Under the figure. One word, because the figure is the sentence.
+    public static let railLeft = "left"
+
+    public static let railChecking = "Checking…"
+    public static let railNotHeld = "Not held"
+    /// Under the third stop when the hold got through and nothing can vouch
+    /// for it. Not "Not held", which is a claim, and not "Checking…", which
+    /// says somebody is still asking.
+    public static let railCannotTell = "Can't tell"
+
+    /// Said from a second and a half into a first request, not before: most
+    /// answers arrive in under a second, and a warning that flashes and
+    /// vanishes reads as a fault.
+    /// A hold that got through and that nothing can vouch for now.
+    ///
+    /// It says what is not known and what settles it, and it does not tell
+    /// the user the lid is safe. Between the sentence that says the hold
+    /// almost certainly stands and the one that says nothing is held, both of
+    /// which were being shown here and neither of which was knowable.
+    public static let lidCannotTell =
+        "Ledge can't tell whether the lid hold is still standing. "
+            + "Keep the lid open, or press \(lidClosed) again to take it back."
+
+    public static let lidPending =
+        "Waiting for the helper to confirm. Keep the lid open until it does."
 
     /// What the card asks once the lid-closed mode has been chosen.
     ///
@@ -186,8 +282,17 @@ public enum KeepAwakeCopy {
         case .off: nil
         case .unsignedBuild: lidUnsignedBuild
         case .notInstalled: lidNotInstalled
+        case .needsApproval: lidNeedsApproval
+        case .unreachable: lidUnreachable
         case .holding: lidHolding
         case .unconfirmed: lidUnconfirmed
+        // Deliberately not `lidUnconfirmed`. That sentence says the hold
+        // almost certainly still stands, which is true of a hold that was
+        // established and has gone quiet, and false of one that has been
+        // accepted and not yet applied. The first invites you to shut the
+        // lid; the second must not.
+        case .applying: lidPending
+        case .cannotTell: lidCannotTell
         case .refused(let code): lidRefused(code)
         }
     }
@@ -196,14 +301,34 @@ public enum KeepAwakeCopy {
     /// bundle, so this is a fact about the build rather than a failure to fix.
     /// It names the one thing that changes it.
     public static let lidUnsignedBuild =
-        "This build of Ledge isn't signed, and macOS only installs the lid-closed helper "
-            + "from a signed one. A release build can do it."
+        "This build isn't signed, so macOS won't install the helper. A release build can."
 
     /// A one-time setup, named and placed. Nothing about it happens on the
     /// card, so the card says where it does happen.
     public static let lidNotInstalled =
-        "Holding your Mac awake with the lid shut needs a one-time setup. "
-            + "Settings › Keep Awake has it."
+        "Not set up yet. Settings › Keep Awake."
+
+    /// Set up, and waiting for the one thing Ledge cannot do for itself.
+    ///
+    /// Names the pane rather than describing where to find it, because the
+    /// pane has been in three different places across recent macOS versions
+    /// and a path that is wrong is worse than a name that has to be searched
+    /// for. Says what is true now — nothing is being held — so nobody shuts
+    /// their lid on the strength of a setup they have not finished.
+    public static let lidNeedsApproval =
+        "Waiting for you to allow Ledge in Login Items & Extensions, in System "
+            + "Settings. Until then it holds nothing."
+
+    /// Asked for, never answered, and therefore not held.
+    ///
+    /// Deliberately blunt about the consequence. The sentence this used to
+    /// share — "it almost certainly still stands" — is true of a hold that
+    /// was once taken and has gone quiet, and the exact opposite of this one.
+    /// Somebody read it and shut their lid on a Mac nothing was holding.
+    public static let lidUnreachable =
+        "Ledge couldn't reach the helper, so nothing is being held. Shutting "
+            + "the lid will sleep your Mac. Try again, or check Login Items & "
+            + "Extensions."
 
     /// The mode is on and the daemon says so.
     public static let lidHolding = "Staying awake with the lid shut."
@@ -233,7 +358,11 @@ public enum KeepAwakeCopy {
             "The other build of Ledge is holding this Mac awake. End it there, or quit it, "
                 + "and try again."
         case .stale:
-            "The hold lapsed while Ledge wasn't able to renew it. Switch Lid closed on "
+            // Named from the label rather than spelled out, so the mode's
+            // name lives in one place: a sentence telling somebody to press
+            // something that is no longer called that is worse than no
+            // sentence.
+            "The hold lapsed while Ledge wasn't able to renew it. Press \(lidClosed) "
                 + "again to take it back."
         case .busy:
             "The helper has more to answer than it can keep up with. Give it a moment and "
@@ -245,7 +374,7 @@ public enum KeepAwakeCopy {
             "macOS wouldn't change the sleep setting, so nothing changed. Try again."
         case .notHolder:
             "The helper is holding a different session, so this one has nothing to renew. "
-                + "Switch Lid closed on again."
+                + "Press \(lidClosed) again."
         case .invalidArgument:
             // A bug on Ledge's side. Saying so is more use than a vague
             // apology: it tells the user the fault is not theirs, and that
@@ -266,6 +395,25 @@ public enum KeepAwakeCopy {
     /// always sets a length, so this is the belt to that brace.
     public static let lidMenuHeadlineOpenEnded = "Awake with the lid shut"
 
+    /// The menu-bar headline for a hold that is not confirmed.
+    ///
+    /// The flat one claims the lid is covered, which is exactly what has not
+    /// been established — and the menu bar is the only surface somebody sees
+    /// when the lid is already down on an external display. Saying "awake
+    /// with the lid shut" over an unconfirmed hold is the one place in this
+    /// app where an overclaim could cost somebody their work.
+    public static func lidMenuHeadlineUnconfirmed(remaining: String?) -> String {
+        guard let remaining else { return "Awake — checking the lid hold" }
+        return "Awake — checking the lid hold, \(remaining) left"
+    }
+
+    /// The menu-bar headline for a hold nothing can vouch for.
+    ///
+    /// Still an item, because this is the only surface that exists once the
+    /// lid is shut and the person may need to end a hold that is quite
+    /// possibly standing. It does not say the lid is covered.
+    public static let lidMenuHeadlineCannotTell = "Awake — the lid hold can't be checked"
+
     /// The one thing the menu does. Named for the whole act rather than for
     /// the helper: from the menu bar there is no card nearby to make "End"
     /// mean anything in particular.
@@ -276,6 +424,7 @@ public enum KeepAwakeCopy {
         switch state {
         case .unsignedBuild: lidUnsignedBuild
         case .notInstalled: lidNotInstalled
+        case .needsApproval: lidNeedsApproval
         case .installed: "Set up. Keep Awake can hold your Mac awake with the lid shut."
         }
     }
@@ -286,7 +435,9 @@ public enum KeepAwakeCopy {
         "Keep Awake continues if Ledge restarts. "
             + "It ends when you press End, quit Ledge, or restart your Mac."
 
-    public static let settingsSummary = "Keeps your Mac awake for as long as you choose."
+    public static let settingsSummary =
+        "Keeps your Mac awake. \(railAwake) holds it until you switch it off; "
+            + "\(lidClosed) holds it for a length you set, through a shut lid."
 
     // MARK: - Actions
 

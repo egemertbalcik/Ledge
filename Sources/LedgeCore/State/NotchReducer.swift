@@ -56,7 +56,10 @@ public enum NotchReducer {
                 // *hovered* HUD is just as user-driven — the readout is held
                 // open, possibly mid-slider-drag, and yanking it for a peek
                 // breaks the very hold-open promise the hover made.
-                guard !state.isPinned, !state.isHovering else { return [] }
+                // A card holding the notch open is user-driven in the
+                // strongest sense there is — something is running in it — so
+                // a peek may not take the screen from it either.
+                guard !state.isPinned, !state.isHovering, !state.cardHoldsOpen else { return [] }
                 // Replace the HUD; a peek returns to the resting phase anyway, so
                 // the HUD's pending restore is no longer owed.
                 state.suspended = nil
@@ -95,6 +98,9 @@ public enum NotchReducer {
         case .timerFired(.pinRelease):
             // Only meaningful if the card is still pinned and abandoned.
             guard state.phase == .expanded, !state.isHovering else { return [] }
+            // Abandoned, but busy: a camera running in the card is the reason
+            // the pointer is elsewhere. Releasing the hold re-asks this.
+            guard !state.cardHoldsOpen else { return [] }
             return dismiss(&state)
 
         case .timerFired(.hud):
@@ -113,6 +119,21 @@ public enum NotchReducer {
 
         case .dismissed:
             return dismiss(&state)
+
+        case .cardHoldChanged(let holding):
+            state.cardHoldsOpen = holding
+            // A pinned card whose release was already armed must not fire
+            // while the hold stands; the guard below would refuse it anyway,
+            // but a cancelled timer cannot be refused twice.
+            guard !holding else { return [.cancelTimer(.pinRelease)] }
+            // The hold is over. Every exit it swallowed has to be answered
+            // now, or the card sits open with nothing left to close it: the
+            // pointer walked away while the camera was on, and walking away
+            // is what closes a card.
+            if !state.isHovering, state.phase == .expanded || state.phase == .hover {
+                return dismiss(&state)
+            }
+            return []
 
         case .forceCollapse:
             // Keep whether music is playing so the overlay settles back into the
@@ -149,6 +170,9 @@ public enum NotchReducer {
                     : [.startTimer(.hud, 0.8)]
             }
             if isHovering { return [.cancelTimer(.pinRelease)] }
+            // Same hold, on the pinned path: a pinned card with a camera in
+            // it is the one case where the pointer leaving means nothing.
+            if state.cardHoldsOpen { return [] }
             return dismiss(&state)
         }
 
@@ -164,12 +188,29 @@ public enum NotchReducer {
                 // Hovering the readout holds it open so the level can be
                 // adjusted directly with the pointer — it must not vanish or
                 // morph into the card mid-reach.
-                state.suspended = nil
+                //
+                // What it owes back is cleared with it, unless a card is
+                // holding the notch open underneath: that card is still owed,
+                // and forgetting it here retired the readout into an empty
+                // notch and took a running camera with it.
+                if !state.cardHoldsOpen { state.suspended = nil }
                 return [.cancelTimer(.hud)]
             case .hover, .expanded:
                 // Returning to a pinned card cancels its pending auto-release.
                 return [.cancelTimer(.pinRelease)]
             }
+        }
+
+        // A card that is holding the notch keeps it through the pointer
+        // leaving. Where the cursor is is still recorded above, so the
+        // release knows whether to close.
+        //
+        // Only the card's own phases: a readout up over the card still has to
+        // retire on its usual tail, or the pointer leaving would leave the
+        // HUD on screen for as long as the camera ran. It hands the card back
+        // when it goes — see `retireHUD`.
+        if state.cardHoldsOpen, state.phase == .expanded || state.phase == .hover {
+            return []
         }
 
         switch state.phase {
@@ -185,7 +226,12 @@ public enum NotchReducer {
             if state.hudFromCompanion { return retireHUD(&state) }
             // The pointer left an adjustable readout: give it a short tail then
             // let the ordinary timer path put things back.
-            state.suspended = restingPhase(state)
+            //
+            // Except over a card that is holding the notch. Recomputing what
+            // the readout owes back from a pointer that has just left says
+            // "nothing" — so the readout retired into an empty notch and took
+            // a running camera with it. What it owes back is the card.
+            if !state.cardHoldsOpen { state.suspended = restingPhase(state) }
             return [.startTimer(.hud, 0.8)]
         case .expanded:
             // The pointer left, so the card goes. It used to linger on a
@@ -217,21 +263,30 @@ public enum NotchReducer {
         //   which may have flipped while the HUD was up: restoring the
         //   parked value verbatim drew empty companion pills after a track
         //   ended mid-HUD. Recompute instead.
-        let isStale = (restored == .hover && !state.isHovering)
+        // A hovered card that is holding the notch is not stale: the pointer
+        // left on purpose — to the menu bar, with the camera still running —
+        // and the card is what the hold is for.
+        let isStale = (restored == .hover && !state.isHovering && !state.cardHoldsOpen)
             || restored == .peek
             || restored == .companion
             || restored == .idle
         state.phase = isStale ? restingPhase(state) : restored
         // A card restored under a pointer that is somewhere else was already
         // abandoned when the HUD took over — the exit that would have closed
-        // it was swallowed while the readout held the phase. Close it now.
-        if state.phase == .expanded && !state.isHovering {
+        // it was swallowed while the readout held the phase. Close it now,
+        // unless the card is holding on: a volume key pressed while the
+        // self-view is up hands the card back with the camera still on.
+        if state.phase == .expanded && !state.isHovering && !state.cardHoldsOpen {
             return dismiss(&state)
         }
         return []
     }
 
     private static func dismiss(_ state: inout NotchState) -> [NotchEffect] {
+        // The card is going, so whatever it was holding the notch for is over.
+        // Leaving the flag set would hand the hold to the next card, which
+        // never asked for it and has no way to give it back.
+        state.cardHoldsOpen = false
         state.isPinned = false
         state.suspended = nil
         state.hudFromCompanion = false

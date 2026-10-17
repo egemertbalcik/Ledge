@@ -54,3 +54,46 @@ struct MeetingJoinTests {
         #expect(!MeetingJoin.isOffered(startsIn: -30 * hour, endsIn: -6 * hour, hasLink: true))
     }
 }
+
+/// The one rule two layers read: the card draws Join from it, and the shell
+/// reads it for a card that is off screen behind a readout.
+@Suite("Whether a payload offers a join")
+struct EventPayloadJoinTests {
+
+    private func payload(
+        startsIn: TimeInterval = 300,
+        endsIn: TimeInterval? = 3_000,
+        link: String? = "https://zoom.us/j/1",
+        hasEvent: Bool = true
+    ) -> EventPayload {
+        EventPayload(
+            title: "Design review",
+            startsIn: startsIn,
+            endsIn: endsIn,
+            hasEvent: hasEvent,
+            meetingURL: link
+        )
+    }
+
+    @Test("A meeting about to start has a link to join")
+    func offered() {
+        #expect(payload().joinLink?.absoluteString == "https://zoom.us/j/1")
+    }
+
+    @Test("A meeting that has ended does not")
+    func ended() {
+        #expect(payload(startsIn: -4_000, endsIn: -400).joinLink == nil)
+    }
+
+    @Test("A meeting too far off does not")
+    func tooEarly() {
+        #expect(payload(startsIn: 4 * 3_600).joinLink == nil)
+    }
+
+    @Test("Nothing without an event, a link, or a usable one")
+    func unusable() {
+        #expect(payload(hasEvent: false).joinLink == nil)
+        #expect(payload(link: nil).joinLink == nil)
+        #expect(payload(link: "room 2, upstairs").joinLink == nil)
+    }
+}

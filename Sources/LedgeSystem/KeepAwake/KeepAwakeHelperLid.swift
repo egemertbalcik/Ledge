@@ -54,19 +54,34 @@ extension KeepAwakeLidState {
         switch installation {
         case .unsignedBuild: return .unsignedBuild
         case .notInstalled: return .notInstalled
+        case .needsApproval: return .needsApproval
         case .installed: break
         }
 
         switch client {
         case .holding:
             return .holding
-        case .pending, .temporarilyUnavailable:
-            // Both are "the lease is taken and we cannot say the setting is".
-            // `pending` is the daemon having accepted the lease and not yet
-            // confirmed the privileged write; `temporarilyUnavailable` is the
-            // daemon having gone quiet. Neither is a failure and neither is a
-            // confirmed hold, and the card's sentence for that — the Mac is
-            // very probably held, we cannot prove it — is true of both.
+        case .unreachable:
+            // Asked for and never answered. Not `unconfirmed`: that one says
+            // the Mac is very probably held and we cannot prove it, and this
+            // one says it is not held at all. Collapsing them told somebody
+            // their Mac was almost certainly staying awake while nothing was
+            // keeping it awake, and they shut the lid on it.
+            return .unreachable
+        case .pending:
+            // Accepted, not applied. The daemon answers once its lease is on
+            // disk and before it runs the privileged write, so this is a
+            // promise rather than a hold — and the sentence that goes with it
+            // says to keep the lid open a moment longer, where
+            // `unconfirmed`'s says the opposite.
+            return .applying
+        case .unknownWhetherHeld:
+            return .cannotTell
+        case .temporarilyUnavailable:
+            // The daemon has gone quiet over a hold it once confirmed.
+            // Not a failure: it drops a hold on its own lease, not on our
+            // inability to reach it, so "very probably held, we cannot prove
+            // it" is the honest reading.
             return .unconfirmed
         case .refused(let code):
             // `ok` never reaches here — the client turns it into `.holding` —
@@ -130,7 +145,19 @@ public actor KeepAwakeHelperLid: KeepAwakeLidHolding {
         await client.end(session: session)
     }
 
+    /// Each installation state keeps its own name.
+    ///
+    /// This collapsed everything that was not `unsignedBuild` into
+    /// `notInstalled`, which quietly undid the distinction one layer up: the
+    /// card told somebody who had just approved the helper to go and set it
+    /// up, while the settings pane — which reads the installation directly —
+    /// said it was waiting for them. Two surfaces disagreeing, and the card
+    /// pointing at the one that contradicted it.
     private static func reading(_ installation: KeepAwakeHelperInstallation) -> KeepAwakeLidState {
-        installation == .unsignedBuild ? .unsignedBuild : .notInstalled
+        switch installation {
+        case .unsignedBuild: .unsignedBuild
+        case .needsApproval: .needsApproval
+        case .notInstalled, .installed: .notInstalled
+        }
     }
 }

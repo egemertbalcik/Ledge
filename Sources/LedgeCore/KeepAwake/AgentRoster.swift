@@ -60,6 +60,41 @@ public struct AgentRoster: Sendable, Equatable {
         "com.exafunction.windsurf",
     ]
 
+    /// What to call one of these apps when it is not running.
+    ///
+    /// A bundle id's last component is not a name: the shipped list shows as
+    /// "230313mzl4w4u92" (Cursor), "claudefordesktop" (Claude), "chat"
+    /// (ChatGPT) and "Browser" (Arc) on any Mac where those are closed —
+    /// which is most Macs, most of the time. Somebody tidying this list
+    /// cannot tell what they are about to remove.
+    ///
+    /// Only the shipped ids are named here. An app the person added is one
+    /// they chose from a list of running apps, so macOS has already told us
+    /// its name; if it is closed and unknown, the id is shown whole rather
+    /// than chopped into a fragment that looks like a name and is not.
+    public static func shippedName(of bundleID: String) -> String? {
+        switch bundleID {
+        case "com.apple.Terminal": "Terminal"
+        case "com.googlecode.iterm2": "iTerm2"
+        case "com.mitchellh.ghostty": "Ghostty"
+        case "dev.warp.Warp-Stable": "Warp"
+        case "net.kovidgoyal.kitty": "kitty"
+        case "com.github.wez.wezterm": "WezTerm"
+        case "org.alacritty": "Alacritty"
+        case "com.microsoft.VSCode": "Visual Studio Code"
+        case "com.todesktop.230313mzl4w4u92": "Cursor"
+        case "dev.zed.Zed": "Zed"
+        case "com.anthropic.claudefordesktop": "Claude"
+        case "com.openai.chat": "ChatGPT"
+        case "com.google.Chrome": "Google Chrome"
+        case "org.chromium.Chromium": "Chromium"
+        case "company.thebrowser.Browser": "Arc"
+        case "com.docker.docker": "Docker"
+        case "com.exafunction.windsurf": "Windsurf"
+        default: nil
+        }
+    }
+
     /// Whether this app is on the roster.
     public func carries(_ bundleID: String) -> Bool {
         bundleIDs.contains(bundleID)

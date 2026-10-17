@@ -276,3 +276,69 @@ private final class Mutable: @unchecked Sendable {
         set { lock.withLock { stored = newValue } }
     }
 }
+
+/// The states that are a sentence rather than a hold have to survive the trip
+/// to whoever shows them.
+///
+/// `needsApproval` was computed correctly and then collapsed into
+/// `notInstalled` one layer down, in two places. The card told somebody who
+/// had just approved the helper to go and set it up, while the settings pane —
+/// which reads the installation directly — said it was waiting for them. Two
+/// surfaces disagreeing, with the card pointing at the one that contradicted
+/// it. The tests of the day passed because they called the mapping directly
+/// and never went through `state()`.
+@Suite("Every installation state reaches the card")
+struct KeepAwakeLidInstallationReachesTests {
+
+    private final class DeadLink: @unchecked Sendable, KeepAwakeHelperLink {
+        func status() async throws -> KeepAwakeHelperStatus { throw KeepAwakeXPCUnavailable() }
+        func hold(session: String, generation: Int, until deadline: Date?,
+                  leaseSeconds: Double) async throws -> KeepAwakeHelperCode {
+            throw KeepAwakeXPCUnavailable()
+        }
+        func release(session: String, generation: Int) async throws -> KeepAwakeHelperCode {
+            throw KeepAwakeXPCUnavailable()
+        }
+        func setLowPowerMode(_ on: Bool, session: String,
+                             generation: Int) async throws -> KeepAwakeHelperCode {
+            throw KeepAwakeXPCUnavailable()
+        }
+    }
+
+    private func lid(_ installation: KeepAwakeHelperInstallation) -> KeepAwakeHelperLid {
+        KeepAwakeHelperLid(client: KeepAwakeHelperClient(link: DeadLink()),
+                           installation: { installation })
+    }
+
+    @Test("A helper waiting for approval says so, rather than saying it is missing")
+    func approvalSurvivesTheReading() async {
+        #expect(await lid(.needsApproval).state() == .needsApproval)
+    }
+
+    @Test("Reaching for the mode while it waits says what is actually wrong")
+    func armingSaysWhatIsWrong() async {
+        let answer = await lid(.needsApproval)
+            .arm(session: "s1", until: Date(timeIntervalSince1970: 9_000))
+        #expect(answer == .needsApproval)
+    }
+
+    @Test("The stand-in for a build with no link keeps the reason too")
+    func standInKeepsTheReason() async {
+        #expect(await KeepAwakeLidUnavailable(.needsApproval).state() == .needsApproval)
+        #expect(await KeepAwakeLidUnavailable(.unsignedBuild).state() == .unsignedBuild)
+        #expect(await KeepAwakeLidUnavailable(.notInstalled).state() == .notInstalled)
+    }
+
+    /// The general rule, so the next state added cannot be collapsed quietly:
+    /// no two installation states may arrive as the same thing.
+    @Test("No two installation states arrive looking alike")
+    func eachStateArrivesDistinct() async {
+        var seen: [KeepAwakeLidState] = []
+        for installation: KeepAwakeHelperInstallation in [.unsignedBuild, .notInstalled,
+                                                          .needsApproval] {
+            seen.append(await lid(installation).state())
+        }
+        #expect(Set(seen.map(\.name)).count == seen.count,
+                "two installation states collapsed into one: \(seen.map(\.name))")
+    }
+}

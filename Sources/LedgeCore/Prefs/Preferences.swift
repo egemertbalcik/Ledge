@@ -221,7 +221,13 @@ public enum Prefs {
     /// existing install behaves exactly as it did before.
 
     // General, cont.
-    /// False until the first-run window has been dismissed.
+    /// False until the tour has been answered.
+    ///
+    /// Done and the close button are the same answer: closing a tour is a
+    /// decision, and bringing it back on every launch until somebody reaches
+    /// the last step is nagging. It stays false only while a first tour is
+    /// unfinished because *Ledge* stopped during it — a crash, a force quit,
+    /// or Quit Ledge from the terminal banner.
     public static let hasCompletedOnboarding = PrefKey<Bool>("general.onboardingDone", default: false)
 
     /// False until Ledge has shown this user *something* it can be steered
@@ -230,10 +236,29 @@ public enum Prefs {
     /// from a launch that failed; the first one always opens one.
     public static let hasBeenIntroduced = PrefKey<Bool>("general.introduced", default: false)
 
-    /// The tour page the user last reached. Granting Full Disk Access makes
-    /// macOS quit the app outright, so a tour can be killed halfway through
-    /// by doing what the tour asked; without this it began again at page one.
+    /// The tour step the user last reached, as `TourStep.rawValue`.
+    ///
+    /// Written as you go on a first visit, and read only while
+    /// `hasCompletedOnboarding` is false — which now means Ledge itself
+    /// stopped during the tour rather than that somebody closed it. A second
+    /// visit writes nothing: it is a reference, and a page number from a
+    /// lookup would bring somebody back to step three the next time the app
+    /// was force-quit.
+    ///
+    /// It used to exist for Full Disk Access, which macOS answers by quitting
+    /// the app on the spot. The tour has not offered that since the Focus
+    /// folder handover replaced it.
     public static let tourPage = PrefKey<Double>("general.tourPage", default: 0)
+
+    /// Whether macOS has already shown its one-time Accessibility message for
+    /// this copy of Ledge.
+    ///
+    /// Written down because macOS tells an app nothing about it: it appears at
+    /// most once in the app's life, and it is what puts Ledge in the
+    /// Accessibility list at all. The guide mentions it only while it can
+    /// still appear — a sentence about a dialog that is not there sends
+    /// somebody looking for one.
+    public static let accessibilityWasAsked = PrefKey<Bool>("general.accessibilityAsked", default: false)
 
     /// A security-scoped bookmark to the Focus database folder, base64 encoded.
     ///
@@ -418,6 +443,7 @@ public final class Preferences {
     public var hasCompletedOnboarding: Bool { didSet { persist(hasCompletedOnboarding, Prefs.hasCompletedOnboarding) } }
     public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
     public var tourPage: Double { didSet { persist(tourPage, Prefs.tourPage) } }
+    public var accessibilityWasAsked: Bool { didSet { persist(accessibilityWasAsked, Prefs.accessibilityWasAsked) } }
     public var focusFolderBookmark: String { didSet { persist(focusFolderBookmark, Prefs.focusFolderBookmark) } }
     public var debugTint: Bool { didSet { persist(debugTint, Prefs.debugTint) } }
 
@@ -479,6 +505,7 @@ public final class Preferences {
         hasCompletedOnboarding = store.value(for: Prefs.hasCompletedOnboarding)
         hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
         tourPage = store.value(for: Prefs.tourPage)
+        accessibilityWasAsked = store.value(for: Prefs.accessibilityWasAsked)
         focusFolderBookmark = store.value(for: Prefs.focusFolderBookmark)
         debugTint = store.value(for: Prefs.debugTint)
     }
@@ -599,6 +626,15 @@ public final class Preferences {
         if disabledProviderIDs.contains(id) { return false }
         if enabledProviderIDs.contains(id) { return true }
         return defaultEnabled
+    }
+
+    /// Whether this card is on because somebody switched it on.
+    ///
+    /// A card that is merely on by default has nothing recorded here — see
+    /// `ProviderDescriptor.wasSwitchedOnByHand` for why the difference is
+    /// worth keeping.
+    public func providerWasSwitchedOnByHand(_ id: String) -> Bool {
+        enabledProviderIDs.contains(id)
     }
 
     public func setProvider(_ id: String, enabled: Bool) {

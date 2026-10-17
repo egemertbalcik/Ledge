@@ -502,7 +502,15 @@ public struct DevicePayload: Equatable, Sendable, Codable {
     public var symbolName: String
     /// 0...1 per component. Empty when the device reports no battery.
     public var batteryLevels: [String: Double]
-    public var isConnected: Bool
+    /// Whether the device is attached to this Mac, when that is known.
+    ///
+    /// Nil is a real state: a proximity advertisement proves a pair of
+    /// earbuds is in range and says nothing about whether they are connected
+    /// to anything. The card used to print "Connected" over exactly that
+    /// evidence, and printing "Disconnected" instead would be the same
+    /// invention with the opposite sign. When nobody knows, the card says
+    /// nothing.
+    public var isConnected: Bool?
     /// Apple's own gear keeps the tinted icon; everything else is drawn white.
     /// A third-party mouse rendered in Apple-blue reads as a system component
     /// that it is not.
@@ -535,7 +543,7 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         name: String,
         symbolName: String = "headphones",
         batteryLevels: [String: Double] = [:],
-        isConnected: Bool = true,
+        isConnected: Bool? = true,
         isApple: Bool = false,
         statusText: String? = nil,
         statusStyle: StatusStyle = .plain
@@ -558,15 +566,46 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         batteryLevels.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
     }
 
+    /// Named here because both sides of the round trip are written by hand.
+    /// A property added above and forgotten here is a property that stops
+    /// being stored — the decoder has always been hand-written, and now the
+    /// encoder is too.
+    private enum CodingKeys: String, CodingKey {
+        case name, symbolName, batteryLevels, isConnected, isApple, statusText, statusStyle
+    }
+
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
         symbolName = try c.decodeIfPresent(String.self, forKey: .symbolName) ?? "headphones"
         batteryLevels = try c.decodeIfPresent([String: Double].self, forKey: .batteryLevels) ?? [:]
-        isConnected = try c.decodeIfPresent(Bool.self, forKey: .isConnected) ?? true
+        // Three cases, not two. A missing key is a payload from before the
+        // distinction existed, written by something that knew — connected.
+        // A key that is explicitly null is this type saying nobody knows, and
+        // it has to survive the round trip or an unknown becomes a claim.
+        if c.contains(.isConnected) {
+            isConnected = try c.decodeIfPresent(Bool.self, forKey: .isConnected)
+        } else {
+            isConnected = true
+        }
         isApple = try c.decodeIfPresent(Bool.self, forKey: .isApple) ?? false
         statusText = try c.decodeIfPresent(String.self, forKey: .statusText)
         statusStyle = try c.decodeIfPresent(StatusStyle.self, forKey: .statusStyle) ?? .plain
+    }
+
+    /// Written by hand for one reason: `isConnected` is encoded even when it
+    /// is nil. The synthesized encoder omits a nil optional, and an omitted
+    /// key is how a payload from before this was optional says "connected" —
+    /// so an unknown connection came back as a claim that it was attached.
+    public func encode(to encoder: any Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(symbolName, forKey: .symbolName)
+        try c.encode(batteryLevels, forKey: .batteryLevels)
+        try c.encode(isConnected, forKey: .isConnected)
+        try c.encode(isApple, forKey: .isApple)
+        try c.encodeIfPresent(statusText, forKey: .statusText)
+        try c.encode(statusStyle, forKey: .statusStyle)
     }
 }
 
@@ -941,10 +980,25 @@ public struct LevelsPayload: Equatable, Sendable, Codable {
     /// and a card that believed it drew a bar at 60% over silence.
     public var isMuted: Bool
 
-    public init(volume: Double = 0.5, brightness: Double = 0.5, isMuted: Bool = false) {
+    /// Every level there is, as rows.
+    ///
+    /// The card used to ignore this payload entirely and read devices through
+    /// its actions, which is why nothing could photograph it — the gallery
+    /// supplied no hardware and every picture of the card showed two empty
+    /// bars — and why the card, the hover panel and the ears were free to
+    /// disagree about what exists.
+    ///
+    /// Not `Codable`: a `LevelRow` is a reading of this Mac at this moment and
+    /// there is nothing to persist. The two scalars above stay for the ears
+    /// and the satellite, which want a number and not a list.
+    public var rows: [LevelRow] = []
+
+    public init(volume: Double = 0.5, brightness: Double = 0.5, isMuted: Bool = false,
+                rows: [LevelRow] = []) {
         self.volume = volume
         self.brightness = brightness
         self.isMuted = isMuted
+        self.rows = rows
     }
 
     /// What the sound bar should actually show: nothing while muted.

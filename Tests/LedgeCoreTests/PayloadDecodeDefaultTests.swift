@@ -145,3 +145,39 @@ struct MediaOwnerTests {
     }
 }
 
+
+/// Whether a device is attached to this Mac has three states, and all three
+/// have to survive being written down.
+@Suite("A device payload's connection")
+struct DeviceConnectionCodingTests {
+
+    private func roundTrip(_ payload: DevicePayload) throws -> DevicePayload {
+        let data = try JSONEncoder().encode(payload)
+        return try JSONDecoder().decode(DevicePayload.self, from: data)
+    }
+
+    @Test("Connected and disconnected come back as themselves")
+    func knownStates() throws {
+        #expect(try roundTrip(DevicePayload(name: "Pods", isConnected: true)).isConnected == true)
+        #expect(try roundTrip(DevicePayload(name: "Pods", isConnected: false)).isConnected == false)
+    }
+
+    @Test("Unknown comes back unknown")
+    func unknownSurvives() throws {
+        // The synthesized encoder omits a nil optional, and an omitted key is
+        // how a payload from before this was optional says "connected" — so
+        // an unknown connection used to come back as a claim.
+        let payload = try roundTrip(DevicePayload(name: "Pods", isConnected: nil))
+        #expect(payload.isConnected == nil)
+    }
+
+    @Test("A payload written before the distinction existed is connected")
+    func legacyAbsenceIsConnected() throws {
+        let json = #"{"name":"Pods","symbolName":"airpods","batteryLevels":{},"isApple":true}"#
+        let payload = try JSONDecoder().decode(DevicePayload.self, from: Data(json.utf8))
+        #expect(
+            payload.isConnected == true,
+            "an older payload was written by something that knew; its silence is not doubt"
+        )
+    }
+}

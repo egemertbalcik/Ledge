@@ -27,6 +27,15 @@ public struct AirPodsProximity: Equatable, Sendable {
     /// event carrying the other set's battery levels.
     public var peripheralID: UUID?
 
+    /// How strong the advertisement was, stamped by the scanner.
+    ///
+    /// Carried rather than filtered on the way in, because strength answers a
+    /// different question from the rest of this message: the battery figures
+    /// are just as true from across the room, and only the decision to put a
+    /// card on screen depends on being near. Deliberately *not* part of
+    /// equality — see `==`.
+    public var rssi: Int?
+
     public init(
         model: UInt16,
         leftBattery: Double?,
@@ -47,6 +56,26 @@ public struct AirPodsProximity: Equatable, Sendable {
         self.lidCounter = lidCounter
     }
 
+    /// Two readings are the same reading when they say the same thing.
+    ///
+    /// Signal strength is excluded on purpose. It jitters by a few dB between
+    /// advertisements that are otherwise identical, and the scanner holds its
+    /// listening window open on *change*: counting a strength wobble as news
+    /// would hold the most expensive scan mode open for as long as a set of
+    /// AirPods sat on the desk, which is the exact failure the window was
+    /// written to end.
+    public static func == (a: AirPodsProximity, b: AirPodsProximity) -> Bool {
+        a.model == b.model
+            && a.leftBattery == b.leftBattery
+            && a.rightBattery == b.rightBattery
+            && a.caseBattery == b.caseBattery
+            && a.isChargingLeft == b.isChargingLeft
+            && a.isChargingRight == b.isChargingRight
+            && a.isChargingCase == b.isChargingCase
+            && a.lidCounter == b.lidCounter
+            && a.peripheralID == b.peripheralID
+    }
+
     /// A human name for the model, best-effort.
     public var name: String {
         switch model {
@@ -63,13 +92,33 @@ public struct AirPodsProximity: Equatable, Sendable {
     }
 
     /// The SF Symbol matching the model, for the fallback glyph.
-    public var symbolName: String {
+    public var symbolName: String { AirPodsProximity.symbolName(forModel: model) }
+
+    /// The glyph for a model id on its own, so a *paired* device recognised by
+    /// its reported product id gets the icon its own advertisement would have
+    /// given it. See `PairedDevice.advertisedModel` for why those two numbers
+    /// are the same number.
+    public static func symbolName(forModel model: UInt16) -> String {
         switch model {
         case 0x0A20, 0x1F20: return "airpodsmax"
         case 0x0E20, 0x1420, 0x2420, 0x2720: return "airpods.pro"
         default: return "airpods.gen3"
         }
     }
+
+    /// Whether this is a model id Apple is known to ship.
+    ///
+    /// Worth testing because the catalogue filled up with records for models
+    /// like `0xBA8F` and `0xBA2F` — numbers no AirPods has ever advertised.
+    /// Something else on the air decoded far enough to look like a proximity
+    /// message, and every one of those misreads became a permanent device.
+    public static func isKnownModel(_ model: UInt16) -> Bool { knownModels.contains(model) }
+
+    private static let knownModels: Set<UInt16> = [
+        0x0220, 0x0F20, 0x1320, 0x1920, 0x1B20,
+        0x0E20, 0x1420, 0x2420, 0x2720,
+        0x0A20, 0x1F20,
+    ]
 
     /// Battery levels keyed the way `DevicePayload` renders them. Absent cells are
     /// dropped rather than shown as empty.
@@ -94,6 +143,11 @@ public enum AirPodsProximityDecoder {
     /// Apple's Bluetooth SIG company identifier.
     public static let appleCompanyID: UInt16 = 0x004C
 
+    /// How many payload bytes this decoder reads: prefix, two of model,
+    /// status, pods, charge/case, lid. A record declaring less than this is
+    /// not the message it claims to be.
+    static let fieldsRead = 7
+
     public static func decode(manufacturerData data: Data) -> AirPodsProximity? {
         let bytes = [UInt8](data)
         // Company id (little-endian) + at least the plaintext prefix we read.
@@ -104,6 +158,20 @@ public enum AirPodsProximityDecoder {
         // Skip the company id; `p[0]` is now the message type.
         let p = Array(bytes[2...])
         guard p.count >= 9, p[0] == 0x07 else { return nil }
+
+        // The record says how long it is, and that claim is checked against
+        // what actually arrived. Apple's own parser does this and Ledge did
+        // not, so a truncated or mangled record that happened to begin
+        // `07` was read as a complete one — and every field after the break
+        // was whatever the next record, or the end of the buffer, held. Those
+        // are the misreads that filled the catalogue with models no AirPods
+        // has ever advertised.
+        //
+        // Two separate claims, both required: the payload must be long enough
+        // to hold the seven bytes read below, and the data must be long
+        // enough to hold the payload the record declares.
+        let declared = Int(p[1])
+        guard declared >= Self.fieldsRead, p.count >= 2 + declared else { return nil }
 
         let model = (UInt16(p[3]) << 8) | UInt16(p[4])
 

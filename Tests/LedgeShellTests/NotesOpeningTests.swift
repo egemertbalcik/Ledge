@@ -22,7 +22,7 @@ struct NotesOpeningTests {
     func stopDuringLoad() async {
         let request = NotesOpeningRequest()
         let gate = Gate()
-        var oldWork: Task<Void, Never>?
+        var oldWork: Task<NotesOpeningRequest.Outcome, Never>?
         var delivered = false
         await withCheckedContinuation { entered in
             gate.started = entered
@@ -38,7 +38,7 @@ struct NotesOpeningTests {
     func newerWins() async {
         let request = NotesOpeningRequest()
         let gate = Gate()
-        var oldWork: Task<Void, Never>?
+        var oldWork: Task<NotesOpeningRequest.Outcome, Never>?
         var delivered: [String] = []
         await withCheckedContinuation { entered in
             gate.started = entered

@@ -133,6 +133,7 @@ public final class LedgePanelController {
     private let shelfActions: ShelfActions
     private let notesActions: NotesActions
     private let levelsActions: LevelsActions
+    private let selfViewActions: SelfViewActions
     private let onDropFiles: ([URL]) -> Bool
     private let onHUDAdjust: (HUDReadout.Kind, Double) -> Void
     private let onHUDAdjustDisplay: (UInt32, Double) -> Void
@@ -161,6 +162,7 @@ public final class LedgePanelController {
         shelfActions: ShelfActions = ShelfActions(),
         notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
+        selfViewActions: SelfViewActions = SelfViewActions(),
         onDropFiles: @escaping ([URL]) -> Bool = { _ in false },
         onHUDAdjust: @escaping (HUDReadout.Kind, Double) -> Void = { _, _ in },
         onHUDAdjustDisplay: @escaping (UInt32, Double) -> Void = { _, _ in },
@@ -175,6 +177,7 @@ public final class LedgePanelController {
         self.shelfActions = shelfActions
         self.notesActions = notesActions
         self.levelsActions = levelsActions
+        self.selfViewActions = selfViewActions
         self.onDropFiles = onDropFiles
         self.onHUDAdjust = onHUDAdjust
         self.onHUDAdjustDisplay = onHUDAdjustDisplay
@@ -212,6 +215,7 @@ public final class LedgePanelController {
             shelfActions: shelfActions,
             notesActions: notesActions,
             levelsActions: levelsActions,
+            selfViewActions: selfViewActions,
             onDropFiles: onDropFiles,
             onHUDAdjust: onHUDAdjust,
             onHUDAdjustDisplay: onHUDAdjustDisplay,

@@ -35,16 +35,30 @@ public struct BatteryReading: Hashable, Sendable, Codable {
     public var observedAt: Date
     public var reliability: ReadingReliability
 
+    /// Where this reading came from, when that is not the record's own kind
+    /// of identity.
+    ///
+    /// How long a reading describes *now* follows the thing that reported it,
+    /// not the key the record happens to be filed under. An advertisement is
+    /// stale after five minutes of silence whichever record it was attached
+    /// to — and proximity readings are now attached to the paired device's
+    /// own record, which is re-read every ten minutes and allowed thirty.
+    /// Without this, one advertisement and then silence still read as current
+    /// half an hour later.
+    public var origin: DeviceIdentity.Source?
+
     public init(
         component: BatteryComponent,
         level: Double,
         charging: ChargingState = .unknown,
         observedAt: Date,
-        reliability: ReadingReliability = .fresh
+        reliability: ReadingReliability = .fresh,
+        origin: DeviceIdentity.Source? = nil
     ) {
         self.component = component
         self.charging = charging
         self.observedAt = observedAt
+        self.origin = origin
 
         // A level that is not a number, or outside the only range a fraction
         // can occupy, is a broken reading — not a reading to be clamped into
@@ -206,6 +220,26 @@ public struct DeviceIdentity: Hashable, Sendable, Codable {
         case proximityName
         /// This Mac.
         case thisMac
+
+        /// How long a reading from this kind of source describes *now*.
+        ///
+        /// Derived rather than stamped, so there is no timer anywhere
+        /// deciding that something has gone stale — the question is only ever
+        /// asked when somebody looks, and the answer follows the clock.
+        ///
+        /// The intervals follow how often each source speaks at all. A
+        /// duty-cycled advertisement arrives within seconds when the device
+        /// is present, so five minutes of silence is already meaningful. The
+        /// paired device list is re-read every ten minutes, so thirty is the
+        /// first point at which silence means something. This Mac reports on
+        /// change and is never absent while its provider runs.
+        public var freshnessInterval: TimeInterval {
+            switch self {
+            case .peripheralUUID, .proximityName: 5 * 60
+            case .bluetoothAddress: 30 * 60
+            case .thisMac: 15 * 60
+            }
+        }
     }
 
     public var source: Source
@@ -247,15 +281,19 @@ public struct DeviceIdentity: Hashable, Sendable, Codable {
     /// Between a bounded wrong answer and unbounded growth, this is the
     /// bounded one.
     ///
-    /// Nor is the proximity record related to the same earbuds' entry from the
-    /// paired-device list: there is no trustworthy identifier linking the two,
-    /// and matching on the display name would be exactly the mistake that
-    /// makes two identical sets one device. Both records stay; the *alert* is
-    /// deduplicated instead — see `BatteryAlertEngine.withoutDuplicates`.
+    /// **Both problems are avoided now rather than solved here, and nothing
+    /// in the app reaches this path any more.** No source produces a proximity
+    /// identity: an advertisement is matched to a *paired* device by its model
+    /// id — the honest relation between the two, see
+    /// `PairedDevice.advertisedModel` — and its readings attach to that
+    /// device's own record. An advertisement matching no paired device, or
+    /// more than one, is not recorded at all, so neither a parallel record nor
+    /// a same-model collision can arise from one.
     ///
-    /// Fixing either properly needs evidence this code cannot get: hardware
-    /// validation with two same-model sets, and an identifier Apple does not
-    /// publish. Do not invent one.
+    /// What stays true is why the display name was never the answer: it makes
+    /// two identical sets one device, and a rename a new one. The code is kept
+    /// for identities written before that rule — they are read back, swept,
+    /// and gone.
     public func canonical(hint: String? = nil, name: String) -> DeviceIdentity {
         switch source {
         case .peripheralUUID:
@@ -311,13 +349,7 @@ public struct DeviceIdentity: Hashable, Sendable, Codable {
     /// device list is re-read every ten minutes, so thirty is the first point
     /// at which silence means something. This Mac reports on change and is
     /// never absent while its provider runs.
-    public var freshnessInterval: TimeInterval {
-        switch source {
-        case .peripheralUUID, .proximityName: 5 * 60
-        case .bluetoothAddress: 30 * 60
-        case .thisMac: 15 * 60
-        }
-    }
+    public var freshnessInterval: TimeInterval { source.freshnessInterval }
 
     /// Whether this source reports only when something changes, rather than
     /// repeating itself on a cadence.

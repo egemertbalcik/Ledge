@@ -118,6 +118,16 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// read, found its guards intact and acquired the old session anyway.
     private var commandEpoch = 0
 
+    /// Whether a Start has been admitted and is still being written.
+    ///
+    /// The state is still `ready` while that write is out — the provider was
+    /// Ready before it and will be Running after — so anything asking "is
+    /// anything using the helper" has to ask this too. Taking the helper out
+    /// in that window gives somebody a session that starts and then cannot
+    /// be held through a shut lid, which is the one promise this feature
+    /// makes.
+    public var isStarting: Bool { pendingStart != nil }
+
     private var pendingStart: Int?
     /// The session a pending Start is for, so an End arriving while it is
     /// still being written knows what it is cancelling.
@@ -162,6 +172,16 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// An end that is released but not recorded. The card says so.
     private var endUnrecorded = false
     private var retryWork: [DispatchWorkItem] = []
+
+    /// Which round of retries is the live one. The work items hold the
+    /// provider, so the last of a round releases them — but only if it is
+    /// still the round that was scheduled, or a round queued behind it would
+    /// be cancelled by its predecessor.
+    private var retryGeneration = 0
+
+    /// Keeps the provider alive while a record is still trying to reach the
+    /// disk, and nothing else needs it. Dropped the moment the retries are.
+    private var retryAnchor: KeepAwakeProvider?
 
     // MARK: - Timers
 
@@ -271,6 +291,15 @@ public final class KeepAwakeProvider: ActivityProvider {
                     self.track { await appNap.restoreOutstanding() }
                 }
                 await self.recoverFromJournal(generation: generation)
+                guard self.streamGeneration == generation else { return }
+                // Ask what the lid-closed mode can do *before* anybody reaches
+                // for it. This was only ever read while a lid session ran or
+                // just after one ended, so the state stayed at its initial
+                // `.notInstalled` until a session had been run — and a session
+                // could not be run, because the card said it was not set up.
+                // A helper that was installed, approved and running as root
+                // was reported as missing, in a loop with no way out of it.
+                await self.refreshLid()
                 guard self.streamGeneration == generation else { return }
                 self.publish()
             }
@@ -463,6 +492,198 @@ public final class KeepAwakeProvider: ActivityProvider {
         return true
     }
 
+    // MARK: - Changing mode
+
+    /// What became of a request to swap one kind of hold for the other.
+    public enum ModeChange: Equatable, Sendable {
+        case changed
+        /// Nothing was running, so there was nothing to change. The caller
+        /// should start a session instead.
+        case nothingRunning
+        /// Already the kind that was asked for.
+        case alreadyThere
+        /// The replacement could not be written down, and the hold that was
+        /// running is still running. Nothing was lost.
+        case refused
+    }
+
+    /// Swaps the running session for one of the other kind, without ever
+    /// letting go of the Mac.
+    ///
+    /// The shell used to do this with `end` then `begin`, which is wrong in
+    /// two ways that a comment calling the gap "a few milliseconds" did not
+    /// cover. `end` releases the assertion synchronously and *then* waits on
+    /// the disk, so the Mac is unprotected for however long the disk takes —
+    /// and if the replacement is refused, both the lid mode and the ordinary
+    /// hold are gone, while the card says "nothing changed".
+    ///
+    /// Here the assertion is never released: `acquire` on a held assertion
+    /// re-arms it rather than taking a second one, so the hold is continuous
+    /// across the swap by construction. The disk is asked *before* anything is
+    /// given up, and a refusal leaves the session that was running exactly
+    /// where it was.
+    ///
+    /// - Parameter minutes: the length for a lid-closed hold, which always has
+    ///   one. Nil swaps the other way, to a plain hold that runs until it is
+    ///   switched off.
+    @discardableResult
+    public func changeMode(toLidClosed minutes: Int?) async -> ModeChange {
+        guard case .running(let old) = state else { return .nothingRunning }
+        // One at a time. Two overlapping changes both wrote, both returned
+        // refused, and left the journal holding a session the provider was
+        // not running — which the next launch would then resume. Serialising
+        // is enough: the second press is a press at a card that has not
+        // finished answering the first.
+        guard pendingStart == nil else { return .refused }
+        let wantsLid = minutes != nil
+        // Plain to plain is the only no-op. Lid to lid with a different length
+        // is a real change — it is how the length question re-runs — and
+        // refusing it left the second answer going nowhere, which is the same
+        // shape of dead form this operation exists to end.
+        guard wantsLid || old.lidHoldRequested else { return .alreadyThere }
+        guard let boot = bootID else { return .refused }
+        guard hasRoomForAnotherSession else {
+            Self.log.error("keep awake: too many sessions are still waiting to be written down")
+            problem = .tooManyUnsaved
+            publish()
+            return .refused
+        }
+
+        // The same hold, described differently — so it keeps the moment it
+        // started. Restarting the clock would tell somebody who had been
+        // awake for three hours that they had been awake for none.
+        let replacement: KeepAwakeSession
+        if let minutes {
+            let total = TimeInterval(KeepAwakeReducer.clamp(minutes: minutes) * 60)
+            replacement = KeepAwakeSession(
+                id: makeID(), startedAt: old.startedAt,
+                deadline: now().addingTimeInterval(total), total: total,
+                bootID: boot, lidHoldRequested: true
+            )
+        } else {
+            replacement = KeepAwakeSession(
+                id: makeID(), startedAt: old.startedAt,
+                deadline: nil, total: 0, bootID: boot, lidHoldRequested: false
+            )
+        }
+
+        commandEpoch += 1
+        let issued = commandEpoch
+        startTokens += 1
+        let token = startTokens
+        let era = lifecycle
+        pendingStart = token
+        pendingSession = replacement
+
+        // Asked before anything is given up. The record that lands replaces
+        // the old one, so there is never a moment where the disk holds two
+        // running sessions or none.
+        let wrote = await writeStart(KeepAwakeRecord(running: replacement))
+
+        // An End that arrived while this write was in the air must win: the
+        // user pressed Off, and a replacement landing afterwards would undo
+        // it. `end` cancels the start in flight, which takes the token away,
+        // so the token is the whole check — a command-generation test beside
+        // it was a line no mutation could kill.
+        guard lifecycle == era, pendingStart == token else {
+            // Whatever reached the disk has to be taken back, or the journal
+            // is left holding a session nobody is running and the next launch
+            // resumes it.
+            if wrote { await abandonStart(replacement) }
+            return .refused
+        }
+        pendingStart = nil
+        pendingSession = nil
+
+        guard wrote else {
+            // The hold that was running is untouched, which is the whole point
+            // of asking the disk first — but its outstanding work is not.
+            // Bumping the command generation to invalidate the old session's
+            // arm was right while the change was going to happen and wrong
+            // once it is not, and the answer that arm was waiting on then
+            // reached nobody: the daemon held the lid, the card said Checking
+            // for ever, and the retry was disabled because a request was
+            // still notionally in the air.
+            armLid(for: old)
+            problem = .startNotSaved
+            publish()
+            return .refused
+        }
+
+        // The lid daemon's hold belongs to the session that asked for it, so
+        // it goes with that session — before the new one asks for its own, so
+        // the two cannot both own a claim.
+        releaseLidHold()
+
+        // Re-arms rather than taking a second one, because it is still held —
+        // so a refusal here means it was *not* held, and the Mac has not been
+        // protected since before this call. Committing anyway published a card
+        // reading On over a Mac that was free to sleep, with the old session's
+        // backstop still the one in force. Publishing a problem does not make
+        // a failed transition a successful one.
+        guard acquire(for: replacement) else {
+            // Everything goes, not just the record. A re-arm can be refused
+            // while the old assertion is still held — the two are separate
+            // calls to IOKit and only the second one failed — so leaving it
+            // behind put the card in Ready over a Mac that was still being
+            // kept awake by an assertion nothing on the card knew about.
+            // `end` then found no session and released nothing, and the Mac
+            // stayed awake until Ledge quit.
+            releaseEverything()
+            await abandonStart(replacement)
+            guard lifecycle == era, commandEpoch == issued else { return .refused }
+            problem = .assertionRefused
+            state = .ready
+            publish()
+            return .refused
+        }
+        problem = nil
+        endUnrecorded = false
+        announcesResume = false
+        state = .running(replacement)
+        beginWatching()
+        armDeadline()
+        armLid(for: replacement)
+        beginConserving(for: replacement)
+        publish()
+        if !wantsLid {
+            // Everything the lid mode borrowed goes back, and the reading is
+            // taken again. A lid-to-lid handover keeps all three because the
+            // replacement asks for its own a moment later; a plain
+            // replacement never will, so without this the savings stayed on,
+            // another application's App Nap stayed disabled, and the card
+            // went on showing the old `.holding` reading — which left the lid
+            // control drawn Off *and* disabled until something else happened
+            // to refresh it.
+            conserve?.end()
+            if let appNap { track { await appNap.end() } }
+            track { @MainActor [weak self] in await self?.refreshLid() }
+        }
+        return .changed
+    }
+
+    /// Asks the daemon again for the hold this session already asked for.
+    ///
+    /// Not a mode change: the session, its length and its end time are all
+    /// unchanged, so there is nothing to write down and nothing to ask the
+    /// user. It is the retry the refusal sentences have always told people to
+    /// make — "try again", "switch it on again" — which until now meant
+    /// taking the mode off and putting it back, losing the end time on the
+    /// way.
+    @discardableResult
+    public func retryLidHold() async -> Bool {
+        guard case .running(let session) = state, session.lidHoldRequested else { return false }
+        // Renewed, not released and retaken. Releasing first looks tidier and
+        // is a race: the release and the arm are separate trips to the
+        // daemon, so a release that lands *after* the new arm cancels the
+        // hold the retry had just won — and the card went on showing a full
+        // rail over a Mac whose sleep setting had been put back. The daemon
+        // treats a `begin` for a session it already holds as a renewal, which
+        // is the whole of what a retry wants.
+        armLid(for: session)
+        return true
+    }
+
     // MARK: - The lid-closed hold
 
     /// Asks the helper to hold this session through a shut lid.
@@ -476,6 +697,21 @@ public final class KeepAwakeProvider: ActivityProvider {
         guard session.lidHoldRequested, let deadline = session.deadline else { return }
         let era = lifecycle
         let issued = commandEpoch
+        // Which attempt this is. The session id says *whose* hold it is and
+        // nothing about *when* it was asked for, so an older attempt's answer
+        // passed every guard here and published over a newer one — a refusal
+        // from a dead attempt turning the rail to Not held while the hold it
+        // had already replaced was standing.
+        lidAttempt += 1
+        let attempt = lidAttempt
+        lidArmActivity += 1
+        // Said now, not when the answer lands. Until the daemon speaks, the
+        // lid reading is still whatever it was before the press — `off` on a
+        // first arm, a refusal on a retry — so the card drew a struck bead
+        // and an enabled stop over a request that was still in the air, and
+        // invited a second press on top of the first.
+        lidState = .applying
+        publish()
         // Owned from here, not from the answer: the release has to be able to
         // name this session even if the arm is still in the air.
         armedSessionID = session.id
@@ -485,6 +721,7 @@ public final class KeepAwakeProvider: ActivityProvider {
             // landing after a release would recreate ownership of a hold
             // nobody wants.
             guard self.lifecycle == era, self.commandEpoch == issued,
+                  self.lidAttempt == attempt,
                   self.state.session?.id == session.id else { return }
             let reading = await self.lid.arm(session: session.id, until: deadline)
             // The answer can be seconds old by the time it lands — a daemon
@@ -493,7 +730,14 @@ public final class KeepAwakeProvider: ActivityProvider {
             // another. Publishing a refusal over that one would explain the
             // wrong session's trouble.
             guard self.lifecycle == era, self.commandEpoch == issued,
-                  self.state.session?.id == session.id else { return }
+                  self.lidAttempt == attempt,
+                  self.state.session?.id == session.id else {
+                // Counted either way: a read that overlapped this arm must
+                // not speak even if the arm itself was superseded.
+                self.lidArmActivity += 1
+                return
+            }
+            self.lidArmActivity += 1
             self.lidState = reading
             self.publish()
         }
@@ -535,6 +779,27 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// nothing is held — is the safer answer; the belief is the thing most
     /// likely to be wrong. If the process dies before this lands, the daemon's
     /// own lease ends the hold within ninety seconds.
+    /// Gives the daemon's lid claim back, and nothing else.
+    ///
+    /// `disarmLid` also puts the battery savings and another application's
+    /// App Nap preference back, which is right when a session is ending and
+    /// wrong when one is being replaced: the replacement asks for its own a
+    /// moment later, and tearing them down in between is a panel that goes
+    /// dark and a preference that is written twice for no reason.
+    private func releaseLidHold() {
+        guard let releasing = armedSessionID else { return }
+        armedSessionID = nil
+        let era = lifecycle
+        track { @MainActor [weak self] in
+            guard let self else { return }
+            await self.lid.disarm(session: releasing)
+            // Deliberately not refreshing here: the replacement's own arm is
+            // already on its way, and a reading taken between the two would
+            // publish "nothing is held" over a session that is mid-handover.
+            _ = era
+        }
+    }
+
     private func disarmLid() {
         // Before the hold, and synchronously. Everything the savings changed
         // is a thing the user can see the moment they open the lid, and a
@@ -575,6 +840,22 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// on to, and a quit that exits here leaves all three outstanding.
     private var sideEffects: [Int: Task<Void, Never>] = [:]
     private var nextSideEffect = 0
+
+    /// Which arm is the live one. Answers from older attempts are dropped.
+    private var lidAttempt = 0
+    /// How much arming has happened, counting both ends.
+    ///
+    /// Bumped when an arm goes out and again when it comes back, so any arm
+    /// activity at all during a status read changes it. A read that begins
+    /// *during* an arm carries the same attempt ticket as that arm, and
+    /// ordering the two by when they were asked for was wrong in both
+    /// directions: the arm finishing first let a stale read overwrite it, and
+    /// the read finishing first stopped the successful arm from publishing.
+    /// Either way the rail said Not held over a live hold.
+    ///
+    /// The arm is the authority. A read that overlapped one has seen a Mac
+    /// mid-change and has nothing to say about it.
+    private var lidArmActivity = 0
 
     /// The session this provider actually armed, held until its release has
     /// gone out.
@@ -626,8 +907,20 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// recipe's quiet operation rules out.
     public func refreshLid() async {
         let era = lifecycle
+        // A reading is as much an answer as an arm is, and it takes just as
+        // long to come back.
+        let attempt = lidAttempt
+        let armsSeen = lidArmActivity
         let reading = await lid.state()
-        guard lifecycle == era, reading != lidState else { return }
+        // Logged on every reading, not only on a change: "the state never
+        // moved off its default" is exactly the shape of the bug this is here
+        // to catch, and a log that only speaks on a change cannot report it.
+        Self.log.notice(
+            "keep awake: lid reads \(reading.name, privacy: .public) (may arm: \(reading.mayArm, privacy: .public))"
+        )
+        guard lifecycle == era, lidAttempt == attempt,
+              lidArmActivity == armsSeen else { return }
+        guard reading != lidState else { return }
         lidState = reading
         publish()
     }
@@ -740,6 +1033,13 @@ public final class KeepAwakeProvider: ActivityProvider {
             return
         }
         commandEpoch += 1
+        // Whether or not something is running. This used to be done only in
+        // the branch above, on the reasoning that nothing can be waiting on
+        // the disk while a session runs — true until `changeMode`, which
+        // writes a replacement *while the old session is still running*. Off
+        // then released the old hold, the replacement's write came back, and
+        // Keep Awake switched itself back on over a card reading Finished.
+        cancelPendingStart()
         let at = now()
         let era = lifecycle
         // Remembered before the session goes, because the finish does not
@@ -1135,11 +1435,34 @@ public final class KeepAwakeProvider: ActivityProvider {
 
     private func scheduleRetries() {
         cancelRetries()
-        for delay in Self.retryDelays {
+        retryGeneration += 1
+        let generation = retryGeneration
+        // The provider holds itself while a record is still trying to reach
+        // the disk. Switching the card off is `end` and then teardown, a
+        // moment apart: the retries were held weakly, so the teardown that
+        // always follows made every one of them a no-op, and the end the user
+        // had asked for was never written down. `stop()` has already released
+        // the assertion and stopped every watcher by then, so nothing held
+        // here keeps the Mac awake — it is a record catching up.
+        retryAnchor = self
+        for (index, delay) in Self.retryDelays.enumerated() {
+            let isLast = index == Self.retryDelays.count - 1
             let work = DispatchWorkItem { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    Task { @MainActor in _ = await self.flushDesired() }
+                    Task { @MainActor in
+                        _ = await self.flushDesired()
+                        // Something has to let the anchor go. A write that
+                        // settles drops it through `cancelRetries`; a last
+                        // attempt that settles nothing drops it here, so a run
+                        // of pure failures still ends with the provider freed
+                        // — but only if this is still the round that was
+                        // scheduled, or a round queued behind it would be
+                        // cancelled by its own predecessor.
+                        if isLast, self.retryGeneration == generation {
+                            self.cancelRetries()
+                        }
+                    }
                 }
             }
             retryWork.append(work)
@@ -1150,6 +1473,7 @@ public final class KeepAwakeProvider: ActivityProvider {
     private func cancelRetries() {
         retryWork.forEach { $0.cancel() }
         retryWork.removeAll()
+        retryAnchor = nil
     }
 
     /// Everything outstanding, one last time, on the way out.
@@ -1394,10 +1718,23 @@ public final class KeepAwakeProvider: ActivityProvider {
                 batteryFloor: floor,
                 // Derived here and nowhere else, so the flag and the reading
                 // it comes from cannot disagree on the card.
-                lidHeld: lidState.isLive,
+                // Confirmed, not merely live. `isLive` includes
+                // `.unconfirmed`, so the card's new "asked for but not
+                // answered" state could never fire in the running app: the
+                // predicate had changed and the evidence behind it had not.
+                // The gallery fixture set this by hand, so the picture looked
+                // right while the product did not.
+                lidHeld: lidState.isConfirmed,
                 lidClosed: session.lidHoldRequested,
                 lid: lidState,
-                resumed: announcesResume
+                resumed: announcesResume,
+                // Carried while running too. It was not, so anything that went
+                // wrong *during* a session — a mode change the disk refused,
+                // an assertion that could not be re-armed — was raised here
+                // and dropped on the floor. The card showed the session
+                // running and said nothing, which is the "nothing changed"
+                // the reviewer saw over a change that had failed.
+                problem: problem
             )
         case .finished(let finish):
             return KeepAwakePayload(

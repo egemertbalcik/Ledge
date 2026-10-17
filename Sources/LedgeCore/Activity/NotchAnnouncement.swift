@@ -106,10 +106,12 @@ public struct NotchAnnouncement: Equatable, Sendable {
         case .running:
             guard payload.resumed else { return nil }
             return NotchAnnouncement(
-                title: KeepAwakeCopy.resumed(
-                    remaining: SatelliteContent.keepAwakeLabel(remaining: payload.remaining),
-                    until: payload.until
-                ),
+                title: payload.isIndefinite
+                    ? KeepAwakeCopy.resumedIndefinitely
+                    : KeepAwakeCopy.resumed(
+                        remaining: SatelliteContent.keepAwakeLabel(remaining: payload.remaining),
+                        until: payload.until
+                    ),
                 symbolName: "cup.and.saucer.fill",
                 accent: keepAwakeAccent
             )

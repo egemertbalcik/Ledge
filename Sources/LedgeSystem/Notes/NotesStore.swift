@@ -275,14 +275,15 @@ public actor NotesStore {
         let note = NoteBody(id: UUID().uuidString, createdAt: stamp, editedAt: stamp)
         bodies[note.id] = note
         summaries[note.id] = note.summary
-        dirtyBodies.insert(note.id)
-        indexDirty = true
-        if oldestDirtyAt == nil { oldestDirtyAt = ContinuousClock.now }
-        // Scheduled, not merely marked: without these a note created and never
-        // typed into reached the disk only if some later edit happened to flush
-        // it.
-        scheduleBodyWrite()
-        scheduleIndexWrite()
+        // Nothing is written. A note with no words in it is not yet a note:
+        // it exists in this session so the window can open it and the card can
+        // show it, and it reaches the disk the moment somebody types — which
+        // `update` schedules.
+        //
+        // This used to mark it dirty and schedule both writes, with a comment
+        // saying that was deliberate. The result was a collection filling up
+        // with Untitled blanks: every press of New note that was then thought
+        // better of left a file behind, and All Notes opened on one of them.
         noteChanged()
         return note
     }
@@ -467,7 +468,12 @@ public actor NotesStore {
         lastWritten.removeValue(forKey: id)
         dirtyBodies.remove(id)
         indexDirty = true
-        quarantine(bodyURL(id), reason: "discarded")
+        // Only if there is a file to set aside. A note that was never typed
+        // into was never written, so there is nothing on the disk to move and
+        // nothing to tidy up after.
+        if FileManager.default.fileExists(atPath: bodyURL(id).path) {
+            quarantine(bodyURL(id), reason: "discarded")
+        }
         scheduleIndexWrite()
         noteChanged()
         return true

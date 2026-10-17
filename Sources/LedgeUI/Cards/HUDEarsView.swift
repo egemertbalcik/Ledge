@@ -590,7 +590,11 @@ public struct SatelliteView: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(KeepAwakeCopy.title)
-            .accessibilityValue("\(SatelliteContent.keepAwakeLabel(remaining: remaining)) remaining")
+            // "On remaining" is not a sentence. A hold with no end is read as
+            // the state it is in; only a hold with a deadline has a remainder.
+            .accessibilityValue(remaining == nil
+                ? KeepAwakeCopy.on
+                : "\(SatelliteContent.keepAwakeLabel(remaining: remaining)) remaining")
 
         case .privacy(let camera, let microphone):
             circle {

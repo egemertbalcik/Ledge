@@ -29,6 +29,47 @@ public final class LedgeCoordinator {
     private var settingsWindow: NSWindow?
     private var permissionWatch: Task<Void, Never>?
 
+    /// What the standing watch owes whoever started it.
+    ///
+    /// Held beside the task rather than only inside it, because a watch can
+    /// end by being replaced — a second request made while the first is still
+    /// out — and a cancelled task's own `defer` cannot be the thing that
+    /// reports the end: cancellation skips it, which left the row that was
+    /// saying "Waiting for your answer…" saying it forever.
+    private var permissionWatchEnd: (@MainActor () -> Void)?
+
+    /// The notch's half of a grant that happens in System Settings.
+    private let handoffCard = HandoffProvider()
+
+    /// Which window sent somebody out to grant something.
+    ///
+    /// `raiseAfterGrant` used to be exactly that — settings only — so
+    /// a grant made from the tour raised nothing: the tour had been lowered to
+    /// stand aside for System Settings, and it sat behind it afterwards, in an
+    /// app with no Dock icon to go looking for.
+    private enum WhoAsked { case settings, tour }
+
+    /// One press that is still waiting for an answer.
+    ///
+    /// Owned here rather than read back from `SettingsModel`, and identified
+    /// by a token rather than by its permission. Both for the same reason:
+    /// this is what the notch's lock and the arrival card hang off, and the
+    /// model's copy is derived — it folds itself away the moment the
+    /// permissions are re-read, which is the line *before* the grant is
+    /// announced. Asking the model afterwards left the lock in the ears with
+    /// no watch behind it and no arrival ever said. The token is what tells
+    /// one press from the next: "Open System Settings Again" is a second
+    /// attempt at the same permission, and the first attempt's ending must
+    /// not tear down the second attempt's guide.
+    private struct PermissionAttempt {
+        let token = UUID()
+        let kind: PermissionKind
+        /// Which window to bring back. Nil when nobody left the app — a
+        /// prompt is answered in front of the window that asked.
+        let who: WhoAsked?
+    }
+    private var attempt: PermissionAttempt?
+
     /// The one folder Ledge ever asks for by name, and the reason it does not
     /// ask for Full Disk Access to get at the same thing.
     private lazy var focusFolder = FocusDatabaseAccess(
@@ -43,27 +84,48 @@ public final class LedgeCoordinator {
     /// not.
     private func chooseFocusFolder() {
         let folder = FocusDatabaseAccess.databaseFolder
+        // No alert. macOS makes this folder the first time a Focus is used,
+        // and until then there is nothing to hand over — which the row says
+        // in its own face, with no button. A modal explaining that the button
+        // you just pressed should not have been there is the app admitting it
+        // drew the wrong thing.
         guard FileManager.default.fileExists(atPath: folder.path) else {
-            let alert = NSAlert()
-            alert.messageText = "Turn a Focus on first"
-            alert.informativeText = """
-                macOS makes this folder the first time a Focus is used. Turn one \
-                on, then come back — there is nothing here to grant yet.
-                """
-            alert.runModal()
+            settingsModel.focusFolderExists = false
             return
         }
         standAsideForSystemUI()
         let panel = NSOpenPanel()
-        panel.message = "Give Ledge this one folder, so the Focus card is immediate and shows the mode's name."
-        panel.prompt = "Grant Access"
+        panel.message = FocusFolderCopy.panelMessage
+        panel.prompt = FocusFolderCopy.panelPrompt
         panel.directoryURL = folder
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
+        // Only this folder can be chosen. Without it the panel would hand
+        // back whatever was on screen when Grant Access was pressed, and
+        // Ledge kept it: a security-scoped bookmark to some other folder,
+        // its scope held open for the life of the process, while the row went
+        // on saying "Not granted" with no word about why.
+        let onlyTheFocusFolder = FocusFolderPanelDelegate(allowed: folder)
+        panel.delegate = onlyTheFocusFolder
+        // The row says the panel is up, and why it is one press.
+        settingsModel.focusFolderPanelIsUp = true
+        settingsModel.focusFolderWrongPick = nil
         NSApp.activate(ignoringOtherApps: true)
-        defer { reclaimFront() }
+        defer {
+            settingsModel.focusFolderPanelIsUp = false
+            reclaimFront()
+        }
         guard panel.runModal() == .OK, let picked = panel.url else { return }
+        // Belt and braces over the delegate: a disabled folder cannot be
+        // *selected*, but the panel still answers with whatever directory it
+        // was showing, so the answer is checked as well as narrowed.
+        guard FocusFolderPanelDelegate.isTheFocusFolder(picked, allowed: folder) else {
+            settingsModel.focusFolderWrongPick = picked.lastPathComponent
+            Self.log.notice("focus folder: kept nothing, a different folder was picked")
+            return
+        }
+        settingsModel.focusFolderWrongPick = nil
         focusFolder.remember(picked)
         // Everything that gave up on the folder is told to look again, now:
         // the source's own retry has backed off to half a minute by this
@@ -304,7 +366,17 @@ public final class LedgeCoordinator {
     /// Owned here because the providers that feed it and the provider that
     /// delivers from it are both built here. An actor, so the disk work it
     /// does never lands on the main thread.
-    public let deviceCatalogue = DeviceCatalogueStore()
+    public lazy var deviceCatalogue = DeviceCatalogueStore(paired: pairedDevices)
+
+    /// What the Mac is paired with, as the Bluetooth provider last read it.
+    ///
+    /// Owned here because three things share one answer: the provider that
+    /// reads it, the proximity provider that matches advertisements against
+    /// it, and the catalogue that refuses to store anything it cannot find in
+    /// it. One reading, one answer — two copies would disagree, and a
+    /// catalogue pruning against the stale one would delete the user's
+    /// devices.
+    public let pairedDevices = PairedDeviceRegistry()
 
     /// Coalesces what the providers see before it reaches the catalogue.
     ///
@@ -400,7 +472,7 @@ public final class LedgeCoordinator {
         activities.permissionChanged(kind, isGranted: true)
         if kind == .focusStatus { syncFocusQuietState() }
         refreshSettingsModel()
-        raiseSettingsAfterGrant()
+        raiseAfterGrant(for: kind)
     }
 
     /// Brings the settings window back after the user has granted something.
@@ -411,15 +483,36 @@ public final class LedgeCoordinator {
     /// window had to be hunted for among everything else on screen. Only when
     /// the window was already open — a grant made from the tour, or from
     /// System Settings with nothing of ours on screen, moves nothing.
-    private func raiseSettingsAfterGrant() {
+    /// - Parameter kind: the permission whose answer arrived, or nil when the
+    ///   caller is the watch for the press itself. Checked against the press
+    ///   that is outstanding: a Calendar grant landing while somebody is in
+    ///   System Settings over *Bluetooth* is not a reason to take the
+    ///   foreground away from them — and a permission can appear to flap
+    ///   several times a minute.
+    private func raiseAfterGrant(for kind: PermissionKind? = nil) {
         // Only while the user is out granting something they asked for from
         // this window. Any gain at all used to bring the window forward, and
         // since a permission could appear to flap several times a minute, the
         // app repeatedly stole focus from whatever the user was doing —
         // including from System Settings, where they were trying to grant.
         guard permissionWatch != nil else { return }
-        guard let settingsWindow, settingsWindow.isVisible else { return }
-        present(settingsWindow)
+        guard let open = attempt else { return }
+        if let kind, kind != open.kind { return }
+        // Whichever window asked. The tour is the one that cannot be found
+        // again: it was lowered to stand aside for System Settings, and
+        // nothing but an activation floats it back.
+        switch open.who {
+        case .tour where onboarding.isVisible:
+            onboarding.raise()
+        case .settings, .tour, nil:
+            guard let settingsWindow, settingsWindow.isVisible else {
+                // The tour is the only other window that asks, so it is the
+                // fallback when Settings is not up.
+                if onboarding.isVisible { onboarding.raise() }
+                return
+            }
+            present(settingsWindow)
+        }
     }
 
     /// Gets Ledge's own windows out of the way of a system dialog.
@@ -449,8 +542,17 @@ public final class LedgeCoordinator {
     /// Ledge next becomes active — which is the very thing the user cannot do
     /// without first finding the window. Bounded, and only ever running while
     /// a request the user made is outstanding and the settings window is up.
-    private func watchForPermission(_ kind: PermissionKind) {
-        permissionWatch?.cancel()
+    /// Watches for an answer that arrives somewhere else.
+    ///
+    /// - Parameter onEnd: called however the watch ends — an answer, the
+    ///   window closing, or the four minutes running out. Whatever the row
+    ///   was saying while it waited stops being true at all three.
+    private func watchForPermission(
+        _ kind: PermissionKind,
+        onEnd: (@MainActor () -> Void)? = nil
+    ) {
+        stopWatchingForPermission()
+        permissionWatchEnd = onEnd
         let before = permissions.status(of: kind)
         // Automation is read by sending an Apple Event to a player, so it is
         // asked for less often than the rest, which are local reads.
@@ -458,21 +560,128 @@ public final class LedgeCoordinator {
         permissionWatch = Task { @MainActor [weak self] in
             // Whichever way this ends — an answer, the window closing, the
             // four minutes running out — the watch stops being "the user is
-            // out granting something". It is what `raiseSettingsAfterGrant`
+            // out granting something". It is what `raiseAfterGrant`
             // reads, so a watch left standing meant a grant made an hour later
             // for some other reason could pull the settings window in front of
             // whatever the user was doing.
-            defer { if !Task.isCancelled { self?.permissionWatch = nil } }
+            defer {
+                if !Task.isCancelled {
+                    self?.permissionWatch = nil
+                    self?.permissionWatchEnd = nil
+                    onEnd?()
+                }
+            }
             for _ in 0..<Int(Self.permissionWatchWindow / interval) {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
                 guard self.settingsWindow?.isVisible == true || self.onboarding.isVisible else { return }
                 guard self.permissions.status(of: kind) != before else { continue }
                 self.revalidatePermissions()
-                self.raiseSettingsAfterGrant()
+                self.sayTheAnswerArrived(for: kind)
+                self.raiseAfterGrant(for: kind)
                 return
             }
         }
+    }
+
+    /// A press is waiting for an answer. Returns the token that owns it.
+    ///
+    /// - Parameter handingOff: whether the answer happens in another
+    ///   application. Only then does the notch pick up the thread.
+    @discardableResult
+    private func beganAttempt(for kind: PermissionKind, handingOff: Bool) -> UUID {
+        // One at a time, and the one being replaced is retired here rather
+        // than left for its own ending: that ending is fenced by a token
+        // which is no longer current, so nothing else would ever come back
+        // for it. What exactly that means for the row, the guide and the
+        // notch is decided by `PermissionAttempts`, where it can be read and
+        // tested on its own.
+        let change = PermissionAttempts.replacing(
+            attempt.map { (kind: $0.kind, handedOff: $0.who != nil) },
+            with: kind,
+            handingOff: handingOff,
+            guideShows: settingsModel.handoff?.kind
+        )
+        if let ending = change.endWaitFor { settingsModel.endedWaiting(for: ending) }
+        if change.clearsTheLock { handoffCard.clear() }
+        if change.endsTheGuide { settingsModel.endedHandoff() }
+        let started = PermissionAttempt(
+            kind: kind,
+            who: handingOff ? (onboarding.isVisible ? .tour : .settings) : nil
+        )
+        attempt = started
+        if handingOff {
+            handoffCard.waiting(for: kind.displayName)
+            // macOS shows its one-time Accessibility message at most once in
+            // an app's life and says nothing about having done so, so the
+            // fact that it can still appear is written down here, at the one
+            // press that can raise it.
+            if kind == .accessibility, !preferences.accessibilityWasAsked {
+                preferences.accessibilityWasAsked = true
+                settingsModel.accessibilityWasAskedBefore = true
+            }
+        }
+        return started.token
+    }
+
+    /// One press is over, however it ended: an answer, Stop Waiting, or the
+    /// watch running out.
+    ///
+    /// - Parameter token: which press ended. A watch being *replaced* runs the
+    ///   old one's ending, so without this a second attempt — at another
+    ///   permission, or another go at the same one — would be torn down one
+    ///   line after it began, leaving somebody in System Settings with no
+    ///   guide and nothing in the notch.
+    private func endedAttempt(_ token: UUID) {
+        guard attempt?.token == token else { return }
+        endedCurrentAttempt()
+    }
+
+    /// Ends whatever press is outstanding, whichever it is.
+    private func endedCurrentAttempt() {
+        guard let open = attempt else { return }
+        attempt = nil
+        settingsModel.endedWaiting(for: open.kind)
+        if open.who != nil {
+            handoffCard.clear()
+            settingsModel.endedHandoff()
+        }
+    }
+
+    /// Says a grant landed, in the notch.
+    ///
+    /// Only for a grant somebody went out to get: an answer they are standing
+    /// in front of needs no announcement, and a permission that changed for
+    /// some other reason is not news. Read from this object's own record of
+    /// the press rather than from the model, whose copy has already folded
+    /// itself away by the time the watch gets here — the re-read of the
+    /// permissions is the line before this one.
+    private func sayTheAnswerArrived(for kind: PermissionKind) {
+        guard let open = attempt, open.kind == kind, open.who != nil else { return }
+        // A refusal is the one state Ledge cannot undo. The row says so once,
+        // plainly, and the notch says nothing at all — the lock simply goes,
+        // which the ending after this does.
+        guard permissions.status(of: kind) == .granted else { return }
+        handoffCard.arrived(
+            kind.displayName,
+            detail: PermissionGuideCopy.arrivedDetail(kind),
+            holding: PermissionGuideCopy.arrivalHold(
+                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            )
+        )
+    }
+
+    /// Ends the standing watch and tells whoever started it that it is over.
+    ///
+    /// The row that waits has to stop waiting on every ending, including the
+    /// ones it did not cause: a second permission asked for while the first
+    /// is still out replaces the watch, and Ledge going away takes it with it.
+    private func stopWatchingForPermission() {
+        let end = permissionWatchEnd
+        permissionWatchEnd = nil
+        permissionWatch?.cancel()
+        permissionWatch = nil
+        end?()
     }
 
     /// Which card-switch request is the newest.
@@ -599,19 +808,52 @@ public final class LedgeCoordinator {
         KeepAwakeActions(
             switchOn: { [weak self] in
                 guard let self else { return }
+                // Nothing starts while the helper is being taken out. The
+                // removal asks the daemon whether it still owes the Mac
+                // anything, and a session admitted during that question
+                // would be a session whose lid hold is about to be removed
+                // from under it.
+                guard self.mayStartKeepAwake else { return }
                 Task { @MainActor in await self.keepAwake?.begin() }
             },
-            start: { [weak self] minutes in
+            retryLid: { [weak self] in
                 guard let self else { return }
-                self.preferences.keepAwakeDefaultMinutes = Double(minutes)
-                Task { @MainActor in await self.keepAwake?.begin(minutes: minutes) }
+                guard self.mayStartKeepAwake else { return }
+                Task { @MainActor in await self.keepAwake?.retryLidHold() }
+            },
+            dropLidHold: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in
+                    // One operation, not end-then-begin. The provider swaps
+                    // the session without ever releasing the assertion, so a
+                    // slow disk cannot leave the Mac unprotected and a refusal
+                    // leaves the hold that was running exactly where it was.
+                    //
+                    // Not gated: this one gives the helper's claim *back*,
+                    // which is the direction a removal wants anyway.
+                    await self.keepAwake?.changeMode(toLidClosed: nil)
+                }
             },
             startLidClosed: { [weak self] minutes in
                 guard let self else { return }
+                guard self.mayStartKeepAwake else { return }
                 self.preferences.keepAwakeDefaultMinutes = Double(minutes)
                 Task { @MainActor in
-                    await self.keepAwake?.begin(minutes: minutes, lidClosed: true)
+                    guard let provider = self.keepAwake else { return }
+                    // Switching the lid mode on while the Mac is already being
+                    // held is the ordinary sequence the two-switch card
+                    // invites, and `begin` refuses it outright — its guard
+                    // wants Ready. The length question opened, took an answer,
+                    // and the answer went nowhere.
+                    if await provider.changeMode(toLidClosed: minutes) == .nothingRunning {
+                        await provider.begin(minutes: minutes, lidClosed: true)
+                    }
                 }
+            },
+            refreshLid: { [weak self] in
+                guard let self else { return nil }
+                await self.keepAwake?.refreshLid()
+                return self.keepAwake?.lidReading
             },
             end: { [weak self] in
                 guard let self else { return }
@@ -620,6 +862,7 @@ public final class LedgeCoordinator {
             dismiss: { [weak self] in self?.keepAwake?.dismiss() },
             resume: { [weak self] in
                 guard let self else { return }
+                guard self.mayStartKeepAwake else { return }
                 Task { @MainActor in await self.keepAwake?.resume() }
             },
             haptic: {
@@ -700,6 +943,129 @@ public final class LedgeCoordinator {
 
     /// Held so the card can be told which note is being written.
     private weak var notesProviderRef: NotesProvider?
+    private weak var levelsProviderRef: LevelsProvider?
+    /// Held so Ledge's own camera use can be kept out of its own privacy card.
+    private weak var privacyProviderRef: PrivacyProvider?
+
+    /// The calendar card's self-view: the camera, its deadlines, and the
+    /// payload the card draws.
+    private lazy var selfView = SelfViewRunner(
+        camera: SelfViewCamera(),
+        publish: { [weak self] payload in
+            guard let self else { return }
+            self.presentation.selfView = payload
+            self.keepSelfViewTicking(payload.phase != .off)
+        },
+        holdChanged: { [weak self] holding in
+            self?.send(.cardHoldChanged(holding))
+        },
+        cameraUseChanged: { [weak self] running, device in
+            self?.privacyProviderRef?.selfViewChanged(running, device: device)
+        },
+        openCameraSettings: {
+            guard let url = URL(
+                string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Camera"
+            ) else { return }
+            NSWorkspace.shared.open(url)
+        }
+    )
+
+    /// The self-view's clock: elapsed time, not civil time.
+    ///
+    /// Every deadline on that card — six tenths of a second of patience, five
+    /// seconds before giving up, a minute away, five minutes in all — is a
+    /// length of time rather than a moment, and `Date` can move backwards
+    /// under all four of them.
+    private static func selfViewClock() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+
+    /// Drives the self-view's deadlines while a session is alive.
+    ///
+    /// Four times a second, and only then: the patience before a sentence,
+    /// the five seconds before giving up, the minute away and the five-minute
+    /// cap are all read from the same instant, and nothing moves on screen
+    /// unless one of those answers actually changed.
+    private var selfViewTicker: Task<Void, Never>?
+
+    private func keepSelfViewTicking(_ wanted: Bool) {
+        guard wanted else {
+            selfViewTicker?.cancel()
+            selfViewTicker = nil
+            return
+        }
+        guard selfViewTicker == nil else { return }
+        selfViewTicker = Task { @MainActor [weak self] in
+            var ticks = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let self, !Task.isCancelled else { return }
+                // Once a second while the picture is up, ask the privacy card
+                // to look again. Another application taking the camera Ledge
+                // already has open changes nothing the watcher can see — the
+                // device was running either way — so without this the card
+                // would wait on a sixty-second safety poll to notice.
+                ticks += 1
+                if ticks % 4 == 0, self.selfView.phase.isRunningCamera {
+                    self.privacyProviderRef?.recheck()
+                }
+                // The card itself may have gone while a readout stood over
+                // it — the one case the `.hud` guard on `cardWentAway` lets
+                // through, because from the view's side a temporary
+                // occlusion and a real dismissal look the same. The camera
+                // belongs to the calendar card; if that is not what is
+                // selected any more, it goes.
+                guard self.selfViewIsStillEarned else {
+                    self.selfView.cardWentAway()
+                    return
+                }
+                self.selfView.tick(now: Self.selfViewClock())
+            }
+        }
+    }
+
+    /// Whether the camera still has a card to live in.
+    ///
+    /// Two questions, and the shell is the only layer that can answer either
+    /// while a readout is standing over the calendar: is the calendar still
+    /// the selected card, and does it still have a meeting to join? Without
+    /// the second, a meeting that ended behind a volume readout handed the
+    /// card back with a live picture and no segment to close it with.
+    private var selfViewIsStillEarned: Bool {
+        guard let selected = presentation.selected,
+              case .event(let payload) = selected.payload
+        else { return false }
+        return payload.joinLink != nil
+    }
+
+    private func makeSelfViewActions() -> SelfViewActions {
+        SelfViewActions(
+            press: { [weak self] in
+                self?.selfView.press(now: Self.selfViewClock())
+            },
+            openSettings: { [weak self] in self?.selfView.openSettings() },
+            tryAgain: { [weak self] in
+                self?.selfView.tryAgain(now: Self.selfViewClock())
+            },
+            cardWentAway: { [weak self] in
+                guard let self else { return }
+                // A volume key takes the calendar off screen for as long as
+                // the readout is up, and the reducer promises to hand the
+                // card back afterwards with the camera still on. The view's
+                // own "I disappeared" cannot tell that apart from being
+                // swiped away — this can.
+                guard self.state.phase != .hud else { return }
+                self.selfView.cardWentAway()
+            },
+            letGo: { [weak self] in self?.selfView.letGo() },
+            picture: { [weak self] in
+                AnyView(CameraLayerView(
+                    sessionID: self?.selfView.sessionID ?? 0,
+                    make: { self?.selfView.makePreviewLayer() }
+                ))
+            }
+        )
+    }
 
     private let screenshots = ScreenshotWatcher()
     private let permissions = PermissionCenter()
@@ -765,7 +1131,7 @@ public final class LedgeCoordinator {
         notesSelfTest = Task { @MainActor [weak self] in
             do { try await Task.sleep(for: .seconds(4)) } catch { return }
             if let wanted, !wanted.isEmpty {
-                self?.notesWindow.open(noteID: wanted)
+                Task { @MainActor in await self?.notesWindow.open(noteID: wanted) }
             } else {
                 self?.notesWindow.create()
             }
@@ -940,13 +1306,34 @@ public final class LedgeCoordinator {
             screen: screen,
             preferences: preferences,
             presentation: presentation,
-            onTap: { [weak self] in self?.send(.clicked) },
+            onTap: { [weak self] in
+                guard let self else { return }
+                // While the notch is holding the lock for a handoff, a click
+                // on it is the way back to the window that asked — which an
+                // accessory app otherwise has no way of offering, having
+                // neither a Dock icon nor a Cmd-Tab entry. Narrow on purpose:
+                // only while a watch is actually running, and only when the
+                // card under the pointer is that one.
+                // Only in the phases that actually draw the resting content.
+                // "Not open" is not the same thing: a peek draws what it is
+                // announcing and a readout draws the HUD, and in both the
+                // lock is merely what is underneath.
+                let restIsOnScreen = self.state.phase == .idle || self.state.phase == .companion
+                if self.permissionWatch != nil,
+                   restIsOnScreen,
+                   self.restingContent()?.id == HandoffProvider.waitingID {
+                    self.raiseAfterGrant()
+                    return
+                }
+                self.send(.clicked)
+            },
             nowPlayingActions: makeNowPlayingActions(),
             timerActions: makeTimerActions(),
             keepAwakeActions: makeKeepAwakeActions(),
             shelfActions: makeShelfActions(),
             notesActions: makeNotesActions(),
             levelsActions: makeLevelsActions(),
+            selfViewActions: makeSelfViewActions(),
             onDropFiles: { [weak self] urls in self?.acceptDroppedFiles(urls) ?? false },
             onHUDAdjust: { [weak self] kind, level in self?.hud.adjust(kind, to: level) },
             onHUDAdjustDisplay: { [weak self] id, level in
@@ -1012,42 +1399,71 @@ public final class LedgeCoordinator {
     /// coordinator's, because permissions, providers and the welcome card are
     /// things only this knows about.
     private lazy var onboarding = OnboardingPresenter(
-        makeView: { [weak self] finish, deferTour in
+        makeView: { [weak self] finish in
             guard let self else {
                 return OnboardingView(model: SettingsModel(), actions: SettingsActions(
                     setLaunchAtLogin: { _ in false }, loginItemStatus: { "" },
                     copyToClipboard: { _ in }, quit: {}
-                ), openSettings: {}, openSource: {}, finish: finish, deferTour: deferTour)
+                ), openSettings: {}, openSource: {}, finish: finish)
             }
             self.refreshSettingsModel()
+            let isReturnVisit = self.preferences.hasCompletedOnboarding
             return OnboardingView(
                 model: self.settingsModel,
                 actions: self.makeSettingsActions(),
                 openSettings: { [weak self] in self?.showSettings() },
                 openSource: { NSWorkspace.shared.open(Self.sourceURL) },
                 finish: finish,
-                deferTour: deferTour,
-                startPage: Int(self.preferences.tourPage),
-                onPage: { [weak self] page in self?.preferences.tourPage = Double(page) }
+                openCards: { [weak self] in self?.showSettings(pane: "cards") },
+                // A second visit is a reference: the steps become tabs,
+                // nothing is written down, and nothing waits.
+                isReturnVisit: isReturnVisit,
+                // Read only while a first tour is unfinished, which now means
+                // Ledge itself stopped during it — a crash, a force quit, or
+                // Quit Ledge from the terminal banner. A tour somebody closed
+                // is finished, so it never comes back here.
+                startStep: isReturnVisit
+                    ? .hover
+                    : TourStep(rawValue: Int(self.preferences.tourPage)) ?? .hover,
+                hasBuiltInNotch: Self.theScreenHasANotch()
             )
         },
-        onFinish: { [weak self] completed in self?.onboardingFinished(completed: completed) }
+        place: { window in
+            guard let screen = ScreenGeometry.preferredScreen() else {
+                window.center()
+                return
+            }
+            OnboardingPresenter.hangUnderTheNotch(
+                window,
+                on: screen,
+                notchCenterX: ScreenGeometry.measure(screen).notchCenterX
+            )
+        },
+        title: { [weak self] in
+            self?.preferences.hasCompletedOnboarding == true ? TourCopy.titleAgain : TourCopy.title
+        },
+        onFinish: { [weak self] in self?.onboardingFinished() }
     )
+
+    /// Whether this Mac has a notch of its own, for the one sentence that
+    /// changes if it does not.
+    private static func theScreenHasANotch() -> Bool {
+        guard let screen = ScreenGeometry.preferredScreen() else { return true }
+        return ScreenGeometry.measure(screen).isHardwareNotch
+    }
 
     /// Presents the tour: at first launch, and again on request from Settings.
     public func showOnboarding() { onboarding.show() }
 
-    /// - Parameter completed: whether the user reached the end and pressed
-    ///   Done. A tour that was merely closed leaves the flag alone, so it is
-    ///   offered again next launch — the cards still run meanwhile, but the
-    ///   explanation has not been given yet and the app does not pretend it
-    ///   has.
-    private func onboardingFinished(completed: Bool) {
-        guard completed else {
-            Self.log.notice("onboarding: closed before the end — will offer again")
-            activities.startEnabled()
-            return
-        }
+    /// The tour was answered — Done, or the close button, which is the same
+    /// answer.
+    ///
+    /// Closing used to leave the flag alone, so the tour came back on every
+    /// launch until somebody reached the end. That is nagging, and it also
+    /// left Automation shut for good: the player gate opened only on Done, so
+    /// anybody who closed the tour got no Apple Event queries at all and a
+    /// permission that read "Not requested" for the life of the install.
+    private func onboardingFinished() {
         let wasFirstRun = !preferences.hasCompletedOnboarding
         preferences.hasCompletedOnboarding = true
         preferences.tourPage = 0
@@ -1063,6 +1479,99 @@ public final class LedgeCoordinator {
         permissions.mayAskAboutPlayers = true
         activities.startEnabled()
         if wasFirstRun { playWelcome() }
+    }
+
+    // MARK: - What the tour watches
+
+    /// Who is listening for what the real notch does.
+    ///
+    /// Keyed, so a tour window closing takes only its own listener out — and
+    /// so a second tour cannot leave the first one's closure behind to be
+    /// called forever.
+    private var tourListeners: [UUID: @MainActor (TourSignal) -> Void] = [:]
+
+    /// Subscribes to what the notch does, and hands back the unsubscribe.
+    private func observeNotch(
+        _ listener: @escaping @MainActor (TourSignal) -> Void
+    ) -> @MainActor () -> Void {
+        let token = UUID()
+        tourListeners[token] = listener
+        return { [weak self] in self?.tourListeners.removeValue(forKey: token) }
+    }
+
+    /// The notch did something the tour may be waiting to see.
+    private func tellTheTour(_ signal: TourSignal) {
+        guard !tourListeners.isEmpty else { return }
+        for listener in tourListeners.values { listener(signal) }
+    }
+
+    /// Which step of the tour is up, or nil once it is over.
+    private func tourStepChanged(_ step: TourStep?) {
+        // Only a first visit is worth remembering the place in, and only
+        // because Ledge itself can stop during one. A second visit is a
+        // lookup; writing a page number for it would bring somebody back to
+        // step three the next time the app crashed.
+        let isFirstTour = !preferences.hasCompletedOnboarding
+        guard let step else {
+            if isFirstTour { preferences.tourPage = 0 }
+            return
+        }
+        if isFirstTour { preferences.tourPage = Double(step.rawValue) }
+        // The notch's half of the step. Nothing to do for the others: the
+        // drop step is taught by the drop itself, which enables the shelf and
+        // announces what landed on it, and the last two steps are read.
+        //
+        // A first visit only. On a second the queue has the person's own
+        // cards in it, and announcing "This is Ledge" over their music, to
+        // somebody who opened the window to look one thing up, is the app
+        // talking over itself.
+        if step == .hover, isFirstTour { publishHelloCard() }
+    }
+
+    /// Gives the notch something to open while the Hover step is up.
+    ///
+    /// Load-bearing, not decoration: during a first tour no provider has been
+    /// started yet, so the queue is empty and hovering the notch would open
+    /// onto nothing — on the step whose whole job is to show that hovering
+    /// opens it.
+    private func publishHelloCard() {
+        guard activities.activity(withID: ActivityID(kind: .message, source: "hello")) == nil else { return }
+        publishTourCard(
+            source: "hello",
+            title: TourCopy.hello.title,
+            body: TourCopy.hello.detail,
+            symbol: "sparkles",
+            // Long enough to read the step it belongs to, and short enough
+            // that it is gone before somebody finishes the tour.
+            seconds: 45
+        )
+    }
+
+    /// Publishes one of the tour's own cards through the real path.
+    ///
+    /// A scenario provider rather than a card pushed straight into the
+    /// presentation: the queue, the expiry and the ears are the things being
+    /// demonstrated, so the demonstration goes through them. Adding a
+    /// provider whose identifier is already registered replaces it — stopping
+    /// the old one and retracting its card — so this is safe to call twice.
+    private func publishTourCard(
+        source: String,
+        title: String,
+        body: String,
+        symbol: String,
+        seconds: TimeInterval
+    ) {
+        let card = ScenarioActivity(
+            kind: .message,
+            source: source,
+            expiresAfter: seconds,
+            message: MessagePayload(title: title, body: body, symbolName: symbol)
+        )
+        activities.add(FakeActivityProvider(
+            scenario: Scenario(name: source, steps: [Scenario.Step(at: 0.1, action: .publish(card))]),
+            loops: false
+        ))
+        activities.start()
     }
 
     /// The first thing the notch ever does on its own.
@@ -1242,7 +1751,11 @@ public final class LedgeCoordinator {
             MainActor.assumeIsolated {
                 self?.revalidatePermissions()
                 // Back from System Settings: the windows that stood aside for
-                // the dialog take the front again.
+                // the dialog take the front again, and any row that was
+                // waiting on that journey stops waiting — whether or not the
+                // switch was touched. Somebody who looked and left must get
+                // their button back.
+                self?.settingsModel.cameBackFromSystemSettings()
                 self?.reclaimFront()
             }
         })
@@ -1268,6 +1781,10 @@ public final class LedgeCoordinator {
             // activation and the request result. Duplicate callbacks are quiet.
             self?.revalidatePermissions()
         }
+        // Added before the hub starts, so it is running from launch. It is
+        // not a card anybody switches on, and it has nothing to show until a
+        // grant is being waited for.
+        activities.add(handoffCard)
         activities.start()
         registerProviders()
     }
@@ -1488,6 +2005,7 @@ public final class LedgeCoordinator {
         let registrations = ProviderRegistry.all(
             observations: deviceObservations,
             catalogue: deviceCatalogue,
+            paired: pairedDevices,
             nowPlayingProvider: { [weak self] in
                 guard let self else {
                     return NowPlayingProvider(
@@ -1540,6 +2058,29 @@ public final class LedgeCoordinator {
             shelfProvider: { [weak self] in
                 guard let self else { return ShelfProvider(store: ShelfStore(load: { "" }, save: { _ in })) }
                 return ShelfProvider(store: self.shelf)
+            },
+            levelsProvider: { [weak self] in
+                let provider = LevelsProvider(rows: { [weak self] in
+                    self?.levelRows() ?? []
+                })
+                self?.levelsProviderRef = provider
+                return provider
+            },
+            privacyProvider: { [weak self] in
+                let provider = PrivacyProvider(
+                    source: SystemRecordingSource(),
+                    sharedWithAnotherApp: { [weak self] in
+                        self?.selfView.isSharedWithAnotherApp ?? false
+                    }
+                )
+                self?.privacyProviderRef = provider
+                // A provider built while the self-view is already on screen —
+                // the card switched on mid-session — inherits the cover, or
+                // it would announce the picture the user is looking at.
+                if self?.selfView.phase.isRunningCamera == true {
+                    provider.selfViewChanged(true, device: self?.selfView.cameraID)
+                }
+                return provider
             },
             notesProvider: { [weak self] in
                 guard let self else { return NotesProvider(store: NotesStore()) }
@@ -1879,7 +2420,10 @@ public final class LedgeCoordinator {
     private static func transientSatellite(for activity: Activity) -> SatelliteContent? {
         switch activity.payload {
         case .device(let payload):
-            guard payload.isConnected else { return nil }
+            // Anything but a departure. A goodbye has no glyph to flash; an
+            // arrival does, and so does a case opening on the desk, whose
+            // connection to this Mac is unknown either way.
+            guard payload.isConnected != false else { return nil }
             return .device(symbolName: payload.symbolName, tint: .neutral)
         case .power(let payload):
             guard payload.isCharging else { return nil }
@@ -1960,10 +2504,16 @@ public final class LedgeCoordinator {
                 if self.state.phase == .companion {
                     self.showSatellite(.level(readout), source: LevelsProvider.activityID)
                 } else if self.levelsCardIsOpen {
-                    // The Levels card *is* the readout. Summoning the HUD
-                    // over it swapped card for panel and back on every key,
-                    // and the card came back showing the level it opened
-                    // with; its bars follow `latestLevel` instead.
+                    // The Levels card *is* the readout. Summoning the HUD over
+                    // it swapped card for panel and back on every key, and the
+                    // card came back showing the level it opened with.
+                    //
+                    // It follows the provider's publishes instead — and a
+                    // brightness key produces none of its own, because
+                    // brightness has no change notification and is polled by
+                    // whoever needs it. So ask. Only while the card is open:
+                    // nothing enumerates devices otherwise.
+                    self.levelsProviderRef?.republish()
                 } else {
                     self.send(.hudRequested(self.preferences.hudDuration))
                 }
@@ -2053,19 +2603,28 @@ public final class LedgeCoordinator {
     /// so external displays keep their gamma bookkeeping.
     private func makeLevelsActions() -> LevelsActions {
         LevelsActions(
-            outputs: { [weak self] in self?.currentOutputs() ?? [] },
-            displays: { [weak self] in self?.hud.brightnessDisplays() ?? [] },
-            setOutputVolume: { id, level in
-                // The same one operation the HUD bar and the keys use, and the
-                // same answer handed back: the card draws what the device did.
-                guard let result = VolumeController.apply(level: level, on: id) else { return nil }
-                return LevelFeedback(level: result.shownLevel, isMuted: result.showsMuted)
-            },
-            setDisplayBrightness: { [weak self] id, level in
-                self?.hud.adjustBrightness(of: id, to: level)
-            },
+            rows: { [weak self] in self?.levelRows() ?? [] },
+            setLevel: { [weak self] id, level in self?.setLevel(id, to: level) },
+            toggleMute: { [weak self] id in self?.toggleMute(id) },
+            // Not wired, and the rows say so by not offering it. The output
+            // list belongs to the Now Playing card's AirPlay button and has no
+            // seam anything else can open it through; drawing a chevron here
+            // that did nothing would be exactly the dead control this card is
+            // being rebuilt to be rid of.
+            swapOutput: { _ in },
             setDragging: { [weak self] dragging in
                 guard let self else { return }
+                // The device the gesture owns, snapshotted on the first touch
+                // and held for the whole drag. Resolving the current output on
+                // every tick meant plugging in headphones mid-drag moved the
+                // drag to them: the number went on moving, so there was
+                // nothing to see, and the device being changed was not the one
+                // being looked at.
+                if dragging {
+                    self.levelDrag.began(on: self.currentOutputs().first(where: \.isCurrent)?.id)
+                } else {
+                    self.levelDrag.ended()
+                }
                 self.setHUDDragging(dragging)
                 // Quiet from the first touch until well after release: the
                 // hardware's answering change events (CoreAudio, the
@@ -2074,6 +2633,145 @@ public final class LedgeCoordinator {
                 // mid-drag) self-heals instead of silencing the HUD for good.
                 self.levelsCardQuietUntil = Date().timeIntervalSinceReferenceDate + (dragging ? 30 : 2)
             }
+        )
+    }
+
+    /// Every level there is, as rows.
+    ///
+    /// Built here because this is the only layer that can ask the hardware
+    /// anything, and read in `LedgeUI`, which cannot. One list, so the card
+    /// and the ears can no longer disagree about what exists.
+    private func levelRows() -> [LevelRow] {
+        var rows: [LevelRow] = []
+
+        if let output = currentOutputs().first(where: \.isCurrent) {
+            rows.append(soundRow(output))
+        } else {
+            // The row stays, so the card keeps its shape, and says why.
+            rows.append(LevelRow(id: Self.soundRowID, kind: .sound, name: LevelCopy.sound,
+                                 control: .unreadable, note: .noOutput))
+        }
+
+        for display in hud.brightnessDisplays() {
+            rows.append(displayRow(display))
+        }
+        return rows
+    }
+
+    static let soundRowID = "sound"
+
+    private func soundRow(_ output: AudioOutputOption) -> LevelRow {
+        // A level the device will not let anybody set — HDMI, some USB
+        // interfaces. No line to drag, and a sentence saying where the volume
+        // actually lives rather than a bar that does nothing.
+        guard let level = output.level else {
+            return LevelRow(id: Self.soundRowID, kind: .sound, name: output.name,
+                            control: .fixed, note: .fixedElsewhere)
+        }
+        return LevelRow(
+            id: Self.soundRowID, kind: .sound, name: output.name,
+            control: .level(level), isMuted: output.isMuted,
+            canMute: true, canSwap: false,
+            note: levelNotes[Self.soundRowID]
+        )
+    }
+
+    private func displayRow(_ display: DisplayLevelOption) -> LevelRow {
+        let id = "display-\(display.id)"
+        // An external panel is dimmed with a gamma ramp rather than a
+        // backlight, so below the floor the picture is unreadable and the
+        // controller clamps. The card draws that start hatched and stops the
+        // fill at the tick — a bar that followed the pointer to zero while
+        // the screen sat at 18% was the control lying.
+        let floor = display.isBuiltIn ? 0 : DisplayBrightnessController.gammaFloor
+        // No standing sentence. The hatched start and the tick already say
+        // the line cannot go below there, which is the whole of what the
+        // explanation added — and a caveat under a row somebody has not
+        // touched is a card explaining itself rather than a card. A refusal or
+        // a half-applied change still speaks, because those are answers to
+        // something the user just did.
+        return LevelRow(
+            id: id, kind: .display, name: display.name,
+            control: .level(display.level),
+            floor: floor,
+            note: levelNotes[id]
+        )
+    }
+
+    /// What a row has to say, until it stops saying it.
+    ///
+    /// A refusal is the answer to something the user just did, so it is theirs
+    /// for a few seconds and then gone. Kept here rather than in the card
+    /// because the card is rebuilt on every publish.
+    private var levelNotes: [String: LevelRow.Note] = [:]
+
+    private func say(_ note: LevelRow.Note?, on id: String) {
+        levelNotes[id] = note
+        guard note != nil else { return }
+        let era = levelNoteEra + 1
+        levelNoteEra = era
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(LevelCopy.noteSeconds))
+            guard let self, self.levelNoteEra == era else { return }
+            self.levelNotes[id] = nil
+        }
+    }
+    private var levelNoteEra = 0
+
+    /// Which output a level drag owns. See `LevelDragTarget`.
+    private var levelDrag = LevelDragTarget<UInt32>()
+
+    private func setLevel(_ id: String, to level: Double) -> LevelRow? {
+        if id == Self.soundRowID {
+            let outputs = currentOutputs()
+            guard let current = outputs.first(where: \.isCurrent) else { return nil }
+            // The held device while a drag is in flight, and the system's
+            // otherwise — but never a held device the system has stopped
+            // reporting, because an output unplugged mid-drag is nothing to
+            // write to.
+            let target = levelDrag.device(
+                current: current.id,
+                isStillPresent: { held in outputs.contains { $0.id == held } }
+            )
+            guard let target,
+                  let output = outputs.first(where: { $0.id == target }) else { return nil }
+            guard let result = VolumeController.apply(level: level, on: output.id) else {
+                say(.refused, on: id)
+                return soundRow(output)
+            }
+            // The device's answer, and the reason when it is not the answer
+            // that was asked for.
+            switch result.scalarOutcome {
+            case .partial: say(.partial, on: id)
+            case .unsupported, .refused: say(.refused, on: id)
+            default: say(nil, on: id)
+            }
+            return LevelRow(
+                id: id, kind: .sound, name: output.name,
+                control: .level(result.shownLevel), isMuted: result.showsMuted,
+                canMute: true, canSwap: false, note: levelNotes[id]
+            )
+        }
+        guard let display = hud.brightnessDisplays().first(where: { "display-\($0.id)" == id })
+        else { return nil }
+        hud.adjustBrightness(of: display.id, to: level)
+        presentation.hudDisplays = hud.brightnessDisplays()
+        // Read back rather than assumed: the controller clamps an external
+        // panel at its floor, and the number on the card is the panel's.
+        guard let after = hud.brightnessDisplays().first(where: { $0.id == display.id })
+        else { return nil }
+        return displayRow(after)
+    }
+
+    private func toggleMute(_ id: String) -> LevelRow? {
+        guard id == Self.soundRowID,
+              let output = currentOutputs().first(where: \.isCurrent) else { return nil }
+        let result = VolumeController.apply(muted: !output.isMuted, on: output.id)
+        if !result.muteOutcome.isComplete { say(.refused, on: id) } else { say(nil, on: id) }
+        return LevelRow(
+            id: id, kind: .sound, name: output.name,
+            control: .level(result.shownLevel), isMuted: result.showsMuted,
+            canMute: true, canSwap: false, note: levelNotes[id]
         )
     }
 
@@ -2211,13 +2909,18 @@ public final class LedgeCoordinator {
 
     private func makeNotesActions() -> NotesActions {
         NotesActions(
-            open: { [weak self] id in self?.notesWindow.open(noteID: id) },
-            create: { [weak self] in self?.notesWindow.create() },
-            delete: { [weak self] id in
-                guard let self else { return }
-                let store = self.notes
-                Task { await store.delete(id) }
+            open: { [weak self] id in
+                guard let self else { return false }
+                return await self.notesWindow.open(noteID: id)
             },
+            create: { [weak self] in self?.notesWindow.create() },
+            // No delete. It called the store while the window still had the
+            // note open, and the window's next keystroke wrote it straight
+            // back — deleting stays in the window, with the note in front of
+            // the person doing it.
+            openAll: { [weak self] in self?.notesWindow.openAllNotes() },
+            copyMarkdown: { [weak self] id in self?.notesWindow.copy(.markdown, noteID: id) },
+            copyPlainText: { [weak self] id in self?.notesWindow.copy(.plainText, noteID: id) },
             hovering: { [weak self] over in
                 self?.presentation.notesTileHovered = over
             }
@@ -2238,6 +2941,10 @@ public final class LedgeCoordinator {
     /// user had switched it off, so a drop is never silently discarded.
     private func acceptDroppedFiles(_ urls: [URL]) -> Bool {
         guard !urls.isEmpty else { return false }
+        // Told before anything else can fail: the tour's Drop step is about
+        // the gesture landing on the notch, which it just did, whether or not
+        // the shelf had room for this particular file.
+        tellTheTour(.fileDropped)
         let added = shelf.add(urls)
         guard added > 0 else { return true }
         announceShelf()
@@ -2467,7 +3174,22 @@ public final class LedgeCoordinator {
     private func refreshSettingsModel() {
         installDevicesModelIfNeeded()
         settingsModel.isSuppressingSystemHUD = hud.isSuppressing
+        // Sparkle takes the check back when it finishes.
+        if updateCheckInFlight, canCheckForUpdates() { updateCheckInFlight = false }
+        settingsModel.isCheckingForUpdates = updateCheckInFlight
+        // The probe tap's own answer. macOS can report an Accessibility grant
+        // while holding the key presses back until the app starts again, and
+        // every list in the window says "Granted" through all of it.
+        settingsModel.accessibilityIsInEffect = MediaKeyInterceptor.isTrusted
         settingsModel.focusFolderGranted = focusFolder.isReadable
+        // macOS makes this folder the first time a Focus is used. Until then
+        // the row says so and offers nothing, instead of a button that opens
+        // a panel on a folder that is not there.
+        settingsModel.focusFolderExists = FileManager.default.fileExists(
+            atPath: FocusDatabaseAccess.databaseFolder.path
+        )
+        settingsModel.accessibilityWasAskedBefore = preferences.accessibilityWasAsked
+        settingsModel.appLocation = Self.appLocationToOffer()
         // Read every time rather than cached at launch: a helper installed
         // while Ledge is running must not need a relaunch to be believed.
         settingsModel.keepAwakeHelper = KeepAwakeHelperInstall.current()
@@ -2488,8 +3210,26 @@ public final class LedgeCoordinator {
             },
             isPermitted: { [weak self] kind in
                 self?.permissions.status(of: kind) == .granted
+            },
+            wasSwitchedOnByHand: { [weak self] id in
+                self?.preferences.providerWasSwitchedOnByHand(id) ?? false
             }
         )
+    }
+
+    /// Where Ledge is, when that is somewhere worth putting in the
+    /// Accessibility list.
+    ///
+    /// Nil from a disk image or a translocated path. An entry made from either
+    /// grants a copy that disappears when the image is ejected or the quarantine
+    /// copy is cleaned up, and the list then shows Ledge switched on while
+    /// nothing works — the exact state the guide's drag exists to get somebody
+    /// out of. The guide says to move Ledge to Applications instead.
+    private static func appLocationToOffer() -> String? {
+        let path = Bundle.main.bundleURL.resolvingSymlinksInPath().path
+        guard !path.hasPrefix("/Volumes/") else { return nil }
+        guard !path.contains("/AppTranslocation/") else { return nil }
+        return path
     }
 
     /// Tears everything down.
@@ -2516,8 +3256,13 @@ public final class LedgeCoordinator {
         restingHold = false
         parkedHUDCheck?.cancel()
         parkedHUDCheck = nil
-        permissionWatch?.cancel()
-        permissionWatch = nil
+        stopWatchingForPermission()
+        // A window closing because Ledge is going away is not an answer to
+        // the tour. It is the one case the tour *should* come back from.
+        onboarding.appIsQuitting()
+        tourListeners.removeAll()
+        attempt = nil
+        handoffCard.clear()
         preferences.onReset = {}
         focusBaseline?.stopWatching()
         focusBaseline = nil
@@ -2663,6 +3408,12 @@ public final class LedgeCoordinator {
         // mirrored before the phase guard below.
         presentation.isHovering = state.isHovering
 
+        // The self-view's minute only runs while the pointer is away, and
+        // this is the one place that knows. Told on every event rather than
+        // on a phase change, because the pointer leaving a held-open card
+        // changes no phase at all — that is the whole point of the hold.
+        selfView.pointerChanged(inside: state.isHovering, now: Self.selfViewClock())
+
         // A full HUD is a guest too — it borrows the whole compact view and
         // owes the track it interrupted the island back. Checked on every
         // event rather than only on a phase change, since a guest can leave
@@ -2683,8 +3434,22 @@ public final class LedgeCoordinator {
 
     }
 
+    /// Whether a phase is one where the notch is open under the pointer.
+    private static func isOpen(_ phase: NotchPhase) -> Bool {
+        phase == .hover || phase == .expanded
+    }
+
     /// Only when the island actually moved between phases.
     private func followPhaseChange(from previous: NotchPhase, event: NotchEvent) {
+        // The tour's two do-it steps watch the real notch. Only the open and
+        // close a *person* caused: a peek retiring is the notch finishing
+        // something of its own, and crediting that to the reader would tell
+        // them they did something they did not do.
+        if Self.isOpen(state.phase), !Self.isOpen(previous) {
+            tellTheTour(.opened)
+        } else if Self.isOpen(previous), !Self.isOpen(state.phase) {
+            tellTheTour(.closed)
+        }
         // A slider drag lives on an open surface — the Levels card, the route
         // menu, the widened HUD. When the phase leaves all of them (a pin
         // release dismissing the card mid-drag, a peek), the gesture's view is
@@ -2694,6 +3459,16 @@ public final class LedgeCoordinator {
         let openSurface = state.phase == .hover || state.phase == .expanded || state.phase == .hud
         if isAdjustingHUD, !openSurface {
             Task { @MainActor [weak self] in self?.setHUDDragging(false) }
+        }
+        // The card is gone — collapsed by a display change, a shut lid, a
+        // swipe, a click. Whatever closed it, the camera goes with it: a
+        // picture nobody can see is a camera light nobody can explain.
+        //
+        // On the next turn, like the drag above it: letting go sends an event
+        // of its own, and sending one from inside the reducer's own follow-up
+        // is a reducer running inside a reducer.
+        if !openSurface {
+            Task { @MainActor [weak self] in self?.selfView.cardWentAway() }
         }
         // The satellite belongs to the resting companion alone; any phase
         // movement (hover, peek, the full HUD) supersedes it. An *open* is a
@@ -3444,7 +4219,10 @@ public final class LedgeCoordinator {
 
     // MARK: - Settings
 
-    public func showSettings() {
+    /// - Parameter pane: which pane to open on, when the caller means a
+    ///   particular one — the tour's "Choose Cards…" is a promise about where
+    ///   the window opens. Nil keeps whatever the window was last showing.
+    public func showSettings(pane: String? = nil) {
         // Never refuse to open: with no panel at all — a login item starting
         // with the lid shut — this used to return silently and the menu item
         // simply did nothing.
@@ -3453,18 +4231,20 @@ public final class LedgeCoordinator {
             ?? .simulated(screenSize: CGSize(width: 1470, height: 956))
 
         if let settingsWindow {
-            // Re-hosted only when the geometry actually changed: the
-            // Appearance sliders' bounds come from the display, but a
-            // rebuild also resets the view's @State — reopening must not
-            // snap the selected pane back to the first tab every time.
-            if lastSettingsGeometry != geometry {
+            // Re-hosted only when the geometry actually changed, or when a
+            // caller asked for a pane: the Appearance sliders' bounds come
+            // from the display, but a rebuild also resets the view's @State —
+            // reopening must not snap the selected pane back to the first tab
+            // every time.
+            if lastSettingsGeometry != geometry || pane != nil {
                 lastSettingsGeometry = geometry
                 settingsWindow.contentView = NSHostingView(
                     rootView: SettingsView(
                         preferences: preferences,
                         geometry: geometry,
                         actions: makeSettingsActions(),
-                        model: settingsModel
+                        model: settingsModel,
+                        startPane: pane
                     )
                 )
             }
@@ -3492,7 +4272,8 @@ public final class LedgeCoordinator {
                 preferences: preferences,
                 geometry: geometry,
                 actions: actions,
-                model: settingsModel
+                model: settingsModel,
+                startPane: pane
             )
         )
         window.center()
@@ -3509,27 +4290,194 @@ public final class LedgeCoordinator {
     public var onCheckForUpdates: () -> Void = {}
     public var canCheckForUpdates: () -> Bool = { false }
 
+    /// Whether a check Ledge asked for is still running.
+    ///
+    /// Sparkle refuses a second check while one is out, and says so through
+    /// `canCheckForUpdates`. That alone cannot drive a button: it is also
+    /// false when there is no updater at all — in a preview, in a test, in a
+    /// build without Sparkle — and the button would sit at "Checking…"
+    /// forever. So the fact being tracked is "we started one and it has not
+    /// come back", which is only ever true after a press.
+    private var updateCheckInFlight = false
+
     /// Both permission entry points use the same window and grant lifecycle.
     private func requestPermission(_ kind: PermissionKind) {
         // Usually seeded at startup. Also establish a before-reading if an
         // explicit request is the first entry point, so its grant is a change.
         if lastPermissionSnapshot.isEmpty { revalidatePermissions() }
         standAsideForSystemUI()
+        // Accessibility's request *is* a handoff: `AXIsProcessTrustedWithOptions`
+        // puts Ledge in the list and opens that list, and the switch is
+        // flipped there rather than in a prompt. It goes through the request
+        // rather than through the pane alone because only that call puts
+        // Ledge in the list at all.
+        // Every press is an attempt, whether or not it leaves the app: it is
+        // the token, not the permission, that decides whose ending is whose.
+        let token = beganAttempt(for: kind, handingOff: kind.isGrantedInSystemSettings)
         Task { @MainActor [weak self] in
             guard let self else { return }
+            // A press can be overtaken before this task has had a turn —
+            // the attempt is made synchronously, the request is not — and
+            // macOS cannot be asked to take a request back. Accessibility's
+            // opens a System Settings pane, so a stale one sends somebody
+            // towards the permission they have already moved on from.
+            guard self.attempt?.token == token else { return }
             let status = await self.permissions.request(kind)
             // Update the snapshot as well as providers, so the next poll does
             // not treat this same answer as a second grant and restart again.
             self.revalidatePermissions()
-            if status == .granted || !kind.isGrantedInSystemSettings {
-                // Answered here, whichever way. There is no return from System
-                // Settings to wait for, and standing aside for a dialog that
-                // has already closed left the window it was asked from sitting
-                // among other applications.
-                self.reclaimFront()
-            } else {
-                self.watchForPermission(kind)
+            // Granting the calendar is the reason to switch the calendar card
+            // on, and anybody who just allowed it did not do it to leave the
+            // card hidden. About the answer rather than about the press, so
+            // it happens whoever owns the attempt by now.
+            if kind == .calendars, status == .granted {
+                self.activities.setProvider("calendar", enabled: true)
+                self.refreshSettingsModel()
             }
+            // And again on the way back: this press may have been overtaken
+            // while the answer was in flight. Everything below installs a
+            // watch or takes the foreground, either of which would cancel
+            // the newer press's watch or pull the front away from it.
+            guard self.attempt?.token == token else { return }
+            if status == .granted || !kind.isGrantedInSystemSettings {
+                // Location is the exception, and it is an exception twice
+                // over: its request returns as soon as it has *asked*, and
+                // the answer arrives through a delegate. Ending the wait
+                // here would take the spinner away while the dialog is still
+                // up; taking the front back would put Ledge's own window
+                // over that dialog.
+                let stillAsking = !kind.answersBeforeReturning && status == .notDetermined
+                if stillAsking {
+                    self.watchForPermission(kind) { [weak self] in
+                        // Ownership decides the foreground too: a watch whose
+                        // press has been overtaken must not pull the front
+                        // back from whatever replaced it.
+                        guard let self, self.attempt?.token == token else { return }
+                        self.endedAttempt(token)
+                        // The front comes back when the answer does, not
+                        // before it.
+                        self.reclaimFront()
+                    }
+                } else {
+                    // Answered here, whichever way — including the answer
+                    // "nothing changed", which is what macOS declining to
+                    // prompt looks like from here. There is no return from
+                    // System Settings to wait for, and standing aside for a
+                    // dialog that has already closed left the window it was
+                    // asked from sitting among other applications.
+                    self.endedAttempt(token)
+                    self.reclaimFront()
+                }
+            } else {
+                self.watchForPermission(kind) { [weak self] in self?.endedAttempt(token) }
+            }
+        }
+    }
+
+    /// Whether anything on this side still needs the helper.
+    ///
+    /// Checked before the daemon is asked and again after it answers, so a
+    /// session that began during the question is not unregistered out from
+    /// under itself.
+    @MainActor
+    private func whatTheHelperStillOwes() -> KeepAwakeHelperRemoval? {
+        guard let keepAwake else { return nil }
+        if keepAwake.state.isRunning || keepAwake.lidReading.isLive { return .stillOwesWork }
+        // A Start that has been admitted and is still being written is
+        // invisible to both of the readings above: the provider is Ready
+        // until the journal write lands. Removing the helper in that window
+        // hands somebody a session that cannot be held through a shut lid.
+        if keepAwake.isStarting { return .stillOwesWork }
+        return nil
+    }
+
+    /// Whether a session may be started right now.
+    ///
+    /// The other half of the removal gate. Serialising removal against
+    /// *itself* is not enough: a Start admitted while the daemon is being
+    /// asked about its obligations would be allowed to proceed into a helper
+    /// that is about to be unregistered.
+    @MainActor
+    var mayStartKeepAwake: Bool { keepAwakeOperation == nil }
+
+    /// What Ledge is doing to the helper right now, if anything.
+    ///
+    /// On the coordinator rather than in the pane: the pane can be closed,
+    /// reopened or rebuilt while a privileged operation is in flight, and a
+    /// fresh view with no memory of it used to offer the same button again.
+    private var keepAwakeOperation: KeepAwakeOperation?
+
+    /// Takes the lid-closed helper back out, if it is safe to.
+    ///
+    /// The guard was written when the protocol was — three lines above the
+    /// call it belongs to — and this button shipped for an hour without it,
+    /// offered in red beside a running session. A daemon with a setting still
+    /// to put back is the only thing that can put it back, and unregistering
+    /// it there leaves a Mac that cannot sleep and nothing left able to fix
+    /// it. That is the failure this entire feature is built around avoiding.
+    @MainActor
+    private func removeKeepAwakeHelper() async -> KeepAwakeHelperRemoval {
+        // Only one of these at a time, and never while something is starting
+        // a session. The removal has an await in the middle of it, and a
+        // second press — or a Start arriving during that await — used to be
+        // admitted alongside it.
+        guard keepAwakeOperation == nil else {
+            return .failed("Ledge is already working on the helper. Wait for that to finish.")
+        }
+        keepAwakeOperation = .removing
+        settingsModel.keepAwakeOperation = .removing
+        defer {
+            keepAwakeOperation = nil
+            settingsModel.keepAwakeOperation = nil
+        }
+
+        if let reason = whatTheHelperStillOwes() { return reason }
+
+        // What the daemon says about work nobody here remembers — a hold from
+        // a run that crashed, or the other build's. Its own answer, not an
+        // inference from ours.
+        // No client, but a registered daemon: fail closed. Client creation
+        // needs the helper's requirement metadata, which a bundle can be
+        // missing while the daemon is registered and holding something —
+        // and "we could not ask" is not "there is nothing to ask about".
+        if keepAwakeHelperClient == nil, KeepAwakeHelperInstall.current() != .notInstalled {
+            return .failed(
+                "Ledge can't reach the helper to ask whether it still has a setting to put back, "
+                    + "so it left it alone."
+            )
+        }
+        if let client = keepAwakeHelperClient {
+            let status = await client.refreshStatus()
+            // An answer, or nothing doing. A timeout, a disconnected helper
+            // or any other failure answers nil, and nil used to fall straight
+            // through to `unregister()` — removing the one thing that can put
+            // a sleep setting back, at exactly the moment Ledge cannot say
+            // whether it is holding one.
+            guard let status else {
+                return .failed(
+                    "Ledge couldn't reach the helper to ask whether it still has a setting "
+                        + "to put back, so it left it alone. Try again in a moment."
+                )
+            }
+            guard status.mayUnregister else { return .stillOwesWork }
+        }
+
+        // Asked again on this side of the await: a session can have started
+        // while the daemon was answering, and an answer about a minute ago
+        // does not authorise unregistering underneath it.
+        if let reason = whatTheHelperStillOwes() { return reason }
+
+        switch KeepAwakeHelperSetup.unregister() {
+        case .removed:
+            refreshSettingsModel()
+            await keepAwake?.refreshLid()
+            return .removed
+        case .refused(let why):
+            refreshSettingsModel()
+            return .failed(why)
+        case .installed, .needsApproval:
+            refreshSettingsModel()
+            return .failed("macOS did not take the helper out.")
         }
     }
 
@@ -3542,7 +4490,12 @@ public final class LedgeCoordinator {
                 NSPasteboard.general.setString(text, forType: .string)
             },
             quit: { NSApp.terminate(nil) },
-            checkForUpdates: { [weak self] in self?.onCheckForUpdates() },
+            checkForUpdates: { [weak self] in
+                guard let self else { return }
+                self.updateCheckInFlight = true
+                self.onCheckForUpdates()
+                self.refreshSettingsModel()
+            },
             canCheckForUpdates: { [weak self] in self?.canCheckForUpdates() ?? false },
             runningApps: {
                 // Dock apps and menu-bar apps, not the dozens of background
@@ -3558,6 +4511,18 @@ public final class LedgeCoordinator {
             },
             runningChromium: { RunningChromium.all() },
             installKeepAwakeHelper: { [weak self] in
+                guard let self else { return .unavailable }
+                // The same gate the removal takes: one privileged operation
+                // at a time, held where a rebuilt pane can still see it.
+                guard self.keepAwakeOperation == nil else {
+                    return .refused("Ledge is already working on the helper.")
+                }
+                self.keepAwakeOperation = .settingUp
+                self.settingsModel.keepAwakeOperation = .settingUp
+                defer {
+                    self.keepAwakeOperation = nil
+                    self.settingsModel.keepAwakeOperation = nil
+                }
                 guard KeepAwakeHelperInstall.current() != .unsignedBuild else { return .unavailable }
                 let outcome: KeepAwakeHelperSetupOutcome
                 switch KeepAwakeHelperSetup.register() {
@@ -3569,24 +4534,32 @@ public final class LedgeCoordinator {
                 // The pane's own reading is a separate fact from the outcome
                 // of this press, and it is the one the rest of the section is
                 // drawn from.
-                self?.refreshSettingsModel()
+                self.refreshSettingsModel()
                 return outcome
             },
             showKeepAwakeHelperApproval: { KeepAwakeHelperSetup.showApproval() },
+            removeKeepAwakeHelper: { [weak self] in
+                guard let self else { return .failed("Ledge is shutting down.") }
+                return await self.removeKeepAwakeHelper()
+            },
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
-            requestAccessibility: { [weak self] in self?.requestPermission(.accessibility) },
             requestPermission: { [weak self] kind in self?.requestPermission(kind) },
             openPermissionSettings: { [weak self] kind in
                 guard let self else { return }
                 self.standAsideForSystemUI()
+                let token = self.beganAttempt(for: kind, handingOff: true)
                 self.permissions.openSettings(for: kind)
-                self.watchForPermission(kind)
+                // However this ends — an answer, the window closing, the four
+                // minutes running out — the row stops saying it is waiting
+                // and the notch stops holding the lock.
+                self.watchForPermission(kind) { [weak self] in self?.endedAttempt(token) }
             },
             // Opening the pane is a third moment worth re-reading at, and it
             // must act on what it finds rather than merely draw it: seeing
             // "Not granted" beside a provider that is still running would be
             // the settings window disagreeing with the app.
             refreshPermissions: { [weak self] in self?.revalidatePermissions() },
+            openLoginItems: { KeepAwakeHelperSetup.showApproval() },
             setProviderEnabled: { [weak self] id, enabled in
                 guard let self else { return }
                 // Keep Awake is the one switch with work to do on the way off,
@@ -3601,7 +4574,34 @@ public final class LedgeCoordinator {
             },
             showOnboarding: { [weak self] in self?.showOnboarding() },
             openSource: { NSWorkspace.shared.open(Self.sourceURL) },
-            chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() }
+            chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() },
+            stopWaiting: { [weak self] in
+                guard let self else { return }
+                // The one way out that does not depend on System Settings
+                // doing anything. Cancelling the watch runs its own ending,
+                // which is what takes the row's spinner away.
+                self.stopWatchingForPermission()
+                self.endedCurrentAttempt()
+                self.reclaimFront()
+            },
+            observeNotch: { [weak self] listener in
+                self?.observeNotch(listener) ?? {}
+            },
+            tourStep: { [weak self] step in self?.tourStepChanged(step) },
+            appTile: { [weak self] in
+                guard let self, let location = self.settingsModel.appLocation else { return nil }
+                return AnyView(AppTile(
+                    url: URL(fileURLWithPath: location),
+                    name: PermissionGuideCopy.tileName,
+                    onDragEnded: { [weak self] outcome in
+                        self?.settingsModel.appDragEnded = outcome
+                    },
+                    onCopyLocation: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(location, forType: .string)
+                    }
+                ))
+            }
         )
     }
 

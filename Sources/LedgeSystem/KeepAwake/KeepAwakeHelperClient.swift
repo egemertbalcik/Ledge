@@ -96,10 +96,28 @@ public enum KeepAwakeHelperState: Sendable, Equatable {
     /// can see the end of. So `ok` is an acceptance, not a confirmation, and
     /// everything between it and the readback belongs here.
     case pending
-    /// The daemon has stopped answering. The hold is probably still standing —
-    /// the daemon drops it on its own lease, not on our silence — so this is a
-    /// warning, not a death. The heartbeat keeps going.
+    /// The daemon has stopped answering a hold it had already accepted. The
+    /// hold is probably still standing — the daemon drops it on its own
+    /// lease, not on our silence — so this is a warning, not a death. The
+    /// heartbeat keeps going.
     case temporarilyUnavailable
+    /// A hold that got through and that nothing can now vouch for.
+    ///
+    /// Accepted and never confirmed, or confirmed longer ago than the lease
+    /// it stands on. Deliberately neither of its neighbours: the daemon may
+    /// be holding this Mac on a renewal whose reply was lost, and it may have
+    /// let go an hour ago. `temporarilyUnavailable` claims the first,
+    /// `unreachable` claims the second, and both were being said about a
+    /// state that is neither.
+    case unknownWhetherHeld
+    /// The daemon has never answered at all, so nothing was ever held.
+    ///
+    /// The same silence as `temporarilyUnavailable` and the opposite fact.
+    /// Read as that one, the card said the hold almost certainly still stood
+    /// and the menu bar put up its badge — and somebody shut their lid on a
+    /// Mac nothing was holding. There is no lease to outlive here, because
+    /// there was never a hold.
+    case unreachable
     /// The daemon answered and said no.
     case refused(KeepAwakeHelperCode)
 }
@@ -122,6 +140,14 @@ public actor KeepAwakeHelperClient {
     /// inside that range rather than at its edge so a clamp is never a
     /// surprise.
     public static let lease: TimeInterval = 90
+
+    /// How long silence is read as "very probably still held".
+    ///
+    /// The lease the daemon goes by, and nothing more generous. A hold is
+    /// renewed every heartbeat; if nothing has been accepted for a whole
+    /// lease, the daemon has either let go or is not there, and either way
+    /// the Mac is not being held by anything we can point to.
+    static var confidenceWindow: TimeInterval { lease }
     /// How long to wait for one call.
     ///
     /// Deliberately longer than the heartbeat interval. The daemon answers a
@@ -144,6 +170,88 @@ public actor KeepAwakeHelperClient {
     /// heartbeat still carrying it is answered `stale` on purpose. Carrying on
     /// with the same number would retry a request the daemon has already
     /// decided about, forever.
+    /// Whether this session has ever had a hold accepted.
+    ///
+    /// The difference between "we cannot reach the daemon that is holding
+    /// this Mac" and "we have never reached it at all" — the same silence,
+    /// opposite facts, and only one of them is survivable.
+    /// A `begin` the daemon answered with ok.
+    ///
+    /// Acceptance, which is not application: the daemon writes its lease and
+    /// answers, and runs the privileged write after. So this says a request
+    /// got through and says nothing about the Mac.
+    private var everAccepted = false
+    /// When the daemon last told us the setting was actually on.
+    ///
+    /// The only thing that ever justified "the hold almost certainly still
+    /// stands". Acceptance was standing in for it, so a hold that was
+    /// accepted and never applied — status reporting SleepDisabled=0, the
+    /// renewal then failing — read as very probably holding a Mac that
+    /// nothing was holding.
+    private var lastConfirmed: Date?
+    /// When the daemon last told us the setting was *not* on.
+    ///
+    /// Negative evidence, kept beside the positive and compared by age. A
+    /// status reporting the setting off did not clear the older confirmation
+    /// it contradicted, so a renewal that then went unanswered produced "it
+    /// almost certainly still stands" out of evidence a newer reading had
+    /// already refuted.
+    private var lastDenied: Date?
+    /// Whether a request has ever gone out for this session at all.
+    ///
+    /// Not the same as one having been accepted. The daemon can take a lease
+    /// and lose the reply, so a first request that was never answered is an
+    /// unknown outcome — and reading it as "nothing is being held" put a
+    /// sentence on the card promising that shutting the lid would sleep the
+    /// Mac, over a Mac that was being held.
+    private var everIssued = false
+    /// When the daemon last said yes.
+    ///
+    /// `everHeld` alone says a hold was once accepted and never says how long
+    /// ago. Silence was therefore read as "very probably still standing" for
+    /// ever, including long past the lease the daemon itself goes by — so a
+    /// daemon that died an hour ago still read as almost certainly holding
+    /// this Mac. The lease is the only thing that was ever keeping it awake,
+    /// and once it has run out, saying so is not pessimism.
+
+
+    /// What silence means, given how long it has lasted.
+    ///
+    /// Three answers, not two. Never accepted: nothing is held, and saying
+    /// otherwise is the worst thing this file can do. Accepted recently: the
+    /// daemon lets go on its own lease rather than on our inability to reach
+    /// it, so the hold is very likely standing and the next heartbeat may
+    /// well land. Accepted, but longer ago than the lease: the lease it was
+    /// standing on has run out, and `stale` is the sentence that says so and
+    /// says what to do about it.
+    private func silenceReading() -> KeepAwakeHelperState {
+        // Nothing was ever even sent: there is nothing for the daemon to be
+        // holding, and saying otherwise is the worst thing this file can do.
+        guard everIssued else { return .unreachable }
+        return confidence()
+    }
+
+    /// What the newest evidence supports, as of now.
+    ///
+    /// Asked at every reading rather than computed once when a call came
+    /// back. Confidence that only expired when the *next* request finished
+    /// meant a client whose daemon had gone away kept answering "almost
+    /// certainly still stands" for as long as nothing else happened — and
+    /// nothing else happening is exactly the case.
+    private func confidence() -> KeepAwakeHelperState {
+        guard let confirmed = lastConfirmed else { return .unknownWhetherHeld }
+        // Newest wins. A status that reported the setting off is a fact about
+        // a later moment than the confirmation before it.
+        if let denied = lastDenied, denied >= confirmed { return .unknownWhetherHeld }
+        guard now().timeIntervalSince(confirmed) <= Self.confidenceWindow else {
+            return .unknownWhetherHeld
+        }
+        // Confirmed inside the lease it stands on: the daemon lets go on its
+        // own lease rather than on our inability to reach it, so the hold is
+        // very likely standing and the next heartbeat may well land.
+        return .temporarilyUnavailable
+    }
+
     private var session: String?
     private var generation = 0
     private var deadline: Date?
@@ -196,7 +304,16 @@ public actor KeepAwakeHelperClient {
         self.sleep = sleep
     }
 
-    public var currentState: KeepAwakeHelperState { state }
+    /// What this client believes, as of being asked.
+    ///
+    /// Derived rather than stored for the one state whose truth is a function
+    /// of the clock. A reassurance that only expired when the *next* request
+    /// finished stood for ever on a client whose daemon had gone away —
+    /// nothing else happening is exactly the case it is supposed to cover.
+    public var currentState: KeepAwakeHelperState {
+        guard state == .temporarilyUnavailable else { return state }
+        return confidence()
+    }
     public var status: KeepAwakeHelperStatus? { lastStatus }
 
     /// Takes the hold and starts renewing it.
@@ -302,9 +419,46 @@ public actor KeepAwakeHelperClient {
     /// memory, so this is cheap enough to drive a settings pane.
     @discardableResult
     public func refreshStatus() async -> KeepAwakeHelperStatus? {
+        // Whose observation this is, taken before the call. A status held in
+        // flight while its session ended and another began came back and
+        // filed itself as the *new* session's evidence, so B read as
+        // "almost certainly still stands" on the strength of something only
+        // ever true of A.
+        let era = lifecycle
+        let id = session
         let answer = try? await withTimeout { [link] in try await link.status() }
-        if let answer { lastStatus = answer }
+        guard let answer else { return nil }
+        guard lifecycle == era, session == id else { return answer }
+        lastStatus = answer
+        // Through the same bookkeeping as every other observation. This
+        // cached the status and nothing else, so the card could ask for a
+        // fresh reading, be told the setting was off, and go on saying the
+        // hold almost certainly still stood.
+        record(armed: answer.isArmed)
         return answer
+    }
+
+    /// Files an observation of whether the Mac is actually held.
+    ///
+    /// One place, so positive and negative evidence are always comparable by
+    /// age. Scattered, the negative kind was simply dropped.
+    private func record(armed: Bool) {
+        guard session != nil else { return }
+        if armed {
+            lastConfirmed = now()
+            // Reconciled, not merely filed. Evidence that only changed what a
+            // *later* silence would conclude left the card saying Checking
+            // over a hold a fresh reading had just confirmed.
+            if state == .pending || state == .temporarilyUnavailable
+                || state == .unknownWhetherHeld {
+                state = .holding
+            }
+        } else {
+            lastDenied = now()
+            // And the other way: a reading that says the setting is off must
+            // take the card off `holding` now, not at the next heartbeat.
+            if state == .holding { state = .pending }
+        }
     }
 
     // MARK: - The heartbeat
@@ -345,6 +499,9 @@ public actor KeepAwakeHelperClient {
         // retired any generation whose lease it has already let go.
         let attempt = generation + 1
         issuedGeneration = max(issuedGeneration, attempt)
+        // Recorded before the call, not after it. What makes an outcome
+        // unknown rather than absent is that the request left the building.
+        everIssued = true
         let asked = deadline
 
         let answer: KeepAwakeHelperCode?
@@ -362,11 +519,15 @@ public actor KeepAwakeHelperClient {
         guard lifecycle == era, session == id else { return state }
 
         guard let answer else {
-            // Silence is not death. The daemon lets go on its own lease, not
-            // on our inability to reach it, so the hold is very likely still
-            // standing — and the next heartbeat may well land. Keep the
-            // generation: nothing has told us it was retired.
-            state = .temporarilyUnavailable
+            // Silence after a hold that was once accepted is not death: the
+            // daemon lets go on its own lease, not on our inability to reach
+            // it, so the hold is very likely still standing and the next
+            // heartbeat may well land. Keep the generation — nothing has told
+            // us it was retired.
+            //
+            // Silence before any hold was ever accepted is the opposite fact,
+            // and reading it the same way was the worst bug in this file.
+            state = silenceReading()
             return state
         }
 
@@ -374,6 +535,9 @@ public actor KeepAwakeHelperClient {
 
         switch answer {
         case .ok:
+            // The first acceptance this session has had. Until now there was
+            // nothing to be uncertain *about*.
+            everAccepted = true
             let settled = await confirm(era: era, session: id)
             // Behind the hold, never instead of it, and only once the hold
             // has been answered: the daemon refuses a Low Power Mode request
@@ -409,6 +573,7 @@ public actor KeepAwakeHelperClient {
         guard lifecycle == era, session == id else { return state }
         guard let status else { return .pending }
         lastStatus = status
+        record(armed: status.isArmed)
         return status.isArmed ? .holding : .pending
     }
 
@@ -432,17 +597,24 @@ public actor KeepAwakeHelperClient {
             jump *= 2
             let attempt = refused + jump
             issuedGeneration = max(issuedGeneration, attempt)
+            everIssued = true
 
             let answer = try? await withTimeout { [link] in
                 try await link.hold(session: id, generation: attempt,
                                     until: self.deadline, leaseSeconds: Self.lease)
             }
             guard lifecycle == era, session == id else { return state }
-            guard let answer else { return .temporarilyUnavailable }
+            // The same bookkeeping as an ordinary renewal. Catching up used
+            // to answer `temporarilyUnavailable` whatever had happened, which
+            // put the reassuring sentence over a Mac that had never accepted
+            // anything — and its successes never recorded themselves, so the
+            // silence right after a confirmed catch-up read as nothing held.
+            guard let answer else { return silenceReading() }
 
             generation = attempt
             switch answer {
             case .ok:
+                everAccepted = true
                 let settled = await confirm(era: era, session: id)
                 await pushLowPower()
                 // The catch-up's own awaits are as long as any other, and an
@@ -462,6 +634,10 @@ public actor KeepAwakeHelperClient {
     }
 
     private func forget() {
+        everAccepted = false
+        everIssued = false
+        lastConfirmed = nil
+        lastDenied = nil
         session = nil
         deadline = nil
         generation = 0

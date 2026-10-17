@@ -37,6 +37,15 @@ public final class BluetoothProvider: ActivityProvider {
     /// Where observations go. The catalogue decides alerts now; this provider
     /// only reports what its existing reads already saw.
     private let observations: (any DeviceObservationSink)?
+    /// Where the paired list is published.
+    ///
+    /// This provider is the only thing that reads that list, and two others
+    /// need the answer: the catalogue, to know whose devices it is keeping,
+    /// and the proximity provider, to know whose earbuds it is hearing. It is
+    /// filled from the reads already being made — the startup inventory and
+    /// the ten-minute refresh — so ownership costs no extra query, no extra
+    /// process and no extra scan.
+    private let paired: PairedDeviceRegistry
     private let now: () -> TimeInterval
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
 
@@ -57,10 +66,12 @@ public final class BluetoothProvider: ActivityProvider {
     public init(
         source: any BluetoothDeviceSource,
         observations: (any DeviceObservationSink)? = nil,
+        paired: PairedDeviceRegistry = PairedDeviceRegistry(),
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.source = source
         self.observations = observations
+        self.paired = paired
         self.now = now
     }
 
@@ -85,14 +96,36 @@ public final class BluetoothProvider: ActivityProvider {
             read = Task { @MainActor [weak self] in
                 defer { self?.reads.remove(read) }
                 guard let self else { return }
-                let already = await self.source.connectedDevices()
+                let reading = await self.source.pairedDevices()
                 // The read outlived the provider, or a newer run replaced it.
                 guard !Task.isCancelled, self.session == session else { return }
+                // Nothing answered — a profiler that timed out, or a Mac that
+                // would not say. Publishing an empty list here would tell the
+                // catalogue this Mac is paired with nothing, and it prunes
+                // against that: one slow process used to delete every record
+                // and its battery history.
+                guard let all = reading else {
+                    Self.log.notice("paired list unavailable — keeping the last answer")
+                    return
+                }
+                // Published before anything is reported: the catalogue refuses
+                // devices it cannot place, so the answer has to be in hand
+                // before the observations that depend on it arrive.
+                let acceptance = self.answerPairedList(all.devices, readAt: all.readAt)
+                // A reading older than the one already in hand is not acted
+                // on at all. Its battery levels are exactly as old as its
+                // membership, and reporting them stamped with now overwrote
+                // newer readings with stale ones.
+                guard acceptance.wasAccepted else {
+                    Self.log.notice("paired list older than the one in hand — ignored")
+                    return
+                }
+                let already = Self.stillConnected(in: all.devices, by: acceptance.answer)
                 // Reported whether or not they are new to this provider: a
                 // device connected before Ledge started produced no connect
                 // event, so the catalogue would not have heard of it until the
                 // ten-minute refresh came round.
-                for device in already { self.report(device, cause: .startupInventory) }
+                for device in already { self.report(device, cause: .startupInventory, at: all.readAt) }
                 for device in already
                 where self.published[device.address] == nil {
                     self.published[device.address] = ActivityID(kind: .device, source: device.address)
@@ -130,6 +163,15 @@ public final class BluetoothProvider: ActivityProvider {
     private var pendingGoodbyes: [String: DispatchWorkItem] = [:]
 
     private func connected(_ device: BluetoothDeviceSnapshot) {
+        // Told at once, before anything else here decides whether this is
+        // news. The paired list is read at startup and every ten minutes, so
+        // anything asking it "is this connected now" — the proximity card
+        // does — was answering from a reading up to ten minutes old.
+        paired.connectionChanged(
+            address: device.address,
+            isConnected: true,
+            at: Date(timeIntervalSinceReferenceDate: now())
+        )
         if let held = pendingGoodbyes.removeValue(forKey: device.address) {
             held.cancel()
             // A reconnect inside the grace is link churn, not news. Refresh the
@@ -180,6 +222,13 @@ public final class BluetoothProvider: ActivityProvider {
     }
 
     private func disconnected(_ address: String) {
+        // Before the grace period below, and whether or not this provider
+        // ever published a card for it: the fact is the fact.
+        paired.connectionChanged(
+            address: address,
+            isConnected: false,
+            at: Date(timeIntervalSinceReferenceDate: now())
+        )
         guard let id = published.removeValue(forKey: address) else { return }
         // Retract the "connected" card rather than leaving it to expire; the
         // goodbye itself waits out the flap grace.
@@ -252,11 +301,29 @@ public final class BluetoothProvider: ActivityProvider {
                 read = Task { @MainActor [weak self] in
                     defer { self?.reads.remove(read) }
                     guard let self else { return }
-                    let devices = await self.source.connectedDevices()
+                    let reading = await self.source.pairedDevices()
                     // Same race as the startup read: a slow profiler query can
                     // return after the provider stopped.
                     guard !Task.isCancelled, self.session == session else { return }
-                    for device in devices { self.report(device, cause: .periodicRefresh) }
+                    // And the same refusal to invent an answer: see the
+                    // startup read.
+                    guard let all = reading else {
+                        Self.log.notice("paired list unavailable — keeping the last answer")
+                        return
+                    }
+                    // Re-answered on every refresh, not only at launch: a
+                    // device paired or unpaired since is news, and a record
+                    // still claiming to be connected is corrected against this
+                    // reading.
+                    let acceptance = self.answerPairedList(all.devices, readAt: all.readAt)
+                    // As at startup: an older reading is not acted on.
+                    guard acceptance.wasAccepted else {
+                        Self.log.notice("paired list older than the one in hand — ignored")
+                        return
+                    }
+                    for device in Self.stillConnected(in: all.devices, by: acceptance.answer) {
+                        self.report(device, cause: .periodicRefresh, at: all.readAt)
+                    }
                 }
                 self.reads.insert(read)
             }
@@ -280,15 +347,70 @@ public final class BluetoothProvider: ActivityProvider {
     ///   callback may read as the device attaching; the startup inventory and
     ///   the ten-minute refresh are a baseline, and a low device in that
     ///   baseline must not alert as though it had just been plugged in.
-    private func report(_ device: BluetoothDeviceSnapshot, cause: ObservationCause) {
+    /// - Parameter at: when this was seen. Defaults to now, which is right
+    ///   for a connect or a disconnect — they *are* now. A reading of the
+    ///   paired list is not: it was taken when the read ran, and stamping its
+    ///   battery levels with the moment they arrived made a slow read look
+    ///   like the freshest thing the catalogue had.
+    private func report(
+        _ device: BluetoothDeviceSnapshot,
+        cause: ObservationCause,
+        at: Date? = nil
+    ) {
         guard let observations else { return }
         let observation = DeviceObservations.fromBluetooth(
-            device, at: Date(timeIntervalSinceReferenceDate: now()), cause: cause
+            device,
+            at: at ?? Date(timeIntervalSinceReferenceDate: now()),
+            cause: cause
         )
         // Synchronous: no task per advertisement, per connect or per reading.
         observations.submit(observation)
     }
 
+
+    /// Publishes a complete reading of the paired list.
+    ///
+    /// Complete is the point. Anything partial — the connected subset, say —
+    /// would read as "the Mac is not paired with the rest", and the catalogue
+    /// prunes against this answer.
+    /// - Parameter readAt: when the read began. Stamped from there rather
+    ///   than from here, because `system_profiler` takes seconds to answer
+    ///   and what it says is true of when it ran: a connect that happened
+    ///   while it was running is newer than the list it hands back.
+    @discardableResult
+    private func answerPairedList(
+        _ devices: [BluetoothDeviceSnapshot],
+        readAt: Date
+    ) -> PairedDeviceRegistry.Acceptance {
+        paired.answer(devices.map(\.pairedDevice), at: readAt)
+    }
+
+    /// The devices this reading says are connected, as the registry sees them
+    /// after the reading has been reconciled with everything seen since.
+    ///
+    /// Not the raw snapshot, in either direction: a device that disconnected
+    /// while the read was running is still "connected" in what the read hands
+    /// back, and one that connected while it was running is still
+    /// "disconnected" in it. Both reach the catalogue as a presence the
+    /// system has already contradicted, so the answer decides which devices
+    /// are reported *and* what each of them says.
+    ///
+    /// A device the answer does not hold at all is not reported: the
+    /// authoritative list not holding it is itself the answer.
+    static func stillConnected(
+        in devices: [BluetoothDeviceSnapshot],
+        by answer: PairedDeviceRegistry.Answer
+    ) -> [BluetoothDeviceSnapshot] {
+        devices.compactMap { device in
+            guard let known = answer.device(for: device.pairedDevice.identity),
+                  known.isConnected
+            else { return nil }
+            guard !device.isConnected else { return device }
+            var repaired = device
+            repaired.isConnected = true
+            return repaired
+        }
+    }
 
     /// Remembered because a disconnect notification carries only an address —
     /// the device is gone by the time it arrives, so its name has to come from

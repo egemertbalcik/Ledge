@@ -23,9 +23,9 @@ private final class CountingBluetoothSource: BluetoothDeviceSource, @unchecked S
     nonisolated var reads: Int { counter.withLock { $0 } }
     var isAvailable: Bool { true }
 
-    func connectedDevices() async -> [BluetoothDeviceSnapshot] {
+    func pairedDevices() async -> PairedListReading? {
         counter.withLock { $0 += 1 }
-        return devices
+        return PairedListReading(devices: devices, readAt: Date())
     }
 
     func startWatching(
@@ -50,13 +50,13 @@ private final class SlowBluetoothSource: BluetoothDeviceSource, @unchecked Senda
     nonisolated var hasFinished: Bool { gate.withLock { $0.finished } }
     nonisolated func release() { gate.withLock { $0.released = true } }
 
-    func connectedDevices() async -> [BluetoothDeviceSnapshot] {
+    func pairedDevices() async -> PairedListReading? {
         gate.withLock { $0.reading = true }
         while !gate.withLock({ $0.released }) {
             try? await Task.sleep(for: .milliseconds(5))
         }
         gate.withLock { $0.finished = true }
-        return devices
+        return PairedListReading(devices: devices, readAt: Date())
     }
 
     func startWatching(

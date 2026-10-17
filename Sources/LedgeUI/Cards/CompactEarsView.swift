@@ -105,7 +105,8 @@ public struct CompactEarsView: View {
             if let lowest = payload.orderedLevels.map(\.level).min() {
                 return "\(payload.name), battery \(percent(lowest))"
             }
-            return "\(payload.name), \(payload.isConnected ? "connected" : "disconnected")"
+            guard let connected = payload.isConnected else { return payload.name }
+            return "\(payload.name), \(connected ? "connected" : "disconnected")"
         case .power(let payload):
             return "\(payload.isCharging ? "Charging" : "Battery"), \(percent(payload.percentage))"
         case .focus(let payload):
@@ -140,6 +141,11 @@ public struct CompactEarsView: View {
             switch payload.phase {
             case .ready:
                 return "\(KeepAwakeCopy.title), ready"
+            // A hold with no end has no remainder and no "until". Spoken off
+            // `payload.remaining`, which is zero for one, this said "zero
+            // seconds left" about a session that had only just begun.
+            case .running where payload.isIndefinite:
+                return "\(KeepAwakeCopy.title), \(KeepAwakeCopy.on.lowercased())"
             case .running:
                 return "\(KeepAwakeCopy.title), "
                     + "\(KeepAwakeCardView.spoken(payload.remaining)) left, "
@@ -280,12 +286,13 @@ public struct CompactEarsView: View {
                     // unmistakable between two rapid toggles.
                     Text(status.uppercased())
                         .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundStyle(payload.isConnected ? Color.green : .white.opacity(0.6))
+                        .foregroundStyle(payload.isConnected == true ? Color.green : .white.opacity(0.6))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(
                             Capsule().fill(
-                                payload.isConnected ? Color.green.opacity(0.25) : .white.opacity(0.12)
+                                payload.isConnected == true
+                                    ? Color.green.opacity(0.25) : .white.opacity(0.12)
                             )
                         )
                 case .plain:
@@ -418,7 +425,8 @@ public struct CompactEarsView: View {
             // The time left, in Keep Awake's own tan rather than white, so the
             // two ears read as one instrument the way the timer's do.
             if payload.isRunning {
-                Text(SatelliteContent.keepAwakeLabel(remaining: payload.remaining))
+                Text(SatelliteContent.keepAwakeLabel(
+                    remaining: payload.isIndefinite ? nil : payload.remaining))
                     .font(.cardCaption)
                     .monospacedDigit()
                     .foregroundStyle(accent)

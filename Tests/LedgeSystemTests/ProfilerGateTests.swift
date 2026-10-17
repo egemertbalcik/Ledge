@@ -86,3 +86,46 @@ struct ProfilerGateTests {
         #expect(counter.runs == 5, "the gate wedged shut after the first run")
     }
 }
+
+/// When the answer describes, as opposed to when it was handed over.
+///
+/// A shared or briefly reused answer is older than the caller who receives
+/// it. Stamping it with the moment it arrived made a list sampled before a
+/// connect look newer than the connect — and the stale list won.
+@Suite("What a shared answer is dated")
+struct ProfilerGateTimestampTests {
+
+    private final class Clock: @unchecked Sendable {
+        private let lock = OSAllocatedUnfairLock(initialState: 0.0)
+        var now: TimeInterval { lock.withLock { $0 } }
+        func advance(_ by: TimeInterval) { lock.withLock { $0 += by } }
+    }
+
+    @Test("A reading is dated when the work began, not when it returned")
+    func datedAtTheStart() async {
+        let clock = Clock()
+        let gate = ProfilerGate<Int>(freshness: 0, now: { clock.now }) {
+            // The work takes time, as the real one does.
+            clock.advance(5)
+            return 1
+        }
+        let reading = await gate.reading()
+        #expect(reading.value == 1)
+        #expect(reading.sampledAt == 0, "the answer was dated when it returned")
+    }
+
+    @Test("A reused answer keeps the date of the run that produced it")
+    func reusedAnswerKeepsItsDate() async {
+        let clock = Clock()
+        let gate = ProfilerGate<Int>(freshness: 10, now: { clock.now }) {
+            clock.advance(2)
+            return 1
+        }
+        _ = await gate.reading()
+        clock.advance(3)
+        // Inside the freshness window: the same answer, which describes the
+        // world as it was when it was taken.
+        let second = await gate.reading()
+        #expect(second.sampledAt == 0)
+    }
+}

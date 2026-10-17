@@ -189,11 +189,19 @@ final class NotesWindowController {
 
     private let opening = NotesOpeningRequest()
 
-    func open(noteID: String) {
+    /// Opens a note, and says whether it could be opened.
+    ///
+    /// The card needs the answer: a press on a note whose file has gone used
+    /// to do nothing at all, with nothing on screen to say why.
+    @discardableResult
+    func open(noteID: String) async -> Bool {
         let store = store
-        opening.start(load: { await store.body(noteID) }) { [weak self] body in
+        let work = opening.start(load: { await store.body(noteID) }) { [weak self] body in
             self?.present(body)
         }
+        // Superseded counts as success for the caller: somebody pressed
+        // something newer, and the newer press owns the answer.
+        return await work.value != .missing
     }
 
     func create() {
@@ -438,6 +446,45 @@ final class NotesWindowController {
         }
     }
 
+    /// Which of the window's two copy commands the card is asking for.
+    enum CopyFormat { case markdown, plainText }
+
+    /// Copies a note the window does not have open.
+    ///
+    /// The window's own commands work on the note in front of it; the card's
+    /// context menu offers them for any row, so the body has to be fetched.
+    /// Same names, same output, so the two surfaces cannot drift.
+    func copy(_ format: CopyFormat, noteID: String) {
+        let store = store
+        Task { @MainActor [weak self] in
+            guard let body = await store.body(noteID) else { return }
+            let text = format == .markdown
+                ? NoteMarkdown.render(body.text)
+                : String(body.text.characters)
+            self?.copy(text)
+        }
+    }
+
+    /// Opens the window on its All Notes list, with the search field ready.
+    ///
+    /// Reached from the card's count, which used to be plain text over a
+    /// collection it could not get to. The list and its search already exist;
+    /// this is the entry point that was missing.
+    func openAllNotes() {
+        let store = store
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // A list needs a window to be a list in. Opening the note last
+            // edited first means Escape has somewhere to go back to, which is
+            // what the window's own ⌘P does.
+            if !self.isOpen, let newest = await store.list().first {
+                _ = await self.open(noteID: newest.id)
+            }
+            self.model.notes = await store.list()
+            self.model.show(.notes)
+        }
+    }
+
     private func copy(_ text: String) {
         let board = NSPasteboard.general
         board.clearContents()
@@ -612,7 +659,7 @@ final class NotesWindowController {
             Task { await store.update(id, text: text) }
         }
         model.onCommand = { [weak self] command in self?.run(command) }
-        model.onOpenNote = { [weak self] id in self?.open(noteID: id) }
+        model.onOpenNote = { [weak self] id in Task { @MainActor in await self?.open(noteID: id) } }
 
         self.panel = panel
         return panel
@@ -659,20 +706,31 @@ final class NotesWindowController {
 /// request can present, including when a cancelled load ignores cancellation.
 @MainActor
 final class NotesOpeningRequest {
-    private var task: Task<Void, Never>?
+    private var task: Task<Outcome, Never>?
     private var generation = 0
+
+    /// What became of an opening. Superseded is not a failure: a newer press
+    /// took over, and the card must not blame the note for that.
+    enum Outcome { case opened, missing, superseded }
 
     @discardableResult
     func start(load: @escaping @MainActor () async -> NoteBody?,
-               deliver: @escaping @MainActor (NoteBody) -> Void) -> Task<Void, Never> {
+               deliver: @escaping @MainActor (NoteBody) -> Void) -> Task<Outcome, Never> {
         cancel()
         let session = generation
-        let work = Task { @MainActor [weak self] in
-            guard !Task.isCancelled else { return }
+        let work = Task { @MainActor [weak self] () -> Outcome in
+            guard !Task.isCancelled else { return .superseded }
             let body = await load()
-            guard !Task.isCancelled, let self, self.generation == session else { return }
+            guard !Task.isCancelled, let self, self.generation == session else {
+                return .superseded
+            }
             self.task = nil
-            if let body { deliver(body) }
+            // Answering rather than returning silently. A note whose file has
+            // gone produced no window and no sentence, which from the outside
+            // is a card that has stopped working.
+            guard let body else { return .missing }
+            deliver(body)
+            return .opened
         }
         task = work
         return work

@@ -50,12 +50,18 @@ struct PreferencesTests {
         // Completeness, not spot checks: every stored property on the façade
         // is one preference (`@Observable` stores them as `_name`, and its
         // own registrar as `_$observationRegistrar`), and every one of them
-        // must be in `allNames` — except the store, the loading latch, and the
-        // two onboarding flags, which reset deliberately leaves alone.
+        // must be in `allNames` — except the store, the loading latch, the
+        // onboarding flags and the two records of something that happened
+        // outside Ledge, all of which reset deliberately leaves alone.
+        //
+        // `accessibilityWasAsked` is one of those: macOS shows its one-time
+        // Accessibility message once in an app's life, and resetting Ledge's
+        // settings does not buy another one. Forgetting it would make the
+        // guide promise a dialog that cannot appear.
         let mirror = Mirror(reflecting: Preferences(store: MemoryPreferenceStore()))
         let excluded: Set<String> = [
             "_store", "_isLoading", "_hasCompletedOnboarding", "_hasBeenIntroduced",
-            "_tourPage", "_focusFolderBookmark",
+            "_tourPage", "_focusFolderBookmark", "_accessibilityWasAsked",
         ]
         let stored = mirror.children.compactMap { child -> String? in
             guard let label = child.label,

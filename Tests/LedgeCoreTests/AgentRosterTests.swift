@@ -142,3 +142,45 @@ struct AppNapPlanTests {
         #expect(AppNapPlan.writes(for: AgentRoster([])) { _ in .some(nil) }.isEmpty)
     }
 }
+
+/// What the Keep Awake list calls the apps on it.
+@Suite("Naming the apps on the roster")
+struct AgentRosterNamingTests {
+
+    @Test("Every shipped app has a name, and none of them is a bundle-id fragment")
+    func everyShippedAppIsNamed() {
+        for id in AgentRoster.shipped {
+            guard let name = AgentRoster.shippedName(of: id) else {
+                Issue.record("\(id) has no name, so a closed one would show as an id fragment")
+                continue
+            }
+            #expect(!name.isEmpty)
+        }
+    }
+
+    @Test("The ones that used to read as rubbish read as themselves")
+    func theWorstOffenders() {
+        // Four of these are what somebody tidying the list actually saw, and
+        // one of them is Claude. Taking it off the list because it looked
+        // like junk is a thing this naming exists to prevent.
+        let known = [
+            "com.todesktop.230313mzl4w4u92": "Cursor",
+            "com.anthropic.claudefordesktop": "Claude",
+            "com.openai.chat": "ChatGPT",
+            "company.thebrowser.Browser": "Arc",
+            "dev.warp.Warp-Stable": "Warp",
+            "com.googlecode.iterm2": "iTerm2",
+            "com.microsoft.VSCode": "Visual Studio Code",
+        ]
+        for (id, name) in known {
+            #expect(AgentRoster.shippedName(of: id) == name, "\(id) still has no proper name")
+        }
+        // And where the app really is called that, the name is left alone.
+        #expect(AgentRoster.shippedName(of: "net.kovidgoyal.kitty") == "kitty")
+    }
+
+    @Test("An app nobody shipped is not guessed at")
+    func unknownAppsAreNotNamed() {
+        #expect(AgentRoster.shippedName(of: "com.example.whatever") == nil)
+    }
+}

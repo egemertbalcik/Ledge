@@ -285,11 +285,24 @@ struct BottomRoomTests {
         ).height
     }
 
-    @Test("The levels card is no longer shorter than its own content")
-    func levelsClearsTheDots() {
-        // At 148 the brightness row reached *into* the dots' band. Measured
-        // against a render, not reasoned about: the content needed 16 more.
-        #expect(floor(.levels) == 160)
+    @Test("The levels card measures itself rather than taking a fixed height")
+    func levelsMeasuresItself() {
+        // It was 160: right when the card was two bars and nothing else, and
+        // wrong the moment it could hold one row or four — an output, a
+        // built-in panel, an external one, and a sentence under any of them.
+        // At 160 the external display's explanation ran through the page dots
+        // and off the bottom of the card, which is the one failure the
+        // island's own shape hides from you.
+        //
+        // Unmeasured, it takes the simple card's floor, which is tall enough
+        // for any of them and so can only ever be too generous.
+        #expect(floor(.levels) == NotchLayout.simpleCardHeight(0))
+        // And it grows with what it reports.
+        let tall = NotchLayout.expandedContentSize(
+            kind: .levels, phase: .hover, base: CGSize(width: 315, height: 0),
+            cardContentHeight: 180
+        ).height
+        #expect(tall > floor(.levels), "the card did not take its own measurement")
     }
 
     @Test("Both cards leave more than the dots' bare footprint")

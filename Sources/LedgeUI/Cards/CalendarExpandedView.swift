@@ -35,6 +35,13 @@ public struct CalendarExpandedView: View {
     /// Which event row the cursor is on, for its doorway chevron.
     @State private var hoveredEntry: String?
 
+    /// What the self-view is doing. `.off` is the card as it has always been:
+    /// no frame, and a segment beside Join that nobody has pressed.
+    private let selfView: SelfViewPayload
+    private let selfViewActions: SelfViewActions
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// `selectedDay` is settable at construction only so the card gallery can
     /// render the tapped state; the app always starts on the upcoming event.
     /// Told the depth of the month being drawn, so the card can be sized for
@@ -46,11 +53,15 @@ public struct CalendarExpandedView: View {
         now: Date? = nil,
         selectedDay: Int? = nil,
         monthOffset: Int = 0,
+        selfView: SelfViewPayload = .off,
+        selfViewActions: SelfViewActions = SelfViewActions(),
         onWeekRows: @escaping (Int) -> Void = { _ in }
     ) {
         self.payload = payload
         self.onWeekRows = onWeekRows
         self.fixedNow = now
+        self.selfView = selfView
+        self.selfViewActions = selfViewActions
         // Today starts selected: the card opens saying what is on *today*,
         // which is the question a calendar glance is usually asking. Tapping
         // today again still returns to the next-event summary.
@@ -148,8 +159,28 @@ public struct CalendarExpandedView: View {
             leftColumn(grid)
                 .frame(width: 126, alignment: .leading)
 
-            monthColumn(grid)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            ZStack {
+                // The month, racked out of focus under the frame. It is not
+                // removed: the grid is what the frame is drawn over, and a
+                // column that emptied itself first would collapse the card's
+                // height mid-press.
+                monthColumn(grid)
+                    .blur(radius: monthBlur)
+                    .opacity(monthOpacity)
+                    .scaleEffect(monthScale)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if selfView.phase.showsFrame {
+                    SelfViewFrameView(
+                        payload: selfView,
+                        actions: selfViewActions,
+                        reduceMotion: reduceMotion
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(selfViewMotion, value: selfView.phase)
         }
         // 22, symmetric: breathing room against both curved edges, paid for
         // inside (a narrower day column and tighter gap), not by widening
@@ -160,6 +191,22 @@ public struct CalendarExpandedView: View {
         // show — browsing is this view's own state. So it says.
         .onAppear { onWeekRows(grid.weeks.count) }
         .onChange(of: grid.weeks.count) { _, rows in onWeekRows(rows) }
+        // Swiped to another card, or the notch collapsed under it: either way
+        // this card is not on screen to hold a camera open.
+        .onDisappear { selfViewActions.cardWentAway() }
+        // The meeting's window closed while the camera was on. The segment
+        // goes with Join — and a frame whose only control has just been taken
+        // away is a picture with no way out, so the picture goes too.
+        .onChange(of: meetingToJoin == nil) { _, gone in
+            if gone, selfView.phase.showsFrame { selfViewActions.letGo() }
+        }
+        // The same check on the way in. A card can be built with the meeting
+        // already over — it was off screen behind a readout while the clock
+        // ran out — and `onChange` says nothing about a value it has only
+        // just seen for the first time.
+        .onAppear {
+            if meetingToJoin == nil, selfView.phase.showsFrame { selfViewActions.letGo() }
+        }
     }
 
     // MARK: - Left
@@ -372,50 +419,132 @@ public struct CalendarExpandedView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// The call to join, if there is one to join right now. The window itself
-    /// is `MeetingJoin`, which is pure and tested.
-    private var meetingToJoin: URL? {
-        guard payload.hasEvent,
-              let link = payload.meetingURL,
-              let url = URL(string: link),
-              url.scheme != nil
-        else { return nil }
-        return MeetingJoin.isOffered(
-            startsIn: payload.startsIn,
-            endsIn: payload.endsIn,
-            hasLink: true
-        ) ? url : nil
-    }
+    /// The call to join, if there is one to join right now.
+    ///
+    /// The rule is `EventPayload.joinLink`, which is pure and tested and —
+    /// more to the point — is the same answer the shell reads for a card
+    /// that is off screen behind a readout.
+    private var meetingToJoin: URL? { payload.joinLink }
 
     /// The reason the imminent-event card exists at all: the link is buried in
     /// the invitation, and the meeting is about to start.
     @ViewBuilder
     private var joinButton: some View {
         if let url = meetingToJoin {
-            Button {
-                openURL(url)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "video.fill")
-                        .font(.cardFootnote)
+            HStack(spacing: 0) {
+                Button {
+                    // The meeting app needs the camera. Ledge gives it up
+                    // before the link opens rather than after it, so the two
+                    // are never both reaching for the same device.
+                    if selfView.phase.showsFrame { selfViewActions.letGo() }
+                    openURL(url)
+                } label: {
                     Text("Join")
                         .font(.cardLabel)
+                        .foregroundStyle(.white)
+                        // Never compressed. Sharing a row with a 32pt date in
+                        // a 126pt column, the capsule was the half that gave
+                        // way — and a button whose label has been squeezed to
+                        // "…" is a green pill that says nothing.
+                        .fixedSize()
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5)
+                        .contentShape(Rectangle())
                 }
-                .foregroundStyle(.white)
-                // Never compressed. Sharing a row with a 32pt date in a
-                // 126pt column, the capsule was the half that gave way — and
-                // a button whose label has been squeezed to "…" is a green
-                // pill that says nothing. The date can lose a point of its
-                // own width far more cheaply than this can lose its word.
-                .fixedSize()
-                .padding(.horizontal, 11)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(.green.opacity(0.85)))
-                .contentShape(Capsule())
+                .buttonStyle(.plain)
+                .accessibilityLabel("Join \(payload.title)")
+
+                selfViewSegment
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Join \(payload.title)")
+            // One capsule, two halves. The green is Join's and stays Join's;
+            // the segment is a darker seam in it, not a second button beside
+            // it, because it is about the same meeting.
+            .background(Capsule().fill(.green.opacity(0.85)))
+            .clipShape(Capsule())
         }
+    }
+
+    /// The self-view's one control: open, and close, in the same place.
+    ///
+    /// It lives on Join rather than in the month header, where it was first
+    /// drawn. The header had the room — but an 11pt hairline glyph between a
+    /// red month name and two chevrons could not be found at all, which is a
+    /// control that does not exist. Here it is inside the only lit object on
+    /// the card.
+    ///
+    /// The width it needs is paid for by Join's own video glyph, which goes
+    /// when the segment is there: 41.9pt for the widest date, 8 for the gap,
+    /// 45 for the capsule without its glyph, 1 for the seam and 23 for the
+    /// segment is 118.9 of the column's 126. Nothing else moves, and nothing
+    /// is compressed.
+    @ViewBuilder
+    private var selfViewSegment: some View {
+        let isOpen = selfView.phase.showsFrame
+        // A seam the capsule's own height, not the row's: `maxHeight` here
+        // stretched the whole capsule to fill the 38pt date row, and a green
+        // blob the height of the date is not a button.
+        Rectangle()
+            .fill(.black.opacity(0.28))
+            .frame(width: 1, height: 23)
+        Button {
+            selfViewActions.press()
+        } label: {
+            Image(systemName: isOpen ? "person.crop.square.fill" : "person.crop.square")
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.white)
+                .frame(width: 23, height: 23)
+                // Lit while the frame is open: the control says which of its
+                // two states it is in without a second glyph having to mean
+                // "off".
+                .background(Color.white.opacity(isOpen ? 0.22 : 0))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(isOpen ? SelfViewCopy.closeLabel : SelfViewCopy.label)
+        .accessibilityHint(SelfViewCopy.hint)
+        .help(SelfViewCopy.hint)
+        .animation(Motion.fast, value: isOpen)
+    }
+
+    // MARK: - The month, while the frame is over it
+
+    /// How far out of focus the month is drawn.
+    ///
+    /// Three values, one idea: the lens racks focus. Reduce Motion keeps the
+    /// dimming — which is what says "this is behind something now" — and
+    /// drops the blur and the scale, which are the parts that move.
+    private var monthBlur: CGFloat {
+        guard selfView.phase.showsFrame, !reduceMotion else { return 0 }
+        return selfView.phase == .live ? 6 : 5
+    }
+
+    private var monthOpacity: Double {
+        guard selfView.phase.showsFrame else { return 1 }
+        // Gone entirely under a live picture. Faintly there while something
+        // is still expected to arrive — the card has covered the month, not
+        // replaced it. Nearly gone behind a face that has given up: those
+        // faces are a sentence to read, and a legible month behind a
+        // sentence is two things asking to be read at once.
+        switch selfView.phase {
+        case .live: return 0
+        case .refused, .blocked, .noCamera, .failed: return 0.12
+        default: return 0.4
+        }
+    }
+
+    private var monthScale: CGFloat {
+        guard selfView.phase.showsFrame, !reduceMotion else { return 1 }
+        return 0.97
+    }
+
+    /// Opening is an event and closing is a return, so they are not the same
+    /// curve: the way in is quick and lands without a bounce, the way out is
+    /// a settle.
+    private var selfViewMotion: Animation {
+        if reduceMotion { return .easeInOut(duration: 0.15) }
+        return selfView.phase.showsFrame
+            ? .spring(response: 0.34, dampingFraction: 0.9)
+            : .spring(response: 0.3, dampingFraction: 1.0)
     }
 
     /// What the card opens on: today's date and the next thing coming up.

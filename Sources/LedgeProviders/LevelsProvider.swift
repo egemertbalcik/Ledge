@@ -20,6 +20,13 @@ public final class LevelsProvider: ActivityProvider {
     private let volume: VolumeController
     private let brightness: () -> Double
     private let now: () -> TimeInterval
+    /// Every level there is, as rows.
+    ///
+    /// Supplied by the shell, which is the only layer that can ask the
+    /// hardware anything. Empty by default so a provider built without one is
+    /// still the provider it was — the two scalars are what the ears and the
+    /// satellite read, and they do not need a list.
+    private let rows: () -> [LevelRow]
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
 
     public init(
@@ -27,11 +34,13 @@ public final class LevelsProvider: ActivityProvider {
         brightness: @escaping () -> Double = {
             BrightnessController().level() ?? 0.5
         },
-        now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
+        now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate },
+        rows: @escaping () -> [LevelRow] = { [] }
     ) {
         self.volume = volume
         self.brightness = brightness
         self.now = now
+        self.rows = rows
     }
 
     public func start() -> AsyncStream<ProviderEvent> {
@@ -51,6 +60,21 @@ public final class LevelsProvider: ActivityProvider {
         }
     }
 
+    /// Publishes again with whatever the hardware now says.
+    ///
+    /// CoreAudio tells this provider when the volume moves; nothing tells it
+    /// when the *brightness* does, because brightness has no change
+    /// notification and is polled by the surface that needs it. So the shell
+    /// asks, and only while the card is actually open — which is the one case
+    /// where a brightness key has to move a bar that is already on screen.
+    public func republish() {
+        let readout = volume.readout()
+        publish(volume: readout?.level ?? lastVolume, isMuted: readout?.isMuted ?? lastMuted)
+    }
+
+    private var lastVolume: Double = 0.5
+    private var lastMuted = false
+
     public func stop() {
         volume.stopWatching()
         volume.onChange = { _ in }
@@ -59,6 +83,14 @@ public final class LevelsProvider: ActivityProvider {
     }
 
     private func publish(volume level: Double, isMuted: Bool) {
+        lastVolume = level
+        lastMuted = isMuted
+        // The rows travel with the publish, so the card's *first* frame is
+        // already right. Pulled on open instead, the card drew with no rows
+        // at all, the island sized itself to that, and the fill a moment later
+        // made it jump — an opening animation that landed in the wrong place
+        // and then corrected itself, every single time.
+        let rows = rows()
         continuation?.yield(.publish(Activity(
             id: Self.activityID,
             createdAt: now(),
@@ -68,7 +100,8 @@ public final class LevelsProvider: ActivityProvider {
             payload: .levels(LevelsPayload(
                 volume: min(max(level, 0), 1),
                 brightness: min(max(brightness(), 0), 1),
-                isMuted: isMuted
+                isMuted: isMuted,
+                rows: rows
             ))
         )))
     }

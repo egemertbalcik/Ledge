@@ -85,7 +85,10 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
         guard reading.reliability == .fresh else { return false }
         guard presence != .disconnected else { return false }
         if id.reportsOnlyOnChange { return sourceIsLive }
-        return now.timeIntervalSince(reading.observedAt) <= id.freshnessInterval
+        // The reading's own origin first: an advertisement is stale after
+        // five minutes of silence whatever record it was attached to.
+        let interval = reading.origin?.freshnessInterval ?? id.freshnessInterval
+        return now.timeIntervalSince(reading.observedAt) <= interval
     }
 
     /// The lowest worn battery that still describes now, and whether what is
@@ -158,7 +161,12 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
 public struct DeviceCatalogue: Sendable, Codable {
 
     /// Bumped whenever the stored shape changes in a way that needs handling.
-    public static let currentVersion = 1
+    ///
+    /// 2 marks a catalogue that has been through the ownership sweep: every
+    /// record left in it is a device the Mac is paired with, is this Mac, or
+    /// is one the user deliberately kept. Version 1 files were written when
+    /// any advertisement in range could become a permanent record.
+    public static let currentVersion = 2
 
     public var version: Int
     public var devices: [DeviceRecord]
@@ -239,12 +247,22 @@ public struct DeviceCatalogue: Sendable, Codable {
     /// A version from the future is not downgraded — it is refused, and the
     /// caller starts fresh rather than writing a shape it does not understand
     /// over somebody's history.
+    ///
+    /// **The 1 → 2 migration deliberately drops nothing here.** It is an
+    /// ownership sweep, and ownership is only knowable at runtime: the paired
+    /// list comes from the Bluetooth stack, which has not been asked anything
+    /// at the moment a file is decoded. Pruning against what is known *now*
+    /// would prune against "paired with nothing" and delete the user's entire
+    /// catalogue on first launch. So decoding only records that the file has
+    /// been seen; the sweep itself waits for an answered paired set — see
+    /// `DeviceCatalogueStore.sweepUnownedRecords`, which is also what sets
+    /// the version on disk.
     public static func migrated(_ stored: DeviceCatalogue) -> DeviceCatalogue? {
         guard stored.version <= currentVersion else { return nil }
-        var catalogue = stored
-        // No migrations yet; version 1 is the first shape. The switch is here
-        // so the next one has an obvious home.
-        catalogue.version = currentVersion
-        return catalogue
+        return stored
     }
+
+    /// Whether this catalogue still predates the ownership rule, and so is
+    /// owed the one-off sweep as soon as the paired list can be read.
+    public var needsOwnershipSweep: Bool { version < DeviceCatalogue.currentVersion }
 }

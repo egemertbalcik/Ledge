@@ -22,6 +22,14 @@
 	<true/>
 	<key>com.apple.security.device.bluetooth</key>
 	<true/>
+	<!--
+	  The same rule, for the calendar card's self-view: a hardened app that
+	  asks for the camera without declaring it gets the silent no-op rather
+	  than macOS's dialog, which from the card looks exactly like a refusal
+	  nobody can undo.
+	-->
+	<key>com.apple.security.device.camera</key>
+	<true/>
 
 	<!--
 	  Apple Events. The playback reads go through a child osascript, which is

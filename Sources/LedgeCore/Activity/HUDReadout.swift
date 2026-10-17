@@ -72,7 +72,13 @@ public struct HUDReadout: Equatable, Sendable {
     /// Shared with the Levels card, which drew the same ladder from its own
     /// copy — two definitions of one idea, free to disagree.
     public static func volumeSymbol(level: Double, isMuted: Bool) -> String {
-        if isMuted || level <= 0 { return "speaker.slash.fill" }
+        // Muted and turned all the way down are two separate facts, and the
+        // struck speaker belongs to the first alone. Sharing it meant the
+        // card, the ears and the satellite all drew mute at a level of zero —
+        // and pressing volume-up from there looked like unmuting, which is a
+        // different thing from what it does.
+        if isMuted { return "speaker.slash.fill" }
+        if level <= 0 { return "speaker.fill" }
         if level < 0.34 { return "speaker.wave.1.fill" }
         if level < 0.67 { return "speaker.wave.2.fill" }
         return "speaker.wave.3.fill"

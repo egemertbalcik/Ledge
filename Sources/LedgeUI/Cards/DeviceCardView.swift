@@ -34,10 +34,16 @@ public struct DeviceCardView: View {
                     .foregroundStyle(.white)
                     .lineLimit(1)
 
-                Text(payload.isConnected ? "Connected" : "Disconnected")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .lineLimit(1)
+                // Only when it is known. An advertisement from a case on the
+                // desk says the earbuds are *there*, not that they are
+                // attached to this Mac — and a word under the name is read as
+                // a fact about this Mac.
+                if let connected = payload.isConnected {
+                    Text(connected ? "Connected" : "Disconnected")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
 
                 if !payload.orderedLevels.isEmpty {
                     cells

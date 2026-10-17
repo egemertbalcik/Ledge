@@ -79,8 +79,27 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
 
     func reports(_ status: KeepAwakeHelperStatus) { lock.withLock { reported = status } }
 
+    /// Holds the next status call open until it is let go.
+    ///
+    /// Not the same as `goSilent`, which never answers at all: this one
+    /// answers, late. A status still in flight while its session ends is the
+    /// only way to reproduce an observation filing itself against a session
+    /// it was never about.
+    private var statusGate: DispatchSemaphore?
+    func holdNextStatus() { lock.withLock { statusGate = DispatchSemaphore(value: 0) } }
+    func releaseHeldStatus() {
+        let gate = lock.withLock { statusGate }
+        statusGate = nil
+        gate?.signal()
+    }
+
     func status() async throws -> KeepAwakeHelperStatus {
         if lock.withLock({ silent }) { try await Task.sleep(for: .seconds(3600)) }
+        if let gate = lock.withLock({ statusGate }) {
+            await withCheckedContinuation { (k: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global().async { gate.wait(); k.resume() }
+            }
+        }
         return lock.withLock {
             if let reported { return reported }
             return KeepAwakeHelperStatus(
@@ -498,7 +517,12 @@ struct KeepAwakeHelperClientTests {
         for _ in 0 ..< 1_000 where answer.value == nil {
             try? await Task.sleep(for: .milliseconds(5))
         }
-        #expect(answer.value == .temporarilyUnavailable,
+        // Not `temporarilyUnavailable`, which would say the hold almost
+        // certainly stands — nothing was ever confirmed, so there is no
+        // confirmation to stand on. And not `unreachable` either: the request
+        // *left*, and a daemon that took the lease and lost the reply looks
+        // exactly like this. What is true is that the outcome is unknown.
+        #expect(answer.value == .unknownWhetherHeld,
                 "the call never came back: the timeout is not a bound")
         link.releaseStranded()
         await client.end()
@@ -1098,4 +1122,361 @@ private final class Answer: @unchecked Sendable {
     private var stored: KeepAwakeHelperState?
     func set(_ state: KeepAwakeHelperState) { lock.withLock { stored = state } }
     var value: KeepAwakeHelperState? { lock.withLock { stored } }
+}
+
+
+/// The same silence, opposite facts.
+///
+/// A daemon that goes quiet on a hold it already accepted has very probably
+/// still got it — it drops a hold on its own lease, not on Ledge's inability
+/// to reach it. A daemon that has never answered at all is holding nothing.
+/// These were one state, and the card said "it almost certainly still stands"
+/// to somebody whose Mac nothing was holding, who then shut the lid on it.
+@Suite("Silence before a hold, and silence after one")
+struct KeepAwakeSilenceTests {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+    @Test("A hold that was never accepted reads as unreachable")
+    func neverAcceptedIsUnreachable() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = KeepAwakeHelperClient(link: link, now: { Self.t0 }, sleep: sleeper.sleep)
+
+        link.goSilent()
+        sleeper.timeOutCalls()
+        let state = await client.begin(session: "s1")
+
+        // The bug this was written for was the opposite claim — a hold
+        // nobody ever took reported as very probably standing. That claim is
+        // still refused. What has changed is the other end: a request that
+        // went out and was never answered is not proof that nothing is held.
+        #expect(state != .temporarilyUnavailable,
+                "a hold nobody ever took was reported as very probably standing")
+        #expect(state == .unknownWhetherHeld,
+                "and a request that got no answer is not proof of absence")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    /// And the other half, which must keep working: once a hold has been
+    /// accepted, silence is a warning rather than a death.
+    @Test("A hold that was accepted and then went quiet stays a warning")
+    func acceptedThenQuietIsAWarning() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = KeepAwakeHelperClient(link: link, now: { Self.t0 }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding)
+
+        link.goSilent()
+        sleeper.timeOutCalls()
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+
+        var seen = await client.currentState
+        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen == .temporarilyUnavailable,
+                "a hold that was taken and went quiet was reported as never taken")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    @Test("A hold that was accepted and never applied is never reassured about")
+    func acceptanceIsNotApplication() async throws {
+        // The daemon answers a `begin` once its lease is on disk and before
+        // it runs the privileged write, so an acceptance says a request got
+        // through and nothing about the Mac. Recording it as evidence meant
+        // a hold that was accepted, reported SleepDisabled=0, and then failed
+        // to renew read as "almost certainly still standing" over a Mac that
+        // nothing was holding.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        // The daemon takes the lease and the privileged write does not land,
+        // which is exactly what `ok` promises and does not deliver.
+        link.refusesTheApply()
+        _ = await client.begin(session: "s1")
+        link.goSilent()
+        sleeper.timeOutCalls()
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+
+        var seen = await client.currentState
+        for _ in 0 ..< 400 where seen == .pending || seen == .holding {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen != .temporarilyUnavailable,
+                "acceptance was standing in for confirmation, which it is not")
+        #expect(seen == .unknownWhetherHeld, "and what is true is that nothing can vouch for it")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    @Test("A fresh reading changes what the card says, now")
+    func freshStatusReconcilesTheState() async throws {
+        // Evidence was being filed and nothing else. It changed what a
+        // *later* silence would conclude, which is not what somebody asking
+        // for a fresh reading wants: the card could be told the setting was
+        // off and go on saying held, or be told it was on and go on saying
+        // Checking. Both directions, both reproduced.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding)
+
+        // The daemon lets go behind our back.
+        link.reports(KeepAwakeHelperStatus(
+            build: "test", sleepDisabled: 0, ours: false, clean: true,
+            cleanupPending: false, otherLedgeHolds: false, lowPowerClaimed: false
+        ))
+        clock.advance(1)
+        _ = await client.refreshStatus()
+        #expect(await client.currentState != .holding,
+                "a reading that says the setting is off must take the card off held")
+
+        // And back again: the setting is on, and the card must stop hedging.
+        link.reports(KeepAwakeHelperStatus(
+            build: "test", sleepDisabled: 1, ours: true, clean: false,
+            cleanupPending: false, otherLedgeHolds: false, lowPowerClaimed: false
+        ))
+        clock.advance(1)
+        _ = await client.refreshStatus()
+        #expect(await client.currentState == .holding,
+                "a reading that says the setting is on must say so")
+        await client.end()
+    }
+
+    /// **This test does not currently discriminate.** Removing the fence it
+    /// is written for — the era and session captured before the status call —
+    /// leaves it green. The reviewer reproduced the bug with a harness that
+    /// can gate the client's own continuations; this fake can gate the link's
+    /// answer and not the client's resumption, and the straggler lands in an
+    /// order that does not corrupt what is then asked. Kept because the
+    /// scenario is worth writing down and the fix is worth keeping, but it
+    /// should not be read as a guard until it can be made to fail.
+    @Test("An observation belongs to the session it was taken for")
+    func observationsDoNotCrossSessions() async throws {
+        // A status held in flight while its session ended and another began
+        // came back and filed itself as the *new* session's evidence, so B
+        // read as "almost certainly still stands" on the strength of
+        // something only ever true of A.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "A") == .holding)
+
+        // A's status is in the air when A ends and B begins. Released after,
+        // it must not become B's evidence — and it has to be a *positive*
+        // reading, or there is no false confirmation for the fence to stop
+        // and the test passes whatever the code does.
+        link.reports(KeepAwakeHelperStatus(
+            build: "test", sleepDisabled: 1, ours: true, clean: false,
+            cleanupPending: false, otherLedgeHolds: false, lowPowerClaimed: false
+        ))
+        link.holdNextStatus()
+        let straggler = Task { await client.refreshStatus() }
+        try await Task.sleep(for: .milliseconds(20))
+        await client.end()
+
+        // B never gets an answer to anything.
+        link.goSilent()
+        sleeper.timeOutCalls()
+        let b = await client.begin(session: "B")
+        #expect(b == .unknownWhetherHeld, "the premise: B has had no answer to anything")
+
+        // Only now does A's reading come back. Measured after it lands —
+        // asserting before it did was asking the question before the thing
+        // under test had happened.
+        link.releaseHeldStatus()
+        _ = await straggler.value
+
+        // A beat, so B asks again and gets nothing again.
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+        var seen = await client.currentState
+        for _ in 0 ..< 200 where seen == .unknownWhetherHeld {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen != .temporarilyUnavailable,
+                "B inherited A's confirmation and claimed the hold almost certainly stands")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    @Test("A newer reading that says off ends an older confirmation")
+    func negativeEvidenceWins() async throws {
+        // A status reporting the setting off is a fact about a later moment
+        // than the confirmation before it. It was recorded nowhere, so a
+        // renewal that then went unanswered produced "almost certainly still
+        // stands" out of evidence a newer reading had already refuted.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding, "confirmed once")
+
+        // The daemon lets go behind our back, and the next status says so.
+        link.reports(KeepAwakeHelperStatus(
+            build: "test", sleepDisabled: 0, ours: false, clean: true,
+            cleanupPending: false, otherLedgeHolds: false, lowPowerClaimed: false
+        ))
+        clock.advance(1)
+        _ = await client.refreshStatus()
+
+        // Then it stops answering altogether.
+        link.goSilent()
+        sleeper.timeOutCalls()
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+
+        var seen = await client.currentState
+        for _ in 0 ..< 400 where seen == .holding {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen != .temporarilyUnavailable,
+                "an older confirmation outlived the reading that contradicted it")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    @Test("Confidence expires on the clock, not on the next request")
+    func confidenceExpiresWithoutAnotherCall() async throws {
+        // It was only ever recomputed when a call came back, so a client
+        // whose daemon had gone away kept answering "almost certainly still
+        // stands" for as long as nothing else happened — and nothing else
+        // happening is exactly the case this covers.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding)
+        link.goSilent()
+        sleeper.timeOutCalls()
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+        var seen = await client.currentState
+        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+
+        // No further heartbeat, no further call. Only time passes.
+        clock.advance(KeepAwakeHelperClient.confidenceWindow + 1)
+        #expect(await client.currentState == .unknownWhetherHeld,
+                "the reassurance outlived the lease because nothing asked it to stop")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    @Test("Confidence in a silent hold does not outlast the lease it stood on")
+    func silenceExpiresWithTheLease() async throws {
+        // The warning above is right for a daemon that answered a moment ago
+        // and is right for nobody an hour later. The hold stands on a lease
+        // the daemon itself renews; once a whole lease has passed with
+        // nothing accepted, the daemon has either let go or is not there, and
+        // "it almost certainly still stands" is no longer a reading of any
+        // evidence. It was said for ever, because the flag behind it recorded
+        // *that* a hold was accepted and never *when*.
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        // A clock the test moves, rather than a fixed instant.
+        let clock = MovableClock(Self.t0)
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding)
+
+        link.goSilent()
+        sleeper.timeOutCalls()
+
+        // Inside the lease: still a warning.
+        clock.advance(KeepAwakeHelperClient.confidenceWindow - 1)
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+        var seen = await client.currentState
+        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen == .temporarilyUnavailable, "inside the lease, silence is still a warning")
+
+        // Past it: the lease the hold stood on has run out.
+        clock.advance(2)
+        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        sleeper.beat()
+        for _ in 0 ..< 400 where seen != .unknownWhetherHeld {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        // Not a refusal. A renewal the daemon took whose reply was lost looks
+        // exactly like this, and the hold is then standing — so saying it
+        // lapsed is inventing an answer nobody gave. What is true is that
+        // nothing can vouch for it.
+        #expect(seen == .unknownWhetherHeld,
+                "past the lease, the card must stop claiming the hold stands")
+        link.releaseStranded()
+        await client.end()
+    }
+
+    /// A new session does not inherit the last one's acceptance.
+    @Test("Ending forgets that a hold was ever accepted")
+    func endingForgets() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = KeepAwakeHelperClient(link: link, now: { Self.t0 }, sleep: sleeper.sleep)
+
+        #expect(await client.begin(session: "s1") == .holding)
+        await client.end()
+
+        link.goSilent()
+        sleeper.timeOutCalls()
+        let fresh = await client.begin(session: "s2")
+        #expect(fresh != .temporarilyUnavailable,
+                "a new session inherited the last one's hold")
+        #expect(fresh == .unknownWhetherHeld,
+                "its own unanswered request is unknown, not absent")
+        link.releaseStranded()
+        await client.end()
+    }
+}
+
+
+/// A clock a test can move, for the rules that are about elapsed time rather
+/// than about order.
+final class MovableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+    init(_ start: Date) { value = start }
+    var now: Date { lock.withLock { value } }
+    func advance(_ seconds: TimeInterval) {
+        lock.withLock { value = value.addingTimeInterval(seconds) }
+    }
 }

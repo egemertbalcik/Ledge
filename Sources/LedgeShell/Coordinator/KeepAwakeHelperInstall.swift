@@ -32,14 +32,27 @@ enum KeepAwakeHelperInstall {
     }
 
     static func current() -> KeepAwakeHelperInstallation {
-        reading(
+        let answer = reading(
             isDistributable: isDistributable,
             // Only asked once the build could use the answer. `SMAppService`
             // is not consulted at all for a bundle that has no daemon in it.
             hasDaemonPlist: { hasDaemonPlist },
-            isRegistered: { SMAppService.daemon(plistName: plistName).status == .enabled }
+            registration: { SMAppService.daemon(plistName: plistName).status }
         )
+        // Logged because this is the one reading nobody can take from outside
+        // the app. `SMAppService.daemon(plistName:)` resolves against the
+        // *calling* bundle, so a probe run beside Ledge answers about the
+        // probe — which made a state that looked wrong impossible to tell from
+        // a state that was being reported wrongly.
+        if answer != lastLogged {
+            lastLogged = answer
+            log.notice("keep awake helper: \(answer.rawValue, privacy: .public) (plist \(plistName, privacy: .public))")
+        }
+        return answer
     }
+
+    /// So a reading taken every settings refresh does not fill the log.
+    nonisolated(unsafe) private static var lastLogged: KeepAwakeHelperInstallation?
 
     /// The three readings, and what they add up to. Separated from the three
     /// system calls that produce them because the order is the part worth
@@ -57,10 +70,22 @@ enum KeepAwakeHelperInstall {
     /// cannot happen.
     static func reading(isDistributable: Bool,
                         hasDaemonPlist: () -> Bool,
-                        isRegistered: () -> Bool) -> KeepAwakeHelperInstallation {
+                        registration: () -> SMAppService.Status) -> KeepAwakeHelperInstallation {
         guard isDistributable else { return .unsignedBuild }
         guard hasDaemonPlist() else { return .notInstalled }
-        return isRegistered() ? .installed : .notInstalled
+        switch registration() {
+        case .enabled:
+            return .installed
+        case .requiresApproval:
+            // Its own answer, because it needs its own thing from the user.
+            // Folded into `notInstalled` this told somebody who had just
+            // pressed Set Up to go and press Set Up.
+            return .needsApproval
+        default:
+            // `.notRegistered` and `.notFound` both mean nothing has been
+            // asked for yet, from the user's side.
+            return .notInstalled
+        }
     }
 
     /// Whether macOS would entertain registering a daemon from this bundle.

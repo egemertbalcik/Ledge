@@ -87,7 +87,10 @@ struct DisplayAdaptationTests {
         // selected card. Exact numbers on purpose: this test exists to fail
         // the day the reference Mac's rendering moves by a point.
         #expect(card(geometry, kind: .nowPlaying).height == 174)
-        #expect(card(geometry, kind: .levels).height == 170)
+        // The levels card measures itself now, so this is its *unmeasured*
+        // floor — the simple card's, which it shares with Focus and the rest.
+        #expect(card(geometry, kind: .levels).height
+                    == NotchLayout.simpleCardHeight(0, notchHeight: 32) + 10)
         #expect(card(geometry, kind: .weather).height == 200)
         #expect(card(geometry, kind: .event, weekRows: 5).width == NotchLayout.calendarWidth)
         #expect(NotchLayout.calendarHeight(weekRows: 5, notchHeight: 32) == NotchLayout.calendarHeight(weekRows: 5))

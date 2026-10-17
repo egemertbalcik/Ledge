@@ -155,6 +155,11 @@ public final class NotchPresentation {
     /// a deeper month has to make the card deeper with it.
     public var calendarWeekRows: Int = 0
 
+    /// What the calendar card's self-view is doing, and what it is allowed to
+    /// say about it. Owned by the shell, which is the only layer that can see
+    /// a camera or know where the pointer is.
+    public var selfView: SelfViewPayload = .off
+
     /// A fixed clock, for the gallery only — nil everywhere in the app.
     ///
     /// Two things on these cards are read off the wall clock: the calendar's
@@ -196,6 +201,27 @@ public final class NotchPresentation {
     public func reportCardContent(height: CGFloat, from id: ActivityID) {
         guard height > 0, height.isFinite else { return }
         if cardContentHeights[id] == height { return }
+        // A card's *first* measurement is not a change anybody asked to see.
+        //
+        // The island opens at the unmeasured floor, the card then says how
+        // tall it really is, and the spring on `expandedSize` animated the
+        // difference — so the card arrived, settled, and sprang again. That
+        // second movement is the glitch: it reads as the opening animation
+        // going wrong rather than as the card growing, because nothing the
+        // user did caused it.
+        //
+        // Every later measurement still animates: a card that grows a row or
+        // a sentence while somebody is looking at it *should* be seen to.
+        if cardContentHeights[id] == nil {
+            var silent = Transaction()
+            silent.disablesAnimations = true
+            withTransaction(silent) { record(height: height, from: id) }
+            return
+        }
+        record(height: height, from: id)
+    }
+
+    private func record(height: CGFloat, from id: ActivityID) {
         if cardContentHeights.count >= Self.rememberedMeasurements,
            cardContentHeights[id] == nil {
             // Whichever is not on screen. Cheap and rare: this only runs on a
@@ -206,6 +232,9 @@ public final class NotchPresentation {
         }
         cardContentHeights[id] = height
     }
+
+    /// Whether this card has ever said how tall it is. For a test.
+    public func hasMeasured(_ id: ActivityID) -> Bool { cardContentHeights[id] != nil }
 
     /// What this card measured, or zero if it never has — which is when the
     /// fixed height stands in, and that one is tall enough for any of them.
@@ -268,7 +297,7 @@ public final class NotchPresentation {
             guard let session = runningKeepAwake,
                   case .keepAwake(let payload) = session.payload
             else { return nil }
-            return .keepAwake(remaining: payload.remaining)
+            return .keepAwake(remaining: payload.isIndefinite ? nil : payload.remaining)
         }()
         let privacyContent: SatelliteContent? = {
             guard let activity = privacyActive,
@@ -321,6 +350,7 @@ public struct NotchOverlayView: View {
     private let shelfActions: ShelfActions
     private let notesActions: NotesActions
     private let levelsActions: LevelsActions
+    private let selfViewActions: SelfViewActions
     /// Files dropped on the notch. Returns whether they were taken.
     private let onDropFiles: ([URL]) -> Bool
     private let onHUDAdjust: (HUDReadout.Kind, Double) -> Void
@@ -341,6 +371,7 @@ public struct NotchOverlayView: View {
         shelfActions: ShelfActions = ShelfActions(),
         notesActions: NotesActions = NotesActions(),
         levelsActions: LevelsActions = LevelsActions(),
+        selfViewActions: SelfViewActions = SelfViewActions(),
         onDropFiles: @escaping ([URL]) -> Bool = { _ in false },
         onHUDAdjust: @escaping (HUDReadout.Kind, Double) -> Void = { _, _ in },
         onHUDAdjustDisplay: @escaping (UInt32, Double) -> Void = { _, _ in },
@@ -357,6 +388,7 @@ public struct NotchOverlayView: View {
         self.shelfActions = shelfActions
         self.notesActions = notesActions
         self.levelsActions = levelsActions
+        self.selfViewActions = selfViewActions
         self.onDropFiles = onDropFiles
         self.onHUDAdjust = onHUDAdjust
         self.onHUDAdjustDisplay = onHUDAdjustDisplay
@@ -920,7 +952,12 @@ public struct NotchOverlayView: View {
                     // behind a click. A one-line row with a tinted icon says
                     // less than the grid does and looks like every other row;
                     // the grid is the thing worth opening the notch for.
-                    CalendarExpandedView(payload: payload, now: presentation.fixedNow) { rows in
+                    CalendarExpandedView(
+                        payload: payload,
+                        now: presentation.fixedNow,
+                        selfView: presentation.selfView,
+                        selfViewActions: selfViewActions
+                    ) { rows in
                         presentation.calendarWeekRows = rows
                     }
                         // A stable identity: there is only ever one calendar

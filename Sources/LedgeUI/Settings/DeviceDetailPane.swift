@@ -4,6 +4,9 @@ import SwiftUI
 
 /// One device: what its batteries say now, what they have said, and when to
 /// be told about them.
+///
+/// Ordered by the question: how full is it, what has it been doing, when
+/// should it tell me — and only then the two choices about keeping it.
 struct DeviceDetailPane: View {
 
     @Bindable var model: DevicesSettingsModel
@@ -11,25 +14,19 @@ struct DeviceDetailPane: View {
 
     @State private var window: BatteryHistory.Window = .day
     @State private var confirmingRemove = false
-    @State private var removeKeepsHistory = true
 
     var body: some View {
-        // Scrolls, because the content does not fit and cannot be made to.
-        // Batteries, a chart, a range picker, one row per alert rule and the
-        // removal controls exceed the Settings window's height as soon as a
-        // device has a couple of rules — and the window is a fixed size, so
-        // the overflow was simply clipped away with no way to reach it.
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
-                batteries
-                history
+        SettingsPage {
+            batteries
+            history
+            Section {
                 AlertRulesSection(model: model, record: record)
-                footer
+            } header: {
+                Text("Alerts")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            keeping
         }
-        .scrollBounceBehavior(.basedOnSize)
+        .navigationTitle(record.name)
     }
 
     /// Whether a reading describes now.
@@ -45,41 +42,18 @@ struct DeviceDetailPane: View {
         )
     }
 
-    private var header: some View {
-        HStack(spacing: 10) {
-            Button {
-                model.clearSelection()
-            } label: {
-                Label("All Devices", systemImage: "chevron.left")
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Toggle("Pinned", isOn: Binding(
-                get: { record.isPinned },
-                set: { model.setPinned($0, for: record.id) }
-            ))
-            .toggleStyle(.switch)
-            .help("Keeps this device in the list even when it is not around. Pinning never scans for it.")
-        }
-    }
-
     // MARK: - Now
 
+    @ViewBuilder
     private var batteries: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(record.name)
-                .font(.title3.weight(.semibold))
-                .lineLimit(2)
-
+        Section {
             if record.readings.isEmpty {
-                Text("This device has never reported a battery level.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsNote("This device has never reported a battery level.")
             } else {
-                ForEach(record.readings.sorted { $0.component.sortOrder < $1.component.sortOrder }, id: \.component) { reading in
+                ForEach(
+                    record.readings.sorted { $0.component.sortOrder < $1.component.sortOrder },
+                    id: \.component
+                ) { reading in
                     HStack {
                         Text(reading.component.label)
                             .frame(width: 60, alignment: .leading)
@@ -95,7 +69,7 @@ struct DeviceDetailPane: View {
                         Spacer()
                         if !isCurrent(reading) {
                             Text("Last known")
-                                .font(.caption)
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -103,6 +77,8 @@ struct DeviceDetailPane: View {
                     .help(reading.observedAt.formatted(date: .abbreviated, time: .shortened))
                 }
             }
+        } header: {
+            Text("Battery")
         }
     }
 
@@ -110,19 +86,14 @@ struct DeviceDetailPane: View {
 
     @ViewBuilder
     private var history: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("History").font(.headline)
-                Spacer()
-                Picker("Range", selection: $window) {
-                    ForEach(BatteryHistory.Window.allCases, id: \.self) { option in
-                        Text(option.title).tag(option)
-                    }
+        Section {
+            Picker("Range", selection: $window) {
+                ForEach(BatteryHistory.Window.allCases, id: \.self) { option in
+                    Text(option.title).tag(option)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 220)
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
             let samples = BatteryHistory.samples(model.history, in: window, now: Date())
             if BatteryHistory.hasEnoughHistory(model.history, in: window, now: Date()) {
@@ -154,19 +125,25 @@ struct DeviceDetailPane: View {
                 .frame(height: 150)
                 .accessibilityLabel("Battery history over the last \(window.title)")
             } else {
-                Text("Not enough history yet.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsNote("Not enough history yet.")
                     .frame(height: 60, alignment: .leading)
             }
+        } header: {
+            Text("History")
         }
     }
 
-    // MARK: - Removing
+    // MARK: - Keeping
 
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Divider()
+    @ViewBuilder
+    private var keeping: some View {
+        Section {
+            Toggle("Keep in the list", isOn: Binding(
+                get: { record.isPinned },
+                set: { model.setPinned($0, for: record.id) }
+            ))
+            SettingsNote("Keeps this device in the list even when it is not around. Pinning never scans for it.")
+
             Button("Remove from Ledge…", role: .destructive) { confirmingRemove = true }
                 .confirmationDialog(
                     "Remove \(record.name) from Ledge?",
@@ -182,11 +159,13 @@ struct DeviceDetailPane: View {
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     Text("""
-                        This only affects Ledge. The device stays paired with \
-                        your Mac and nothing is disconnected. It will reappear \
-                        here if Ledge sees it again.
+                        This only affects Ledge. The device stays paired with your Mac \
+                        and nothing is disconnected. It will reappear here if Ledge sees \
+                        it again.
                         """)
                 }
+        } header: {
+            Text("Keeping")
         }
     }
 }

@@ -153,9 +153,12 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         switch EKEventStore.authorizationStatus(for: .event) {
         case .fullAccess: .granted
         case .notDetermined: .notDetermined
-        // Write-only is useless here: the whole feature is reading the next
-        // event, so it is a denial in everything but name.
-        case .denied, .restricted, .writeOnly: .denied
+        // Write-only is useless here — the whole feature is reading the next
+        // event — but it is not a refusal, and calling it one tells somebody
+        // who chose "Add Only" that they said no.
+        case .writeOnly: .addOnly
+        case .restricted: .restricted
+        case .denied: .denied
         @unknown default: .notDetermined
         }
     }
@@ -168,7 +171,8 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         switch CBCentralManager.authorization {
         case .allowedAlways: return .granted
         case .notDetermined: return .notDetermined
-        case .denied, .restricted: return .denied
+        case .restricted: return .restricted
+        case .denied: return .denied
         @unknown default: return .notDetermined
         }
     }
@@ -181,7 +185,8 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         switch manager.authorizationStatus {
         case .authorizedAlways: return .granted
         case .notDetermined: return .notDetermined
-        case .denied, .restricted: return .denied
+        case .restricted: return .restricted
+        case .denied: return .denied
         @unknown default: return .notDetermined
         }
     }
@@ -232,6 +237,20 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
     private static let automationQueryInterval: TimeInterval = 10
 
     private func automationStatus() -> PermissionStatus {
+        let running = Self.automationTargets.filter {
+            !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty
+        }
+        // Which players are open is a local read and costs nothing, so it is
+        // answered even while the gate is shut — which is the whole of a
+        // first tour. Without it the row read "Not requested" on a Mac with
+        // no player running at all, offered a button to allow it, and the
+        // press launched Music to have something to ask about. The button
+        // never said that. Now the row says what is actually true: there is
+        // nothing here to grant until a player is open.
+        guard !running.isEmpty else {
+            automationCache = .notApplicableNow
+            return automationCache
+        }
         // Reads "not requested" while the gate is shut, which is true of this
         // app's asking and not necessarily of the grant: someone who allowed
         // Automation for a previous install is told it has not been requested
@@ -240,17 +259,6 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         // `mayAskAboutPlayers`), so an honest reading here would put a system
         // dialog in front of a first-time user with nothing to explain it.
         guard mayAskAboutPlayers else { return .notDetermined }
-
-        let running = Self.automationTargets.filter {
-            !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty
-        }
-        // No supported player running is not "unavailable on this Mac" — a
-        // fresh user with Music installed but closed read exactly that. It
-        // is simply not askable right now.
-        guard !running.isEmpty else {
-            automationCache = .notApplicableNow
-            return automationCache
-        }
         let now = Date().timeIntervalSinceReferenceDate
         if now - lastAutomationQuery >= Self.automationQueryInterval {
             lastAutomationQuery = now
@@ -365,7 +373,7 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         switch focusStatus.authorization {
         case .authorized: return .granted
         case .denied: return .denied
-        case .restricted: return .denied
+        case .restricted: return .restricted
         case .notDetermined: return .notDetermined
         }
     }

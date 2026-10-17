@@ -1,9 +1,8 @@
-import Charts
 import LedgeCore
 import SwiftUI
 
-/// The Devices pane: what Ledge has seen, what it knows about each one, and
-/// when to say something about it.
+/// Devices: what Ledge has seen, what it knows about each one, and when to
+/// say something about it.
 ///
 /// Only devices Ledge can actually observe appear here — this Mac, AirPods and
 /// Beats seen over the air, Bluetooth accessories it has been told about.
@@ -11,106 +10,126 @@ import SwiftUI
 /// fill one in.
 struct DevicesSettingsTab: View {
 
-    @Bindable var model: DevicesSettingsModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Nil when the shell has no catalogue behind the pane — in a preview, or
+    /// in a test that does not exercise devices. The pane says so rather than
+    /// rendering an empty list as if it were an answer.
+    let model: DevicesSettingsModel?
+
+    /// A row a search result asked to be shown. The window clears it.
+    var highlighted: String?
+
+    @State private var confirmingDeleteAll = false
 
     var body: some View {
         Group {
-            if let record = model.selected {
-                DeviceDetailPane(model: model, record: record)
+            if let model {
+                pane(model)
             } else {
-                list
+                SettingsPage {
+                    Section {
+                        Label("No device catalogue", systemImage: "questionmark.folder")
+                        SettingsNote("Ledge could not open the file it keeps devices in, so this pane has nothing to show. Quitting and opening Ledge again is the usual fix.")
+                    }
+                }
             }
         }
-        .onAppear { model.beginWatching() }
+        .onAppear { model?.beginWatching() }
         // A closed pane leaves nothing running: the model cancels its refresh
         // and whatever read it had in flight, rather than letting either
         // finish into a window that has gone. Writes are deliberately not
         // cancelled — a rule the user just changed must still land.
-        .onDisappear { model.endWatching() }
+        .onDisappear {
+            model?.endWatching()
+            // Same rule as Cards: the row says Devices, so coming back to it
+            // shows the devices rather than whichever one was last open.
+            model?.clearSelection()
+        }
     }
 
-    private var loadingState: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small)
-            Text("Looking for devices…")
-                .foregroundStyle(.secondary)
+    /// The list, and the device that is open on top of it.
+    ///
+    /// A real navigation stack rather than a hand-made "All Devices" button:
+    /// the Cards pane pushes a page and gets the window's own back control,
+    /// and there is no reason for this pane to push one differently. The path
+    /// is the model's selection, so opening and closing a device still go
+    /// through `select` and `clearSelection` — including the close that
+    /// `forget` does for itself.
+    private func pane(_ model: DevicesSettingsModel) -> some View {
+        NavigationStack(path: Binding(
+            get: { model.selected.map { [$0.id] } ?? [] },
+            set: { path in if path.isEmpty { model.clearSelection() } }
+        )) {
+            list(model)
+                .navigationDestination(for: DeviceIdentity.self) { id in
+                    if let record = model.selected, record.id == id {
+                        DeviceDetailPane(model: model, record: record)
+                    }
+                }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 12)
-        .accessibilityLabel("Looking for devices")
     }
 
     @ViewBuilder
-    private var list: some View {
-        if !model.hasLoaded, model.isLoading {
-            // The first read goes to disk. A blank pane for that moment reads
-            // as "no devices", which is a different claim entirely.
-            loadingState
-        } else if model.rows.isEmpty, model.hasLoaded {
-            emptyState
-        } else {
-            // Scrolls: a Mac with a keyboard, a trackpad, a mouse and two sets
-            // of earbuds already exceeds the pane, and the window is a fixed
-            // size — so the overflow was clipped with no way to reach it.
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+    private func list(_ model: DevicesSettingsModel) -> some View {
+        SettingsPage(scrollTo: highlighted) {
+            if !model.hasLoaded, model.isLoading {
+                // The first read goes to disk. A blank pane for that moment
+                // reads as "no devices", which is a different claim entirely.
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Looking for devices…")
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityLabel("Looking for devices")
+                }
+            } else if model.rows.isEmpty, model.hasLoaded {
+                Section {
+                    Label("No devices yet", systemImage: "airpods.pro")
+                    SettingsNote("""
+                        Ledge fills this in as it sees things: this Mac, AirPods that \
+                        come within range, and Bluetooth accessories as they connect. \
+                        Nothing is looked up — it only records what it was already told.
+                        """)
+                }
+            } else {
+                Section {
                     ForEach(model.rows) { row in
                         Button { model.select(row.id) } label: {
                             DeviceRow(row: row)
                         }
                         .buttonStyle(.plain)
                         .accessibilityHint("Shows battery history and alerts for \(row.name)")
-                        if row.id != model.rows.last?.id { Divider() }
                     }
-
-                    Divider().padding(.top, 8)
-                    retentionNote
+                } header: {
+                    Text("Seen by Ledge")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                // "Battery alerts" in search lands on the list: the alerts
+                // themselves are inside a device, and the list is the way in.
+                .searchRow("alerts", highlighted: highlighted)
+
+                Section {
+                    Button("Delete Device History…", role: .destructive) {
+                        confirmingDeleteAll = true
+                    }
+                    .searchRow("history", highlighted: highlighted)
+                    .confirmationDialog(
+                        "Delete all battery history?",
+                        isPresented: $confirmingDeleteAll,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Delete History", role: .destructive) { model.deleteAllHistory() }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("The devices stay in the list. Only the recorded battery readings are removed.")
+                    }
+                } header: {
+                    Text("History")
+                } footer: {
+                    SettingsNote("Battery history is kept on this Mac for 90 days, up to 2,000 readings per device. Nothing is sent anywhere.")
+                }
             }
-            .scrollBounceBehavior(.basedOnSize)
         }
     }
-
-    private var emptyState: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("No devices yet")
-                .font(.headline)
-            Text("""
-                Ledge fills this in as it sees things: this Mac, AirPods that \
-                come within range, and Bluetooth accessories as they connect. \
-                Nothing is looked up — it only records what it was already \
-                told.
-                """)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var retentionNote: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Battery history is kept on this Mac for 90 days, up to 2,000 readings per device. Nothing is sent anywhere.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button("Delete Device History…", role: .destructive) { confirmingDeleteAll = true }
-                .confirmationDialog(
-                    "Delete all battery history?",
-                    isPresented: $confirmingDeleteAll,
-                    titleVisibility: .visible
-                ) {
-                    Button("Delete History", role: .destructive) { model.deleteAllHistory() }
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("The devices stay in the list. Only the recorded battery readings are removed.")
-                }
-        }
-        .padding(.top, 8)
-    }
-
-    @State private var confirmingDeleteAll = false
 }
 
 /// One row: who it is, where it stands, and how full.
@@ -130,7 +149,7 @@ private struct DeviceRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(presentation.status)
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -152,8 +171,11 @@ private struct DeviceRow: View {
                     .foregroundStyle(.secondary)
                     .accessibilityLabel("Pinned")
             }
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel(presentation.accessibilityLabel)

@@ -25,7 +25,13 @@ public enum SatelliteContent: Equatable, Sendable {
     /// is — same disc, same digits, same seat — because it is the same kind
     /// of standing fact with a time left on it, and a second shape for it
     /// would be a new thing to learn for no new meaning.
-    case keepAwake(remaining: TimeInterval)
+    ///
+    /// `nil` is a hold with no end: the plain switch, which runs until it is
+    /// switched off. Optional rather than a sentinel zero because zero is a
+    /// perfectly good remaining time and the two were being told apart
+    /// nowhere — every readout drew "0s" for a session that had only just
+    /// begun and would not stop on its own.
+    case keepAwake(remaining: TimeInterval?)
 
     /// The charge flash: plugging in shows a green ring filling to the current
     /// level with the percentage inside — the iPhone's charging moment.
@@ -67,8 +73,11 @@ extension SatelliteContent {
     /// Keep Awake's own, because its span runs to seven days and the timer's
     /// stops at 99h 59m — which turned a week-long session into "99h 59m" in
     /// the ear and on the compact face.
-    public static func keepAwakeLabel(remaining: TimeInterval) -> String {
-        KeepAwakeCopy.compactRemainingLabel(remaining)
+    public static func keepAwakeLabel(remaining: TimeInterval?) -> String {
+        // A hold with no end has no digits to show. The switch's own position
+        // is the whole of what there is to say, so the readout says it.
+        guard let remaining else { return KeepAwakeCopy.on }
+        return KeepAwakeCopy.compactRemainingLabel(remaining)
     }
 
     /// The clamp both labels share. 359_940 is 99h 59m: past that the label

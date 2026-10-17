@@ -83,6 +83,20 @@ public struct NotchState: Equatable, Sendable {
     /// `.companion` instead of `.idle`, so music stays visible in the notch.
     public var hasNowPlaying: Bool
 
+    /// Whether an open card is in the middle of something the notch must not
+    /// interrupt.
+    ///
+    /// The volume slider already had a version of this, kept in the shell and
+    /// applied to the hover exit alone. A camera running in the card needs
+    /// more than that: the pointer has to be able to reach the menu bar, a
+    /// pinned card must not auto-release behind it, and a volume readout
+    /// retiring over it must hand the card back rather than close it. Those
+    /// are three different paths through this reducer, so the fact lives here
+    /// where all three can see it.
+    ///
+    /// It never opens anything. A hold is only ever a refusal to close.
+    public var cardHoldsOpen: Bool = false
+
     public init(
         phase: NotchPhase = .idle,
         isHovering: Bool = false,
@@ -91,7 +105,8 @@ public struct NotchState: Equatable, Sendable {
         suspended: NotchPhase? = nil,
         hasNowPlaying: Bool = false,
         clickPins: Bool = true,
-        expandOnHover: Bool = true
+        expandOnHover: Bool = true,
+        cardHoldsOpen: Bool = false
     ) {
         self.clickPins = clickPins
         self.expandOnHover = expandOnHover
@@ -101,6 +116,7 @@ public struct NotchState: Equatable, Sendable {
         self.hudFromCompanion = hudFromCompanion
         self.suspended = suspended
         self.hasNowPlaying = hasNowPlaying
+        self.cardHoldsOpen = cardHoldsOpen
     }
 }
 
@@ -126,6 +142,10 @@ public enum NotchEvent: Equatable, Sendable {
 
     /// Explicit close: swipe down, or clicking a pinned overlay again.
     case dismissed
+
+    /// An open card took the notch, or gave it back. See
+    /// `NotchState.cardHoldsOpen`.
+    case cardHoldChanged(Bool)
 
     /// Something external made the overlay invalid: display change, sleep,
     /// a fullscreen app taking over.

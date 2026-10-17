@@ -63,16 +63,55 @@ public enum DeviceObservations {
         )
     }
 
-    /// An AirPods proximity advertisement.
+    /// Which paired device an advertisement belongs to, if any.
+    ///
+    /// The whole ownership question for proximity, in one testable place.
+    /// Three ways to answer "nobody", and all three matter:
+    ///
+    /// - the paired list has not been read yet. Ownership cannot be
+    ///   established by waiting, so an unanswered list is a reason to record
+    ///   nothing — not a reason to record everything and sort it out later,
+    ///   which is how seventeen strangers' earbuds got in;
+    /// - the model id is not one Apple ships. Those records exist: `0xBA8F`
+    ///   and friends are other Continuity traffic that decoded far enough to
+    ///   look like a proximity message;
+    /// - nothing paired claims the model, or more than one does.
+    public static func owner(
+        of proximity: AirPodsProximity,
+        paired: PairedDeviceRegistry.Answer?
+    ) -> PairedDevice? {
+        guard let paired, AirPodsProximity.isKnownModel(proximity.model) else { return nil }
+        return paired.airPodsOwner(ofModel: proximity.model)
+    }
+
+    /// An AirPods proximity advertisement, as readings for the paired device
+    /// that broadcast it.
     ///
     /// These *do* carry charging evidence per component, which is why AirPods
-    /// can support charged alerts and a plain Bluetooth accessory cannot.
+    /// can support charged alerts and a plain Bluetooth accessory cannot. They
+    /// are also the loudest thing on the air: every pair of earbuds in range
+    /// broadcasts one several times a second, whoever owns them.
+    ///
+    /// This used to mint a catalogue record from each of them, keyed by model
+    /// id, with no test of ownership anywhere — so carrying the Mac through a
+    /// café catalogued strangers' AirPods for ever. An advertisement may now
+    /// only *attach readings to* a device the Mac is already paired with; it
+    /// creates nothing, and when it belongs to nobody it says nothing.
+    ///
+    /// Attaching to the paired record rather than keeping a parallel one also
+    /// ends the duplicate pair the catalogue used to hold for the same
+    /// earbuds. `DeviceIdentity.canonical` says there is no trustworthy
+    /// identifier relating the two; there is one, and it is the model id — the
+    /// advertisement carries it big-endian and `system_profiler` reports the
+    /// same model as a byte-swapped product id. It identifies a *model*, so an
+    /// ambiguous match is refused rather than guessed: see
+    /// `PairedDeviceRegistry.Answer.airPodsOwner(ofModel:)`.
     public static func fromProximity(
         _ proximity: AirPodsProximity,
-        name: String,
+        paired: PairedDeviceRegistry.Answer?,
         at observedAt: Date
     ) -> DeviceObservation? {
-        guard let peripheralID = proximity.peripheralID else { return nil }
+        guard let owner = owner(of: proximity, paired: paired) else { return nil }
 
         var readings: [BatteryReading] = []
         func add(_ component: BatteryComponent, _ level: Double?, _ charging: Bool) {
@@ -83,7 +122,12 @@ public enum DeviceObservations {
                 // The advertisement states this per component, so it is
                 // evidence rather than a guess.
                 charging: charging ? .charging : .notCharging,
-                observedAt: observedAt
+                observedAt: observedAt,
+                // Filed under the paired device's identity, which is re-read
+                // every ten minutes and allowed thirty — but *this* reading
+                // came off the air, where silence means something within
+                // five.
+                origin: .proximityName
             ))
         }
         add(.left, proximity.leftBattery, proximity.isChargingLeft)
@@ -93,8 +137,14 @@ public enum DeviceObservations {
         guard !readings.isEmpty else { return nil }
 
         return DeviceObservation(
-            deviceID: .peripheral(peripheralID),
-            name: name,
+            // The paired device's own identity. One record per pair of
+            // earbuds, holding both what the paired list reports and what the
+            // air carries.
+            deviceID: owner.identity,
+            // The name macOS knows it by, not the model's generic one. The
+            // catalogue showed "AirPods 4 (ANC)" for earbuds the user had
+            // named "Ege AirPods"; that drift came from here.
+            name: owner.name,
             readings: readings,
             // An advertisement means "in range", not "connected to this Mac"
             // — and its absence later will mean nothing at all. Anything
@@ -103,9 +153,10 @@ public enum DeviceObservations {
             observedAt: observedAt,
             symbolName: proximity.symbolName,
             isApple: true,
-            // The model identifier does not change, so a renamed device keeps
-            // its record and its history.
-            canonicalHint: "airpods-model-\(proximity.model)",
+            // No hint: the identity is already the stable one. The hint
+            // existed to key a record by model id, which is exactly what must
+            // not happen any more.
+            canonicalHint: nil,
             // In range, which is not an attachment: a case opening nearby must
             // not alert as though the earbuds had just been put in.
             cause: .advertisement

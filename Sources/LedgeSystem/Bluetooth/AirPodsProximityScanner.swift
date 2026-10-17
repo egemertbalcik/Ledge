@@ -3,6 +3,27 @@ import Foundation
 import LedgeCore
 import os
 
+/// Something that reports AirPods proximity advertisements.
+///
+/// A seam, so a test can drive the provider above it with advertisements of
+/// its own and never build a `CBCentralManager`. The tests for the card used
+/// the real scanner and relied on the test machine having no Bluetooth grant
+/// to stay inert — which is not a property of the test, it is a property of
+/// whoever happens to run it.
+@MainActor
+public protocol ProximityScanning: AnyObject {
+
+    /// Fires for each decoded advertisement, with its strength on it.
+    var onUpdate: (AirPodsProximity) -> Void { get set }
+
+    /// Whether an advertisement is one of the user's own. Used for one
+    /// thing: whether a reading may hold the radio open.
+    var isOurs: (AirPodsProximity) -> Bool { get set }
+
+    func start()
+    func stop()
+}
+
 /// Scans BLE advertisements for AirPods proximity messages and reports the
 /// decoded battery + lid state.
 ///
@@ -12,17 +33,40 @@ import os
 /// `CBCentralManager` prompts on first use), which is why it is opt-in behind its
 /// own provider rather than always-on.
 @MainActor
-public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
+public final class AirPodsProximityScanner: NSObject, ProximityScanning, CBCentralManagerDelegate {
 
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "airpods")
 
-    /// Fires for each decoded advertisement from a *nearby* set of AirPods.
+    /// Fires for each decoded advertisement, with its strength on it.
+    ///
+    /// Every valid reading, not only the near ones: how far away a set of
+    /// AirPods is has nothing to do with whether its battery figures are
+    /// true, and the catalogue wants the figures. Whether a *card* appears is
+    /// a separate decision, made where cards are made.
     public var onUpdate: (AirPodsProximity) -> Void = { _ in }
 
-    /// Only advertisements at least this strong are surfaced, so a colleague's
-    /// AirPods across the room do not pop a card. The user's own, on the desk or
-    /// in hand, sit well above this.
+    /// Whether an advertisement is one of the user's own.
+    ///
+    /// Supplied by the owner of the paired list, because this object has no
+    /// business knowing how ownership is decided. It is used for one thing:
+    /// whether a reading may hold the radio open. A stranger's earbuds
+    /// changing state at the next table used to extend Ledge's listening
+    /// window — the most expensive scan mode CoreBluetooth has — for readings
+    /// that were then refused downstream.
+    public var isOurs: (AirPodsProximity) -> Bool = { _ in true }
+
+    /// Weaker than this and the reading is noise rather than a device: a
+    /// sanity floor, not a distance policy.
+    ///
+    /// This used to be −55, and it was the only gate: a set of AirPods on the
+    /// far side of the room reported nothing at all, so its battery history
+    /// simply stopped. −55 is now where *cards* begin, which is the decision
+    /// that actually depends on being close.
     private let minimumRSSI: Int
+
+    /// How close something has to be before it may hold the listening window
+    /// open. Holding the radio open is for a device in hand and changing.
+    private let attentiveRSSI: Int
 
     private var central: CBCentralManager?
 
@@ -50,7 +94,16 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
     private var window = ProximityScanWindow()
     /// The last reading seen from each device, so a repeat can be told from
     /// news. AirPods re-advertise the same state many times a second.
+    ///
+    /// Bounded, because BLE private addresses rotate every quarter of an hour
+    /// or so: each rotation mints a key that will never be seen again, and
+    /// without a cap the table grew for the whole life of the app. Dropping it
+    /// wholesale costs one repeat being read as news per device.
     private var lastSeen: [UUID: AirPodsProximity] = [:]
+
+    /// How many devices' last readings are kept. Generous for a desk, a cafe
+    /// or a train carriage; the cost of being wrong is one extra window.
+    private static let lastSeenLimit = 32
 
     private var windowTimer: DispatchSourceTimer?
     private var windowEnd: DispatchWorkItem?
@@ -59,9 +112,20 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
     /// packet from each device.
     private var isAttentive = false
 
-    public init(minimumRSSI: Int = -55) {
+    public init(minimumRSSI: Int = -90, attentiveRSSI: Int = -55) {
         self.minimumRSSI = minimumRSSI
+        self.attentiveRSSI = attentiveRSSI
         super.init()
+    }
+
+    /// Whether an advertisement is worth holding the radio open for.
+    ///
+    /// Three things at once, and all three matter: it has to be saying
+    /// something new, it has to be the user's, and it has to be close. Any one
+    /// of them alone kept the attentive window open for traffic nobody was
+    /// waiting on.
+    nonisolated static func holdsTheWindow(changed: Bool, isOurs: Bool, rssi: Int, closeEnough: Int) -> Bool {
+        changed && isOurs && rssi >= closeEnough
     }
 
     /// Whether Bluetooth is authorised, without prompting.
@@ -94,6 +158,10 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
         windowEnd = nil
         isScanning = false
         isAttentive = false
+        // Nothing here is worth carrying into the next run: a scanner started
+        // again has no idea how long it was off, and a stale reading would
+        // make the first real advertisement look like a repeat.
+        lastSeen.removeAll()
         central?.stopScan()
         central = nil
     }
@@ -198,13 +266,15 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
     ) {
         // 127 is CoreBluetooth's "RSSI unavailable" sentinel, not a strong
         // signal — without this check it sails past the distance filter.
-        guard RSSI.intValue != 127, RSSI.intValue >= minimumRSSI,
+        let strength = RSSI.intValue
+        guard strength != 127, strength >= minimumRSSI,
               let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
               var proximity = AirPodsProximityDecoder.decode(manufacturerData: data)
         else { return }
         // Read before the actor hop: the peripheral is not Sendable, its
         // identifier is.
         proximity.peripheralID = peripheral.identifier
+        proximity.rssi = strength
 
         MainActor.assumeIsolated {
             // Something of ours is right here. Whether that is worth holding
@@ -213,9 +283,20 @@ public final class AirPodsProximityScanner: NSObject, CBCentralManagerDelegate {
             // while AirPods were in range, which is most of the time.
             let id = proximity.peripheralID
             let changed = id.map { lastSeen[$0] != proximity } ?? true
-            if let id { lastSeen[id] = proximity }
+            if let id {
+                if lastSeen.count >= Self.lastSeenLimit, lastSeen[id] == nil {
+                    lastSeen.removeAll()
+                }
+                lastSeen[id] = proximity
+            }
 
-            switch window.advertisement(changed: changed, now: Date().timeIntervalSinceReferenceDate) {
+            let holds = Self.holdsTheWindow(
+                changed: changed,
+                isOurs: isOurs(proximity),
+                rssi: strength,
+                closeEnough: attentiveRSSI
+            )
+            switch window.advertisement(changed: holds, now: Date().timeIntervalSinceReferenceDate) {
             case .hold:
                 openWindow(for: Self.attentiveHold, attentive: true)
             case .leave:
