@@ -245,6 +245,14 @@ private struct LevelRowView: View {
         .padding(.vertical, 4)
         .frame(minHeight: LevelsCardView.rowHeight, alignment: .top)
         .opacity(isDimmed ? 0.38 : 1)
+        // Its own short fade, so it never inherits one. The rows rest at 38%
+        // while the pointer is on one of them, and the pointer leaves this
+        // card on its way out of the island — so the brightening landed in
+        // whatever transaction the island's closing was running, and three
+        // rows came back up over the length of that spring, while the card
+        // was shrinking. A twelfth of a second, finished before anything else
+        // starts.
+        .animation(.easeOut(duration: 0.08), value: isDimmed)
         .contentShape(Rectangle())
         .gesture(drag)
         .onHover(perform: onHover)

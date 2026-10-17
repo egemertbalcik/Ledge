@@ -391,6 +391,57 @@ public struct NotchLayout: Sendable, Equatable {
         return min(max(notchHeight + contentHeight + dotsBand, 96 + delta), 220 + delta)
     }
 
+    /// How many notes the Notes card draws. The rest are counted, not drawn.
+    public static let notesShownCount = 5
+
+    /// What a card is worth before it has measured itself.
+    ///
+    /// The island opens at a height computed from this, and the card reports
+    /// what it really needs a frame later. When the two differ the difference
+    /// is applied without animation, because the opening spring is already
+    /// running and a second movement reads as that spring going wrong — so a
+    /// bad guess is a visible jump. The Notes card was eighty-eight points
+    /// out of the shared floor, which is the jump it made on its first open
+    /// of every session.
+    ///
+    /// Nothing here is a layout. It is what the real cards measure, written
+    /// down — and `CardOpeningTests` renders those cards and holds these
+    /// numbers to them, so the two cannot drift apart quietly.
+    public static func estimatedContentHeight(for payload: ActivityPayload?) -> CGFloat {
+        switch payload {
+        case .notes(let payload): notesContentHeight(noteCount: payload.notes.count)
+        case .levels(let payload): levelsContentHeight(payload.rows)
+        default: 0
+        }
+    }
+
+    /// The Notes card: a lead tile, then a row per note, then the footer.
+    public static func notesContentHeight(noteCount: Int) -> CGFloat {
+        // The empty card is its own thing: a heading, a line of prose and the
+        // same footer.
+        guard noteCount > 0 else { return 122 }
+        let shown = min(noteCount, notesShownCount)
+        // The rows after the lead sit in a group of their own, which adds its
+        // four points once however many of them there are.
+        return 125 + CGFloat(shown - 1) * 24 + (shown > 1 ? 4 : 0)
+    }
+
+    /// The Levels card: a row per thing that has a level.
+    public static func levelsContentHeight(_ rows: [LevelRow]) -> CGFloat {
+        guard !rows.isEmpty else { return 58 }
+        var height = 58 + CGFloat(rows.count - 1) * 36
+        // One gap between the sound group and the light group, wherever the
+        // list changes from one to the other.
+        if zip(rows, rows.dropFirst()).contains(where: { $0.kind == .sound && $1.kind != .sound }) {
+            height += 8
+        }
+        // A sentence under a row — "software-dimmed", "set on the device
+        // itself". Counted as one line; a longer one is corrected by the
+        // card's own measurement a frame later.
+        height += CGFloat(rows.count { $0.note != nil }) * 16
+        return height
+    }
+
     /// The Keep Awake card's height, from the height its content reported.
     ///
     /// Same shape as `simpleCardHeight` with a ceiling that fits the tallest
@@ -816,6 +867,10 @@ public struct NotchLayout: Sendable, Equatable {
                 height: keepAwakeHeight(cardContentHeight, notchHeight: notchHeight)
             )
         case .device, .focus, .privacy, .keyboard, .power, .message, .shelf, .notes:
+            // The measurement when there is one, and what the payload is
+            // worth before that: a card whose height is known from what it
+            // holds opens at that height rather than at the shared floor.
+
             // The simple cards: a glyph and a line or two, sometimes a row of
             // cells. They used to take the *height preference* as a floor like
             // everything else, which is how a Focus card that needs 66pt came
@@ -826,7 +881,10 @@ public struct NotchLayout: Sendable, Equatable {
             // where a taller card buys something; here it only bought a hole.
             return CGSize(
                 width: base.width,
-                height: simpleCardHeight(cardContentHeight, notchHeight: notchHeight)
+                height: simpleCardHeight(
+                    cardContentHeight > 0 ? cardContentHeight : estimatedContentHeight(for: payload),
+                    notchHeight: notchHeight
+                )
             )
         case .weather:
             // Same width as the media card so the two flagship cards present one
@@ -861,7 +919,10 @@ public struct NotchLayout: Sendable, Equatable {
             // through the page dots and off the bottom of the card.
             return CGSize(
                 width: base.width,
-                height: simpleCardHeight(cardContentHeight, notchHeight: notchHeight)
+                height: simpleCardHeight(
+                    cardContentHeight > 0 ? cardContentHeight : estimatedContentHeight(for: payload),
+                    notchHeight: notchHeight
+                )
             )
         case .event:
             // As deep as the month on show, and no deeper. The height covers

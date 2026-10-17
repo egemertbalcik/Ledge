@@ -78,7 +78,9 @@ public struct NotesCardView: View {
     ///
     /// Five, and the card is the same height at twelve notes and at three
     /// hundred. Only the count grows.
-    static let shownCount = 5
+    /// Shared with the shell, which sizes the island from the same number
+    /// before this card has measured itself.
+    static let shownCount = NotchLayout.notesShownCount
 
     /// Which note is being opened, if the store has not answered yet.
     @State private var opening: String?
