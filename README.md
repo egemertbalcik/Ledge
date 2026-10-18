@@ -37,7 +37,9 @@ there while you work, close enough to glance at, too small to distract you.
 ## Your day, one glance up
 
 What's next, and the month it belongs to. The weather where you are, and the
-hours coming.
+hours coming. When a meeting is about to start, the Join button grows a little
+mirror: one click and your camera opens in the card, so you can fix your hair
+before anyone else sees it.
 
 <table>
 <tr>
@@ -45,6 +47,26 @@ hours coming.
 <td width="50%"><img src="docs/media/weather.gif" width="100%" alt="The weather card: current conditions and the hourly forecast"></td>
 </tr>
 </table>
+
+## Leave it working and walk away
+
+Running a build, a long download, or an agent that needs another hour? Keep
+Awake holds the Mac and the screen on until you say stop. It's what
+`caffeinate` does, minus the terminal.
+
+Move it one stop further and the Mac keeps going with the lid shut. The screen,
+the keyboard light and the speakers go quiet so the battery goes to the work,
+and it all lets go at the time you set. That stop needs a small helper running
+as root. It's only installed when you turn it on, and it's removed when you turn
+it off. Keep Awake itself stays out of the way until you switch it on in
+Settings.
+
+## Write it down before it's gone
+
+A phone number, a command, the thing you'll forget in ten minutes. Notes keeps
+your five most recent on a card, and opens each one in its own window when
+there's more to say. They're plain files on your Mac, and any of them can go
+to Apple Notes in one click.
 
 ## And the rest
 
@@ -64,10 +86,11 @@ never even built, so it does no work and asks for nothing.
 
 ## What it will never do
 
-Ledge **records nothing**. No screen capture, no audio capture, no capture
-permission, no recording indicator lighting up in your menu bar — ever. The
-equalizer that dances along with your music never hears a note of it: it's an
-animation seeded from the track, reading zero bytes of audio. There was an early
+Ledge **records nothing**. No screen capture, no audio capture, nothing saved
+from the camera. The camera opens only when you press the mirror, shows only
+you, and closes when the card does. The equalizer that dances along with your
+music never hears a note of it: it's an animation seeded from the track,
+reading zero bytes of audio. There was an early
 version that sampled system audio, and it was deleted for exactly this reason.
 Nobody should have to trust a notch app with a microphone.
 
@@ -84,8 +107,9 @@ sign up for, no telemetry.
 Ledge does things macOS does not offer publicly, and you should know what before
 you install it.
 
-It is **not sandboxed**, and it uses two private frameworks: `DisplayServices`
-for brightness, and `MediaRemote` to see what is playing in any app. Reading
+It is **not sandboxed**, and it uses three private frameworks: `DisplayServices`
+for brightness, `CoreBrightness` to dim the keyboard light while the lid is
+shut, and `MediaRemote` to see what is playing in any app. Reading
 MediaRemote is not permitted to ordinary apps, so Ledge loads a small library of
 its own into `/usr/bin/perl` — a program Apple signs and entitles — and asks
 from there. That library does one thing, exports one symbol, and reports what is
@@ -97,6 +121,13 @@ Accessibility, if you grant it, is used for one purpose: catching the volume and
 brightness keys so Ledge's readout can replace the system's rather than appear
 under it.
 
+Keep Awake's lid-shut stop installs a helper that runs as root, because only root
+can stop a MacBook from sleeping when the lid closes. It holds the Mac awake on a
+90-second lease that Ledge keeps renewing. If Ledge crashes, is force-quit or is
+updated mid-hold, the lease runs out and the Mac is free to sleep again. Nobody
+has to remember to undo it. The details are in
+[docs/keep-awake-lid-closed.md](docs/keep-awake-lid-closed.md).
+
 The consequences are real: this is software that can break on any macOS update,
 and it can never be sold on the App Store. The source for all of it is here.
 
@@ -107,11 +138,13 @@ drag Ledge into Applications, and open it **from Finder** — macOS gives the
 permissions to whatever launched the app, so starting it from a terminal hands
 them to the terminal instead. After that it keeps itself up to date with
 [Sparkle](https://sparkle-project.org); there's a *Check for Updates…* in
-Settings, under About.
+Settings, under General.
 
-There's no Dock icon and no menu bar item — the notch is the app. Open Ledge
-again from Finder or Spotlight and the copy that's already running brings its
-Settings up. Quitting is a button in there, under General.
+There's no Dock icon — the notch is the app. The only time Ledge shows up in the
+menu bar is while it's holding the Mac awake with the lid shut, because once the
+lid is down the notch is out of reach. Open Ledge again from Finder or Spotlight
+and the copy that's already running brings its Settings up. Quitting is a button
+in there, under General.
 
 **You'll need** a MacBook with a notch — Pro from 2021, Air from 2022 — on macOS
 26 or later. Ledge draws on that display and nowhere else, on purpose: external
@@ -127,12 +160,14 @@ on without it.
 | Permission | What it gives you | If you say no |
 |---|---|---|
 | Accessibility | Ledge's readout instead of the system one | You get both, stacked |
-| Automation | Cover art and scrubbing in Music and Spotify | Music still shows up, just without the artwork |
+| Automation | Cover art and scrubbing in Music and Spotify, and sending a note to Apple Notes | Music still shows up, just without the artwork; notes stay in Ledge |
 | Calendars | Your next event, and the month | No calendar card |
+| Camera | The mirror on the Join button | No mirror; Join still works |
 | Bluetooth | Connections the moment they happen, and AirPods proximity | Still read, just a beat later |
 | Focus status | The notch says when a Focus is on, and stays quiet during it | Announcements come through regardless |
 | The Focus folder *(optional, not a system permission)* | The Focus card follows the switch immediately, and names the mode | Still shown, within a few seconds, as "Focus" |
 | Location | Weather for wherever you are | Weather for a city you type in |
+| Login Items *(Keep Awake's helper)* | Keeping the Mac awake with the lid shut | Awake still works, lid open |
 
 ## Build it yourself
 
