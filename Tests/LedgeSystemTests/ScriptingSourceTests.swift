@@ -348,3 +348,134 @@ struct ScriptingReadingTests {
         #expect(snapshot.isPlaying == false)
     }
 }
+
+/// One player's answer must never stand in for another's. A shared held answer
+/// put Spotify's paused track on a card asking about Music — and every
+/// transport button on that card then addressed Spotify.
+@Suite("A held answer belongs to the player that gave it")
+@MainActor
+struct ScriptingHeldAnswerIsolationTests {
+
+    @MainActor
+    private final class Script {
+        var byPlayer: [String: ScriptingNowPlayingSource.PlayerReading] = [:]
+        var clock: TimeInterval = 1_000
+    }
+
+    private static let spotify = ScriptingNowPlayingSource.players.first {
+        $0.bundleID == "com.spotify.client"
+    }!
+    private static let music = ScriptingNowPlayingSource.players.first {
+        $0.bundleID == "com.apple.Music"
+    }!
+
+    private func source(_ script: Script) -> ScriptingNowPlayingSource {
+        ScriptingNowPlayingSource(
+            mayQueryPlayers: { true },
+            availablePlayers: { [Self.spotify, Self.music] },
+            readPlayer: { player in script.byPlayer[player.bundleID] ?? .nothing },
+            now: { script.clock }
+        )
+    }
+
+    private func snapshot(_ bundleID: String, _ title: String, playing: Bool) -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: title, artist: "Artist", isPlaying: playing,
+            appName: bundleID == "com.spotify.client" ? "Spotify" : "Music",
+            appBundleID: bundleID
+        )
+    }
+
+    @Test("A targeted read of a silent player is not answered with the other one's track")
+    func targetedReadStaysWithItsPlayer() async {
+        let script = Script()
+        let source = source(script)
+
+        // Spotify has been paused for a while, so it has a held answer.
+        script.byPlayer["com.spotify.client"] = .answered(snapshot("com.spotify.client", "karambol", playing: false))
+        #expect(await source.snapshot()?.appBundleID == "com.spotify.client")
+
+        // Music is asked and does not reply. It has never answered, so there
+        // is nothing of its own to fall back on.
+        script.clock += 1
+        script.byPlayer["com.apple.Music"] = .unreadable
+        let targeted = await source.snapshot(forBundleID: "com.apple.Music")
+        #expect(targeted == nil)
+    }
+
+    @Test("An unreadable player is covered only by its own last answer")
+    func eachPlayerCoversItself() async {
+        let script = Script()
+        let source = source(script)
+
+        script.byPlayer["com.apple.Music"] = .answered(snapshot("com.apple.Music", "Sonata", playing: false))
+        #expect(await source.snapshot()?.title == "Sonata")
+
+        // Music goes quiet; Spotify answers that it has nothing.
+        script.clock += 1
+        script.byPlayer["com.apple.Music"] = .unreadable
+        script.byPlayer["com.spotify.client"] = .nothing
+        let held = await source.snapshot()
+        #expect(held?.appBundleID == "com.apple.Music")
+        #expect(held?.title == "Sonata")
+    }
+
+    @Test("A player answering nothing does not spend the other player's cover")
+    func nothingClearsOnlyItsOwn() async {
+        let script = Script()
+        let source = source(script)
+
+        script.byPlayer["com.spotify.client"] = .answered(snapshot("com.spotify.client", "karambol", playing: false))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        // Music says it has nothing. Spotify then misses its deadline: its own
+        // answer is still the one that covers it.
+        script.clock += 1
+        script.byPlayer["com.apple.Music"] = .nothing
+        script.byPlayer["com.spotify.client"] = .unreadable
+        #expect(await source.snapshot()?.title == "karambol")
+    }
+
+    /// The discriminating case: Spotify quits, so it is never read again and
+    /// its held answer just sits there, while Music misses its deadline. Only
+    /// Music's own answer may cover Music — and it has none.
+    @Test("A player that has quit cannot cover a different player's silence")
+    func aQuitPlayersAnswerCoversNobodyElse() async {
+        let script = Script()
+        var running = [Self.spotify, Self.music]
+        let source = ScriptingNowPlayingSource(
+            mayQueryPlayers: { true },
+            availablePlayers: { running },
+            readPlayer: { player in script.byPlayer[player.bundleID] ?? .nothing },
+            now: { script.clock }
+        )
+
+        script.byPlayer["com.spotify.client"] = .answered(snapshot("com.spotify.client", "karambol", playing: false))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        // Spotify quits: it drops out of the running list and is never asked
+        // again, so nothing ever retires the answer it left behind.
+        running = [Self.music]
+        script.clock += 1
+        script.byPlayer["com.apple.Music"] = .unreadable
+        #expect(await source.snapshot() == nil)
+    }
+
+    @Test("A player that says it stopped takes its own card away")
+    func nothingRetiresItsOwnAnswer() async {
+        let script = Script()
+        let source = source(script)
+
+        script.byPlayer["com.spotify.client"] = .answered(snapshot("com.spotify.client", "karambol", playing: false))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        script.clock += 1
+        script.byPlayer["com.spotify.client"] = .nothing
+        #expect(await source.snapshot() == nil)
+
+        // And having answered, it has nothing held to come back on.
+        script.clock += 1
+        script.byPlayer["com.spotify.client"] = .unreadable
+        #expect(await source.snapshot() == nil)
+    }
+}

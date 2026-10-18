@@ -65,7 +65,42 @@ struct MediaLingerTests {
         var linger = MediaLinger()
         linger.nowResting(track)
         linger.nothingRests(now: 1_000)
-        #expect(linger.paused(track, full: full, now: 1_000) == .neverRested)
+        // Past the grace it is a stranger again, which is the point of the
+        // rule: a track that went away and comes back paused inherits nothing.
+        let later = 1_000 + MediaLinger.unknownGrace + 1
+        #expect(linger.paused(track, full: full, now: later) == .neverRested)
+    }
+
+    /// The gap between a track playing and the first paused reading of it. The
+    /// source can go quiet in between — a native player with no scripting
+    /// fallback does exactly this — and the pause that follows had no deadline
+    /// to protect it.
+    @Test("A track that went quiet a moment ago still gets its stay")
+    func aBriefAbsenceKeepsTheClaim() {
+        var linger = MediaLinger()
+        linger.nowResting(track)
+        linger.nothingRests(now: 1_000)
+        #expect(linger.paused(track, full: full, now: 1_001) == .stays(full))
+    }
+
+    @Test("The grace is timed from the silence, not from when the track played")
+    func theGraceRunsFromTheAbsence() {
+        var linger = MediaLinger()
+        linger.nowResting(track)
+        // The track played for an hour before anything went quiet.
+        linger.nothingRests(now: 4_600)
+        #expect(linger.paused(track, full: full, now: 4_602) == .stays(full))
+    }
+
+    @Test("Playing again clears a pending absence")
+    func playingClearsTheAbsence() {
+        var linger = MediaLinger()
+        linger.nowResting(track)
+        linger.nothingRests(now: 1_000)
+        // It came back playing rather than paused.
+        linger.nowResting(track)
+        // Long past the grace, but it has been resting the whole time since.
+        #expect(linger.paused(track, full: full, now: 1_100) == .stays(full))
     }
 
     /// The blink: the player drops out of the running-application list for one

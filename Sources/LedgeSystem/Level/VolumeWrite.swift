@@ -589,6 +589,20 @@ public struct VolumeWriter: Sendable {
         writeScalar(min(max(value, 0), 1), to: device)
     }
 
+    /// Whether this device's level can be written at all.
+    ///
+    /// The same test the write itself makes, asked without writing: a main
+    /// element that accepts a value, or at least one channel that does.
+    /// Readable is not writable — a read-only output reports a perfectly good
+    /// level and refuses every attempt to change it — and the card used to
+    /// offer a slider for exactly those, which dragged and sprang back.
+    public func canSetLevel(of device: AudioObjectID) -> Bool {
+        if hardware.canWriteScalar(device, element: VolumeElement.main) { return true }
+        return hardware.channels(of: device).contains {
+            hardware.canWriteScalar(device, element: $0)
+        }
+    }
+
     /// Main element first; a device without one is written per channel.
     private func writeScalar(_ value: Double, to device: AudioObjectID) -> ScalarOutcome {
         if hardware.canWriteScalar(device, element: VolumeElement.main) {

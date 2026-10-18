@@ -36,6 +36,16 @@ public struct MediaLinger: Equatable, Sendable {
     /// handful of tracks in a session, dropped as they play again.
     private var deadlines: [Key: TimeInterval] = [:]
 
+    /// When the island went quiet on a claim that had no stay running yet, so
+    /// the claim can be kept for a moment and then let go.
+    private var absentSince: TimeInterval?
+
+    /// How long a claim survives the island going quiet before a stay has
+    /// started. Long enough to cover a player that drops out of sight and
+    /// comes back, short enough that it cannot reach across a gap a person
+    /// would notice.
+    public static let unknownGrace: TimeInterval = 10
+
     public init() {}
 
     /// A track is playing and holding the ears. It earns a fresh stay for when
@@ -43,6 +53,8 @@ public struct MediaLinger: Equatable, Sendable {
     public mutating func nowResting(_ key: Key?) {
         if let key { deadlines[key] = nil }
         restingKey = key
+        // Seen resting: there is no absence to time.
+        absentSince = nil
     }
 
     /// Nothing rests at all any more — so nothing has a stay owing to it. A
@@ -61,14 +73,36 @@ public struct MediaLinger: Equatable, Sendable {
     /// stay only runs because this track was playing and then stopped inside
     /// the last stay's length, so a track paused hours ago has none to keep
     /// and is forgotten exactly as before.
+    ///
+    /// A claim with no stay running yet is kept too, but only for
+    /// `unknownGrace` and only from this moment. That is the gap between a
+    /// track *playing* and the first paused reading of it: the source can go
+    /// quiet in between — a native player with no scripting fallback does
+    /// exactly this — and the pause that follows had no deadline to protect
+    /// it. The grace is timed from the absence rather than from when the
+    /// track last played, so it expires on its own however long the track had
+    /// been playing beforehand.
     public mutating func nothingRests(now: TimeInterval) {
-        guard let key = restingKey,
-              let deadline = deadlines[key],
-              deadline > now
-        else {
-            restingKey = nil
+        guard let key = restingKey else {
+            absentSince = nil
             return
         }
+        if let deadline = deadlines[key], deadline > now {
+            // A running stay already protects it; there is no absence to time.
+            absentSince = nil
+            return
+        }
+        // Keep the claim, but start its clock. `paused` lets it go.
+        if absentSince == nil { absentSince = now }
+    }
+
+    /// Lets go of a claim whose grace has run out. Checked where the claim is
+    /// used rather than on a timer: this type is clockless, and the caller
+    /// only ever asks when something has actually happened.
+    private mutating func expireAbsence(now: TimeInterval) {
+        guard let since = absentSince, now - since >= Self.unknownGrace else { return }
+        restingKey = nil
+        absentSince = nil
     }
 
     /// What a paused track may have.
@@ -93,6 +127,7 @@ public struct MediaLinger: Equatable, Sendable {
         full: TimeInterval,
         now: TimeInterval
     ) -> Verdict {
+        expireAbsence(now: now)
         guard key == restingKey else { return .neverRested }
         guard let key else {
             // Nothing to remember it by — and nothing to remember it *from*,

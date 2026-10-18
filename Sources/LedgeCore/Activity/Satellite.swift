@@ -103,16 +103,24 @@ extension SatelliteContent {
 /// share one disc.
 public enum SatelliteArbiter {
 
+    /// - Parameters:
+    ///   - timerIsMainIsland: the timer is what the ears are showing, so it
+    ///     must not also orbit itself.
+    ///   - keepAwakeIsMainIsland: the same rule for Keep Awake. Without it a
+    ///     hold said itself twice at once — the coffee glyph in the leading
+    ///     ear and a separate disc reading "On" beside the island — two
+    ///     shapes for one fact, each hiding half of the other.
     public static func resolve(
         transient: SatelliteContent?,
         privacy: SatelliteContent?,
         timer: SatelliteContent?,
         keepAwake: SatelliteContent? = nil,
-        timerIsMainIsland: Bool
+        timerIsMainIsland: Bool,
+        keepAwakeIsMainIsland: Bool = false
     ) -> SatelliteContent? {
         if let transient { return transient }
         if let timer, !timerIsMainIsland { return timer }
-        if let keepAwake { return keepAwake }
+        if let keepAwake, !keepAwakeIsMainIsland { return keepAwake }
         if let privacy { return privacy }
         return nil
     }

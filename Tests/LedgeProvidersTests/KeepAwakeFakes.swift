@@ -49,6 +49,17 @@ final class FakeSleepAssertion: SleepAssertion {
     private let log: KeepAwakeLog
     var refuses = false
     private(set) var isHeld = false
+    /// macOS gives the Mac but refuses the screen or disk part of the hold.
+    /// Like the real one, what was refused stays missing until it is asked
+    /// for again.
+    var refusesPart = false
+    private var missingPart = false
+    var isComplete: Bool { isHeld && !missingPart }
+    /// macOS refuses the next renewals of a part, while the assertion that
+    /// part already has still covers it.
+    var refusesRenewal = false
+    private var renewalRefused = false
+    var needsRetry: Bool { isHeld && (missingPart || renewalRefused) }
     private(set) var lastTimeout: TimeInterval?
     /// How many times an assertion has been taken, so a test can tell one
     /// session from two.
@@ -72,6 +83,8 @@ final class FakeSleepAssertion: SleepAssertion {
         // for a new one.
         guard !isHeld else { return rearm(timeout: timeout) }
         isHeld = true
+        missingPart = refusesPart
+        renewalRefused = false
         acquireCount += 1
         lastTimeout = timeout
         log.record(.acquire(timeout: timeout))
@@ -80,6 +93,8 @@ final class FakeSleepAssertion: SleepAssertion {
 
     func rearm(timeout: TimeInterval) -> Bool {
         guard isHeld else { return false }
+        missingPart = refusesPart
+        renewalRefused = refusesRenewal
         lastTimeout = timeout
         log.record(.rearm(timeout: timeout))
         return true

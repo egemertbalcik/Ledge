@@ -24,6 +24,11 @@ public final class ActivityCoordinator {
 
     /// Something new arrived — the shell may want to peek.
     public var onArrival: (Activity) -> Void = { _ in }
+    /// A Keep Awake hold has just started. Separate from `onArrival` because
+    /// `isWorthAnnouncing` speaks for arrivals — and a hold arriving already
+    /// running is a relaunch, which says so with `resumed` — whereas this is
+    /// the user's own press, which is always worth the moment.
+    public var onKeepAwakeStarted: (Activity) -> Void = { _ in }
 
     /// The queue went empty, so there is nothing left to show.
     public var onEmpty: () -> Void = {}
@@ -48,10 +53,16 @@ public final class ActivityCoordinator {
     private var timerPausedSince: TimeInterval?
     static let pausedTimerLinger: TimeInterval = 5 * 60
 
+    /// Whether each Keep Awake session was running at the last sync, so the
+    /// moment it starts can be told from the once-a-second republishes every
+    /// running session makes. Nil means not seen yet.
+    private var keepAwakeWasRunning: [ActivityID: Bool] = [:]
+
     private var knownIDs: Set<ActivityID> = []
     private var lastNowPlayingPresent = false
     private var lastNowPlayingPlaying = false
     private var lastNowPlayingSource: String?
+    private var lastNowPlayingItem: String?
 
     /// Ids the user swiped away recently, so their next republish is not
     /// announced back at them. Pruned against the window on every sync.
@@ -267,6 +278,8 @@ public final class ActivityCoordinator {
         lastNowPlayingPresent = false
         lastNowPlayingPlaying = false
         lastNowPlayingSource = nil
+        lastNowPlayingItem = nil
+        keepAwakeWasRunning.removeAll()
         recentlyDismissed.removeAll()
         pendingSelection = nil
         timerPausedSince = nil
@@ -375,6 +388,25 @@ public final class ActivityCoordinator {
             announcedPayload[id] = nil
         }
 
+        // Keep Awake reuses one id from Ready through Running to Finished, so
+        // starting a hold is not an arrival of its own and was never
+        // announced: what showed instead was whatever the resting rules
+        // happened to make of it. Announced now at the moment it starts —
+        // not on the republishes a running session makes every second, and
+        // not for one already running when first seen, whose own arrival
+        // speaks for it.
+        var keepAwakeStarts: [Activity] = []
+        for activity in queue.activities where activity.id.kind == .keepAwake {
+            guard case .keepAwake(let payload) = activity.payload else { continue }
+            if payload.isRunning, keepAwakeWasRunning[activity.id] == false {
+                keepAwakeStarts.append(activity)
+            }
+            keepAwakeWasRunning[activity.id] = payload.isRunning
+        }
+        for id in Array(keepAwakeWasRunning.keys) where !currentIDs.contains(id) {
+            keepAwakeWasRunning[id] = nil
+        }
+
         syncPresentation(queue)
         syncExpiry(queue)
 
@@ -399,6 +431,7 @@ public final class ActivityCoordinator {
             else { continue }
             onArrival(activity)
         }
+        for start in keepAwakeStarts { onKeepAwakeStarted(start) }
 
         if queue.isEmpty && !wasEmpty { onEmpty() }
         wasEmpty = queue.isEmpty
@@ -442,18 +475,17 @@ public final class ActivityCoordinator {
         // opens, and the ears decide what to draw in it. When the two rules
         // differed the island opened for a video the compact view then
         // declined to draw, and the notch sat there with two empty ears.
-        let keepAwakeRunning = queue.activities.contains { activity in
-            guard case .keepAwake(let payload) = activity.payload else { return false }
-            return payload.isRunning
-        }
         let playing = timerRunning || closeEvent || queue.activities.contains {
             $0.id.kind == .nowPlaying && $0.restsInEars
         }
         let present = playing
-            // A running Keep Awake rests in the ears like a running timer. Left
-            // out, the island refused to open for it and the countdown had
-            // nowhere to appear.
-            || keepAwakeRunning
+            // A running Keep Awake is deliberately not here. It used to be, and
+            // that made it the one thing the shell could only read as "paused
+            // music": present, not playing. Every hold then went down the
+            // paused-track branch, which asked the linger about a track that
+            // did not exist and was granted two minutes for it — the island
+            // held open, nothing to draw in it. The hold is announced like a
+            // Focus change instead and rides in the side readout after that.
             || queue.activities.contains { activity in
                 guard case .nowPlaying(let payload) = activity.payload else { return false }
                 // Paused media is present for its linger — but only what the
@@ -464,15 +496,36 @@ public final class ActivityCoordinator {
         // The *source* is part of the change too: Music handing off to Spotify
         // keeps both booleans true, but the equalizer's per-track character
         // must follow the player actually making sound.
-        let playingSource = queue.activities.first {
+        let playingActivity = queue.activities.first {
             if case .nowPlaying(let payload) = $0.payload { return payload.isPlaying }
             return false
-        }?.id.source
+        }
+        let playingSource = playingActivity?.id.source
+        // And so is the *track*. One song following another inside the same
+        // player changes neither boolean nor the source, so no resting fact
+        // was ever delivered — while the presentation moved on to the new
+        // song. The shell went on remembering the first one, and pausing the
+        // second was refused its stay as a track that had never rested: play a
+        // song, let the next one start, press pause, and the island emptied at
+        // once.
+        //
+        // The identity, not the payload. Now Playing republishes every second
+        // with a new elapsed time, and firing on that would hand the shell a
+        // fresh resting fact per second — restarting a paused track's deadline
+        // for as long as it sat there.
+        let playingItem: String? = {
+            guard let playingActivity,
+                  case .nowPlaying(let payload) = playingActivity.payload
+            else { return nil }
+            return payload.itemKey ?? payload.title
+        }()
         if present != lastNowPlayingPresent || playing != lastNowPlayingPlaying
-            || playingSource != lastNowPlayingSource {
+            || playingSource != lastNowPlayingSource
+            || playingItem != lastNowPlayingItem {
             lastNowPlayingPresent = present
             lastNowPlayingPlaying = playing
             lastNowPlayingSource = playingSource
+            lastNowPlayingItem = playingItem
             onNowPlayingChanged(present, playing, pausedTimerRemaining)
         }
 

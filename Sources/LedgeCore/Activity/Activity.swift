@@ -146,8 +146,17 @@ extension Activity {
             return payload.isPlaying && payload.showsInCompact
         case .timer(let payload):
             return !payload.isIdle
-        case .keepAwake(let payload):
-            return payload.isRunning
+        case .keepAwake:
+            // Never, running or not. A hold is announced the way a Focus
+            // change is — the cup and its state for a moment — and then it
+            // is a fact about the Mac, not something going on in front of the
+            // user. Resting here let it back in through the last rung of
+            // `CompactRest` the moment its card was the selected one, which
+            // was every time it had just been started: the cup stayed in the
+            // ear for the whole hold, and a disc with the same cup sat beside
+            // it. The side readout carries it whenever the island is held by
+            // something else.
+            return false
         case .event(let payload):
             return payload.hasEvent && payload.startsIn <= 60 * 60 && payload.startsIn >= -60
         case .levels, .shelf, .notes:
@@ -231,21 +240,18 @@ extension Activity {
 ///
 /// The precedence lives here, as a pure function, because it is a *rule*
 /// rather than a view detail: a farewell outranks the residents for its four
-/// seconds, then playing music, then a running timer, then a running Keep
-/// Awake, then an imminent meeting, then paused music inside its linger. Only
-/// then the card the user last looked at — and only if that card has any
-/// business resting.
+/// seconds, then playing music, then a running timer, then an imminent
+/// meeting, then paused music inside its linger. Only then the card the user
+/// last looked at — and only if that card has any business resting.
+///
+/// Keep Awake is deliberately absent. It is announced like a Focus change and
+/// then lives in the side readout; see `Activity.restsInEars`.
 public enum CompactRest {
 
-    /// - Parameter keepAwake: a Keep Awake session that is actually holding
-    ///   the Mac awake. Below the timer for the same reason its priority is:
-    ///   both are counting down, and only one of them is a deadline the user
-    ///   is waiting on.
     public static func resolve(
         farewell: Activity?,
         playingNowPlaying: Activity?,
         runningTimer: Activity?,
-        keepAwake: Activity? = nil,
         closeEvent: Activity?,
         nowPlaying: Activity?,
         selected: Activity?
@@ -262,7 +268,6 @@ public enum CompactRest {
         if let farewell { return farewell }
         if let playingNowPlaying = restable(playingNowPlaying) { return playingNowPlaying }
         if let runningTimer { return runningTimer }
-        if let keepAwake { return keepAwake }
         if let closeEvent { return closeEvent }
         if let nowPlaying = restable(nowPlaying) { return nowPlaying }
         // The last resort is the only one that is not already a live fact, so

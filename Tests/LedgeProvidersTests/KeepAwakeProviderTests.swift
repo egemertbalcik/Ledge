@@ -32,7 +32,8 @@ struct KeepAwakeProviderTests {
         tombstone id: String? = nil,
         bootID: String? = "boot-A",
         hasNotchPanel: Bool = true,
-        ids: [String] = ["A", "B", "C", "D"]
+        ids: [String] = ["A", "B", "C", "D"],
+        lid: any KeepAwakeLidHolding = KeepAwakeLidUnavailable()
     ) -> Rig {
         let log = KeepAwakeLog()
         let clock = TestClock()
@@ -55,6 +56,7 @@ struct KeepAwakeProviderTests {
             journal: writer,
             tombstone: stone,
             bootID: bootID,
+            lid: lid,
             hasNotchPanel: { hasNotchPanel },
             makeID: { queue.isEmpty ? UUID().uuidString : queue.removeFirst() },
             formatTime: { _ in "17:40" }
@@ -620,6 +622,240 @@ struct KeepAwakeProviderTests {
         r.provider.deadlineTick()
         await settle()
         #expect(!r.provider.state.isRunning, "it must still end when the time really passes")
+    }
+
+    /// Measured on the owner's Mac: an open-ended coffee started at 17:07:10,
+    /// and powerd logged its assertion `TimedOut` at 18:07:10 after 59:59 with
+    /// no re-arm in between. The half-hour timer fired, found no deadline to
+    /// reach, rescheduled itself and renewed nothing.
+    @Test("An open-ended hold renews powerd's backstop every time its timer fires")
+    func openEndedRenewsBackstop() async {
+        let r = rig()
+        #expect(await r.provider.begin())
+        #expect(r.provider.state.isRunning)
+        #expect(r.assertion.lastTimeout == KeepAwakeProvider.openEndedBackstop)
+
+        func rearms() -> Int {
+            r.log.events.filter { if case .rearm = $0 { return true }; return false }.count
+        }
+        let before = rearms()
+
+        // Two hours of it — well past the one-hour backstop that used to run
+        // out — one timer at a time.
+        for _ in 0 ..< 4 {
+            r.clock.advance(KeepAwakeProvider.openEndedRearm)
+            r.provider.deadlineTick()
+            await settle()
+        }
+        #expect(rearms() == before + 4, "each tick must renew the backstop")
+        #expect(r.assertion.lastTimeout == KeepAwakeProvider.openEndedBackstop)
+        #expect(r.provider.state.isRunning)
+        #expect(r.assertion.isHeld)
+    }
+
+    /// The other half of the same rule: a hold with a deadline keeps the
+    /// backstop it was given — remaining time plus a margin — and an early
+    /// tick must not quietly trade that for an hour.
+    @Test("A timed hold's early tick leaves its backstop alone")
+    func timedTickDoesNotRearm() async {
+        let r = rig()
+        _ = await r.provider.begin(minutes: 60)
+        let taken = r.assertion.lastTimeout
+        let before = r.log.events.filter { if case .rearm = $0 { return true }; return false }.count
+        r.provider.deadlineTick()
+        await settle()
+        let after = r.log.events.filter { if case .rearm = $0 { return true }; return false }.count
+        #expect(after == before)
+        #expect(r.assertion.lastTimeout == taken)
+    }
+
+    /// Reported as the card "disappearing on its own, now and then": ending a
+    /// hold left a Finished card with a twelve-second shelf life, and nothing
+    /// ever published a Ready card after it, so the control was gone until
+    /// Ledge was next launched.
+    @Test("A finished hold becomes the control again rather than vanishing")
+    func finishedReturnsToReady() async {
+        let r = rig()
+        _ = await r.provider.begin()
+        await r.provider.end(reason: .endedByYou)
+        guard case .finished = r.provider.state else {
+            Issue.record("expected Finished after ending, got \(r.provider.state)")
+            return
+        }
+        r.provider.returnToReadyTick()
+        await settle()
+        #expect(r.provider.state == .ready)
+        // And the published card is the control, with no shelf life of its own.
+        #expect(r.provider.activityForTesting.expiresAfter == nil)
+    }
+
+    /// The race the backstop is arranged around: the coordinator drops an
+    /// expired card, and a Ready card published *after* that would arrive as a
+    /// stranger. Published first, it cancels the expiry instead.
+    @Test("The Finished card's expiry runs past the return to Ready")
+    func expiryIsOnlyABackstop() async {
+        let r = rig()
+        _ = await r.provider.begin()
+        await r.provider.end(reason: .endedByYou)
+        let expiry = r.provider.activityForTesting.expiresAfter
+        #expect(expiry != nil)
+        if let expiry { #expect(expiry > KeepAwakeProvider.finishedShelfLife) }
+    }
+
+    /// Codex's finding: a summary recovered at launch became Finished, and its
+    /// twelve seconds started there — but nothing is published until startup
+    /// has also asked the lid helper what it can do. A slow answer ran the
+    /// clock out first, and the card arrived as Ready, its summary already
+    /// consumed on disk and never shown.
+    @Test("A recovered summary's shelf life starts when it is shown")
+    func recoveredSummaryIsShownBeforeItsClockRuns() async {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var stored = record(id: "A", state: .running, start: start, minutes: 60, boot: boot)
+        stored = stored.ended(.timeUp, at: start.addingTimeInterval(3_600), summaryPending: true)
+        let lid = SlowLid()
+        let r = rig(stored: stored, lid: lid)
+        let seen = SeenPhases()
+        let stream = r.provider.start()
+        let consumer = Task { @MainActor in
+            for await event in stream {
+                if case .publish(let activity) = event,
+                   case .keepAwake(let payload) = activity.payload {
+                    seen.phases.append(payload.phase)
+                }
+            }
+        }
+        await wait(for: { lid.asked }, "startup to be waiting on the lid helper")
+
+        // Recovered, and not yet on screen: the clock must not be running.
+        guard case .finished = r.provider.state else {
+            Issue.record("expected the recovered summary, got \(r.provider.state)"); return
+        }
+        #expect(seen.phases.isEmpty, "nothing is published before the lid answers")
+        #expect(!r.provider.returnToReadyIsArmed)
+
+        lid.answer()
+        await wait(for: { !seen.phases.isEmpty }, "the summary to be published")
+        if case .finished = seen.phases.first {} else {
+            Issue.record("the first card shown must be the summary, got \(seen.phases)")
+        }
+        #expect(r.provider.returnToReadyIsArmed, "and its twelve seconds start now")
+        consumer.cancel()
+    }
+
+    /// Codex's finding: macOS keeping the Mac awake but refusing the screen
+    /// was published as an ordinary On.
+    @Test("A hold missing part of itself says so, and stops saying so once whole")
+    func partialHoldIsReported() async {
+        let r = rig()
+        let seen = SeenProblems()
+        let stream = r.provider.start()
+        let consumer = Task { @MainActor in
+            for await event in stream {
+                if case .publish(let activity) = event,
+                   case .keepAwake(let payload) = activity.payload {
+                    seen.published.append(payload.problem)
+                }
+            }
+        }
+        await wait(for: { !seen.published.isEmpty }, "the first card to be published")
+
+        r.assertion.refusesPart = true
+        #expect(await r.provider.begin())
+        #expect(r.provider.state.isRunning)
+        await wait(for: { seen.published.last == .partialHold }, "the warning to be published")
+        // Asked about again within the minute, not at the half-hour renewal.
+        #expect(r.provider.deadlineDelayForTesting == KeepAwakeProvider.partialRetry)
+
+        // The next renewal gets all of it, and the card is told then — not at
+        // the next minute's redraw, which would also clear it, a minute late.
+        r.assertion.refusesPart = false
+        r.provider.deadlineTick()
+        await settle()
+        #expect(seen.published.last == .some(nil))
+        #expect(r.provider.deadlineDelayForTesting == KeepAwakeProvider.openEndedRearm)
+        consumer.cancel()
+    }
+
+    /// A timed hold's deadline timer does not renew anything on its own, so
+    /// a missing part has to be asked for again there too.
+    @Test("A timed hold missing part of itself asks for it again")
+    func timedPartialHoldIsRetried() async {
+        let r = rig()
+        r.assertion.refusesPart = true
+        _ = await r.provider.begin(minutes: 60)
+        r.assertion.refusesPart = false
+        let before = r.log.events.filter { if case .rearm = $0 { return true }; return false }.count
+        r.provider.deadlineTick()
+        await settle()
+        let after = r.log.events.filter { if case .rearm = $0 { return true }; return false }.count
+        #expect(after == before + 1)
+        guard case .keepAwake(let whole) = r.provider.activityForTesting.payload else {
+            Issue.record("not a Keep Awake card"); return
+        }
+        #expect(whole.problem == nil)
+    }
+
+    @Test("A refused renewal is retried within the minute, without a warning")
+    func refusedRenewalIsRetriedEarly() async {
+        let r = rig()
+        _ = await r.provider.begin()
+        #expect(r.provider.deadlineDelayForTesting == KeepAwakeProvider.openEndedRearm)
+
+        // The half-hour renewal is refused for the screen; the old one holds.
+        r.assertion.refusesRenewal = true
+        r.provider.deadlineTick()
+        await settle()
+        #expect(r.provider.deadlineDelayForTesting == KeepAwakeProvider.partialRetry)
+        guard case .keepAwake(let shown) = r.provider.activityForTesting.payload else {
+            Issue.record("not a Keep Awake card"); return
+        }
+        #expect(shown.problem == nil, "nothing is missing yet, so nothing to warn about")
+
+        r.assertion.refusesRenewal = false
+        r.provider.deadlineTick()
+        await settle()
+        #expect(r.provider.deadlineDelayForTesting == KeepAwakeProvider.openEndedRearm)
+    }
+
+    /// A timed hold is renewed only on wake and clock changes, so a refusal
+    /// there has to be picked up by the deadline timer's early tick.
+    @Test("A timed hold retries a renewal refused on wake")
+    func timedRefusedRenewalIsRetried() async {
+        let r = rig()
+        _ = await r.provider.begin(minutes: 60)
+        r.assertion.refusesRenewal = true
+        r.provider.systemDidWake()
+        await settle()
+        r.assertion.refusesRenewal = false
+        let rearms = { r.log.events.filter { if case .rearm = $0 { return true }; return false }.count }
+        let before = rearms()
+        r.provider.deadlineTick()
+        await settle()
+        #expect(rearms() == before + 1)
+    }
+
+    @Test("A partial hold's warning goes when the hold does")
+    func partialWarningEndsWithTheHold() async {
+        let r = rig()
+        r.assertion.refusesPart = true
+        _ = await r.provider.begin()
+        await r.provider.end(reason: .endedByYou)
+        guard case .keepAwake(let shown) = r.provider.activityForTesting.payload else {
+            Issue.record("not a Keep Awake card"); return
+        }
+        #expect(shown.problem == nil, "a Finished card is not about the screen now")
+    }
+
+    /// A timer from an earlier ending firing late must not touch a hold that
+    /// is running now.
+    @Test("The return to Ready never touches a hold that is running")
+    func aRunningHoldIsLeftAlone() async {
+        let r = rig()
+        _ = await r.provider.begin()
+        r.provider.returnToReadyTick()
+        await settle()
+        #expect(r.provider.state.isRunning)
+        #expect(r.assertion.isHeld)
     }
 
     @Test("An old stream's teardown cannot stop a newer session")
@@ -1755,4 +1991,49 @@ private actor Published {
     func add(_ activity: Activity) { activities.append(activity) }
     var first: Activity? { activities.first }
     var count: Int { activities.count }
+}
+
+/// A lid helper that answers only when told to, standing in for a slow
+/// status call at launch.
+private final class SlowLid: KeepAwakeLidHolding, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: CheckedContinuation<KeepAwakeLidState, Never>?
+    private var entered = false
+    private var answered = false
+
+    var asked: Bool { lock.withLock { entered } }
+
+    func state() async -> KeepAwakeLidState {
+        // Only the first question is slow; anything asked after the answer
+        // gets one straight away.
+        if lock.withLock({ answered }) { return .off }
+        return await withCheckedContinuation { continuation in
+            lock.withLock {
+                entered = true
+                waiting = continuation
+            }
+        }
+    }
+
+    func answer() {
+        let continuation = lock.withLock { () -> CheckedContinuation<KeepAwakeLidState, Never>? in
+            answered = true
+            defer { waiting = nil }
+            return waiting
+        }
+        continuation?.resume(returning: .off)
+    }
+
+    func arm(session: String, until deadline: Date) async -> KeepAwakeLidState { .off }
+    func disarm(session: String?) async {}
+}
+
+@MainActor
+private final class SeenPhases {
+    var phases: [KeepAwakePayload.Phase] = []
+}
+
+@MainActor
+private final class SeenProblems {
+    var published: [KeepAwakePayload.Problem?] = []
 }

@@ -112,7 +112,7 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         case unreadable
     }
 
-    /// The last answer a player gave, kept only long enough to ride out one
+    /// The last answer each player gave, kept only long enough to ride out one
     /// that does not reply.
     ///
     /// Bounded tightly on purpose. The card's own fifteen-minute paused
@@ -121,7 +121,13 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// that missed a deadline, which is a handful of seconds at most. Past the
     /// grace the answer is dropped and the absence is reported honestly, stale
     /// data being the one thing worse than a card that goes away.
-    private var heldAnswer: (snapshot: NowPlayingSnapshot, at: TimeInterval)?
+    ///
+    /// Filed per player, which is the whole of its safety. One shared answer
+    /// meant a silent Music could be answered with Spotify's paused track:
+    /// the targeted read asked about Music, got Spotify back, and the card —
+    /// and every transport button on it — addressed the wrong player. An
+    /// answer may only ever stand in for the player that gave it.
+    private var heldAnswers: [String: (snapshot: NowPlayingSnapshot, at: TimeInterval)] = [:]
 
     /// How long an unanswered read may be covered by the last answer. One
     /// `osascript` deadline is three seconds, and the poll after it has to
@@ -177,68 +183,85 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
             let names = running.map(\.displayName).joined(separator: ",")
             Self.log.notice("media/scripting: running players = [\(names, privacy: .public)]")
         }
-        var anyUnreadable = false
+        var firstPausedPlayer: Player?
+        var unreadablePlayers: [Player] = []
         for player in running {
             switch await readPlayer(player) {
             case .answered(let snapshot):
                 // Something actively playing always wins over something
                 // paused, so two open players cannot fight over the card.
-                if snapshot.isPlaying { return remember(snapshot) }
-                if firstPaused == nil { firstPaused = snapshot }
+                if snapshot.isPlaying { return remember(snapshot, from: player) }
+                if firstPaused == nil {
+                    firstPaused = snapshot
+                    firstPausedPlayer = player
+                }
             case .nothing:
+                // This player answered, so its own held answer is spent — but
+                // only its own.
+                _ = remember(nil, from: player)
                 if DebugSwitches.tracing("media") {
                     Self.log.notice("media/scripting: \(player.displayName, privacy: .public) answered nothing")
                 }
             case .unreadable:
-                anyUnreadable = true
+                unreadablePlayers.append(player)
                 if DebugSwitches.tracing("media") {
                     Self.log.notice("media/scripting: \(player.displayName, privacy: .public) did not answer")
                 }
             }
         }
-        if let firstPaused { return remember(firstPaused) }
+        if let firstPaused, let firstPausedPlayer {
+            return remember(firstPaused, from: firstPausedPlayer)
+        }
         // Nobody is playing — but "nobody answered" is not that. A player
         // which missed its deadline keeps its last answer for a few seconds
-        // rather than having the card taken off the user mid-pause.
-        guard anyUnreadable else { return remember(nil) }
-        return held()
+        // rather than having the card taken off the user mid-pause. Only that
+        // player's own answer will do: standing in for a silent Music with
+        // Spotify's paused track put the wrong player on the card, and every
+        // transport button with it.
+        for player in unreadablePlayers {
+            if let covered = held(player) { return covered }
+        }
+        return nil
     }
 
-    /// Keeps the answer that a later unanswered read may stand on, and passes
-    /// it straight back. An authoritative nothing drops it: a player that has
-    /// genuinely stopped must take its card with it.
-    private func remember(_ snapshot: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
+    /// Keeps this player's answer for a later unanswered read of the *same*
+    /// player, and passes it straight back. An authoritative nothing drops it:
+    /// a player that has genuinely stopped must take its card with it — and
+    /// drops only its own, since one player falling silent says nothing about
+    /// another.
+    private func remember(_ snapshot: NowPlayingSnapshot?, from player: Player) -> NowPlayingSnapshot? {
         guard let snapshot else {
-            heldAnswer = nil
+            heldAnswers[player.bundleID] = nil
             return nil
         }
-        heldAnswer = (snapshot, now())
+        heldAnswers[player.bundleID] = (snapshot, now())
         return snapshot
     }
 
-    /// The last answer, while it is young enough to speak for a player that
-    /// has gone quiet.
-    private func held() -> NowPlayingSnapshot? {
-        guard let heldAnswer, now() - heldAnswer.at < Self.unreadableGrace else {
-            self.heldAnswer = nil
+    /// This player's last answer, while it is young enough to speak for it.
+    private func held(_ player: Player) -> NowPlayingSnapshot? {
+        guard let answer = heldAnswers[player.bundleID],
+              now() - answer.at < Self.unreadableGrace
+        else {
+            heldAnswers[player.bundleID] = nil
             return nil
         }
-        return heldAnswer.snapshot
+        return answer.snapshot
     }
 
-    /// One reading, with the held answer applied — the single-player path's
-    /// share of the rule above.
+    /// One reading, with that player's held answer applied — the
+    /// single-player path's share of the rule above.
     private func settle(_ reading: PlayerReading, from player: Player) -> NowPlayingSnapshot? {
         switch reading {
         case .answered(let snapshot):
-            return remember(snapshot)
+            return remember(snapshot, from: player)
         case .nothing:
-            return remember(nil)
+            return remember(nil, from: player)
         case .unreadable:
             if DebugSwitches.tracing("media") {
                 Self.log.notice("media/scripting: \(player.displayName, privacy: .public) did not answer")
             }
-            return held()
+            return held(player)
         }
     }
 
@@ -621,6 +644,57 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         lastCommandAt = Date().timeIntervalSinceReferenceDate
     }
 
+    /// A track id as an AppleScript string literal.
+    ///
+    /// Escaped rather than interpolated raw: a Spotify URI is tame, but this
+    /// value reaches a script, and a quote or backslash arriving in it would
+    /// end the literal and let the rest be read as code.
+    nonisolated static func literal(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
+    }
+
+    /// The AppleScript one transport command becomes. Pure, so what is sent
+    /// can be checked without a queue, a player, or `osascript`.
+    nonisolated static func transportScript(_ command: NowPlayingCommand, scriptName: String) -> String {
+        let body: String
+        switch command {
+        case .playPause: body = "playpause"
+        case .next: body = "next track"
+        case .previous: body = "previous track"
+        // Formatted explicitly: `Double.description` switches to scientific
+        // notation for small values ("1e-05"), which AppleScript cannot parse.
+        case .seek(let position, let item):
+            // The guard and the write in one command, which is the only way
+            // they can be about the same song. The queue can hold this for
+            // seconds, and the player is free to move on in the meantime: a
+            // scrub released on one song used to land on whichever song was
+            // playing when the command finally ran.
+            //
+            // A seek with no identity to check is still written — a player
+            // that will not say what it is playing can still be scrubbed,
+            // which is how it behaved before any of this.
+            let write = String(format: "set player position to %.3f", position)
+            if let item, !item.isEmpty {
+                body = """
+                if ((id of current track) as text) is not \(Self.literal(item)) then return
+                    \(write)
+                """
+            } else {
+                body = write
+            }
+        }
+
+        return """
+        tell application "\(scriptName)"
+            if it is not running then return
+            \(body)
+        end tell
+        """
+    }
+
     func sendViaScripting(
         _ command: NowPlayingCommand,
         to bundleID: String
@@ -631,22 +705,7 @@ public final class NowPlayingCommander: NowPlayingCommanding {
             return .unsupported
         }
 
-        let body: String
-        switch command {
-        case .playPause: body = "playpause"
-        case .next: body = "next track"
-        case .previous: body = "previous track"
-        // Formatted explicitly: `Double.description` switches to scientific
-        // notation for small values ("1e-05"), which AppleScript cannot parse.
-        case .seek(let position): body = String(format: "set player position to %.3f", position)
-        }
-
-        let source = """
-        tell application "\(player.scriptName)"
-            if it is not running then return
-            \(body)
-        end tell
-        """
+        let source = Self.transportScript(command, scriptName: player.scriptName)
 
         // Queued rather than fired and forgotten. Every press used to launch
         // its own process with no timeout and no bound, so a player that had

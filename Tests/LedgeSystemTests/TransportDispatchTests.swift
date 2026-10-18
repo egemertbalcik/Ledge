@@ -315,3 +315,59 @@ struct GlobalTransportTargetingTests {
         #expect(sent.commands.isEmpty, "an addressed command was sent globally as well")
     }
 }
+
+/// A queued seek must land on the song it was asked for.
+///
+/// The queue bounds how old a command may be, not which song it reaches.
+/// Release the scrubber on one song, let the next one start while the command
+/// waits its turn, and the new song jumped to the old one's position.
+///
+/// Tested on the script itself rather than through the queue: the queue's
+/// seams are shared statics that the other transport suites swap, and a test
+/// that awaited with them swapped raced those suites when run together.
+@Suite("A seek is scoped to the song it was asked on")
+struct SeekScopeTests {
+
+    private func script(_ command: NowPlayingCommand) -> String {
+        NowPlayingCommander.transportScript(command, scriptName: "Spotify")
+    }
+
+    @Test("The script checks the track before it writes the position")
+    func theScriptGuardsTheTrack() {
+        let script = script(.seek(150, item: "spotify:track:abc"))
+        #expect(script.contains("spotify:track:abc"))
+        #expect(script.contains("id of current track"))
+        #expect(script.contains("set player position to 150.000"))
+        // The guard must come first, or it guards nothing.
+        if let guardAt = script.range(of: "id of current track"),
+           let writeAt = script.range(of: "set player position") {
+            #expect(guardAt.lowerBound < writeAt.lowerBound)
+        } else {
+            Issue.record("guard or write missing")
+        }
+    }
+
+    @Test("A seek with nothing to identify still scrubs")
+    func anUnidentifiedSeekStillWrites() {
+        let script = script(.seek(42, item: nil))
+        #expect(script.contains("set player position to 42.000"))
+        #expect(!script.contains("id of current track"))
+    }
+
+    @Test("A track id cannot close the string it is written into")
+    func aTrackIdIsEscaped() {
+        let script = script(.seek(10, item: "a\" & (do shell script \"echo\") & \"b"))
+        // Every quote the id carried is escaped, so the whole of it stays
+        // inside one string literal and none of it can be read as code.
+        let literal = #""a\" & (do shell script \"echo\") & \"b""#
+        #expect(script.contains(literal))
+    }
+
+    @Test("The other commands are unchanged")
+    func theRestIsAsItWas() {
+        #expect(script(.playPause).contains("playpause"))
+        #expect(script(.next).contains("next track"))
+        #expect(script(.previous).contains("previous track"))
+        #expect(script(.next).contains("tell application \"Spotify\""))
+    }
+}

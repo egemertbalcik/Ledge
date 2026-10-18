@@ -904,6 +904,7 @@ public struct KeepAwakeCardView: View {
         case .startNotSaved: KeepAwakeCopy.startNotSaved
         case .tooManyUnsaved: KeepAwakeCopy.tooManyUnsaved
         case .journalUnreadable: KeepAwakeCopy.journalUnreadable
+        case .partialHold: KeepAwakeCopy.partialHold
         case nil: nil
         }
     }

@@ -19,8 +19,14 @@ public final class NotchPresentation {
     /// and starting a song showed the calendar in the ears.
     public var nowPlaying: Activity? {
         didSet {
-            guard let nowPlaying, case .nowPlaying(let payload) = nowPlaying.payload,
-                  payload.isPlaying else {
+            // A loaded track keeps its seed whether or not it is playing.
+            // Clearing it on pause left the bars with no levels and sent them
+            // to a plain sine instead: pressing Play ran about half a second
+            // of obviously generic motion and then snapped to the track's own
+            // pattern the moment the player confirmed, and pausing swapped the
+            // other way in the middle of settling. Playing decides how *much*
+            // the bars move, never which shape they are moving to.
+            guard let nowPlaying, case .nowPlaying(let payload) = nowPlaying.payload else {
                 waveformSeed = nil
                 return
             }
@@ -255,14 +261,30 @@ public final class NotchPresentation {
         return session
     }
 
-    /// The Keep Awake session while one is genuinely running. A Ready or
-    /// Finished card is a card, not a standing fact about the Mac.
-    public var runningKeepAwake: Activity? {
+    /// The running Keep Awake session, for the side readout.
+    ///
+    /// The ears announce a hold when it starts and then let it go; this is
+    /// where it lives afterwards — a cup beside whatever else is resting, for
+    /// as long as the Mac is being held awake.
+    public var liveKeepAwake: Activity? {
         guard let session = keepAwakeSession,
               case .keepAwake(let payload) = session.payload,
               payload.isRunning
         else { return nil }
         return session
+    }
+
+    /// What the companion ears are showing, by the one rule both the view
+    /// and the shell use.
+    public var restingContent: Activity? {
+        CompactRest.resolve(
+            farewell: farewell,
+            playingNowPlaying: playingNowPlaying,
+            runningTimer: runningTimerSession,
+            closeEvent: closeEvent,
+            nowPlaying: lingeringNowPlaying,
+            selected: selected
+        )
     }
 
     /// The now-playing activity, only when it has business in the ears —
@@ -294,7 +316,7 @@ public final class NotchPresentation {
             )
         }()
         let keepAwakeContent: SatelliteContent? = {
-            guard let session = runningKeepAwake,
+            guard let session = liveKeepAwake,
                   case .keepAwake(let payload) = session.payload
             else { return nil }
             return .keepAwake(remaining: payload.isIndefinite ? nil : payload.remaining)
@@ -312,6 +334,11 @@ public final class NotchPresentation {
             timer: timerContent,
             keepAwake: keepAwakeContent,
             timerIsMainIsland: playingNowPlaying == nil,
+            // While the hold is what the ears are showing — the few seconds of
+            // a farewell after its card was open — it is already said. A disc
+            // beside the island saying the same thing is the same fact twice,
+            // and it hides the ear that was saying it properly.
+            keepAwakeIsMainIsland: restingContent?.id.kind == .keepAwake
         )
     }
 
@@ -463,7 +490,6 @@ public struct NotchOverlayView: View {
             // the test and vanished to idle during a hover elsewhere.
             let hasRestingContent = presentation.playingNowPlaying != nil
                 || presentation.runningTimerSession != nil
-                || presentation.runningKeepAwake != nil
             return hasRestingContent ? .companion : .idle
         default:
             return presentation.phase
@@ -797,7 +823,6 @@ public struct NotchOverlayView: View {
                     farewell: presentation.farewell,
                     playingNowPlaying: presentation.playingNowPlaying,
                     runningTimer: presentation.runningTimerSession,
-                    keepAwake: presentation.runningKeepAwake,
                     closeEvent: presentation.closeEvent,
                     nowPlaying: presentation.lingeringNowPlaying,
                     selected: presentation.selected

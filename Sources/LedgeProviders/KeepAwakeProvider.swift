@@ -97,8 +97,36 @@ public final class KeepAwakeProvider: ActivityProvider {
     private var stateRevision = 0
 
     public private(set) var state: KeepAwakeState = .ready {
-        didSet { stateRevision += 1 }
+        didSet {
+            stateRevision += 1
+            // Armed by the publish that shows the card, not here: a Finished
+            // state recovered at launch is not on screen until startup has
+            // finished asking about the lid, and a clock started here could
+            // run out first — turning the card back into the control before
+            // anyone had seen what happened.
+            cancelReturnToReady()
+            // About the hold that is running, so it goes with it.
+            if !state.isRunning, problem == .partialHold { problem = nil }
+        }
     }
+
+    /// How long a Finished card says what happened before it is the control
+    /// again.
+    ///
+    /// It used to say it and then vanish. The card was given a twelve-second
+    /// shelf life and nothing ever published a Ready card after it, so ending
+    /// a hold — switching it off, the time running out, the battery floor —
+    /// took the control off screen until Ledge was next launched. It looked
+    /// like the card disappearing on its own, now and then, which is exactly
+    /// how it was reported.
+    static let finishedShelfLife: TimeInterval = 12
+
+    private var returnToReadyWork: DispatchWorkItem?
+    /// How far off the deadline timer was last set, for tests.
+    private(set) var deadlineDelayForTesting: TimeInterval?
+
+    /// Whether the Finished card's twelve seconds are counting, for tests.
+    var returnToReadyIsArmed: Bool { returnToReadyWork != nil }
 
     /// Bumped by `stop()`. Everything that was in flight before it belongs to
     /// a provider that has let go of its resources, and must not take any.
@@ -350,6 +378,7 @@ public final class KeepAwakeProvider: ActivityProvider {
         pendingSession = nil
         cancelDeadline()
         cancelPublish()
+        cancelReturnToReady()
         assertion.release()
         power.stopWatching()
         thermal.stopWatching()
@@ -480,7 +509,7 @@ public final class KeepAwakeProvider: ActivityProvider {
             return false
         }
 
-        problem = nil
+        problem = coverageProblem
         endUnrecorded = false
         announcesResume = false
         state = .running(session)
@@ -637,7 +666,7 @@ public final class KeepAwakeProvider: ActivityProvider {
             publish()
             return .refused
         }
-        problem = nil
+        problem = coverageProblem
         endUnrecorded = false
         announcesResume = false
         state = .running(replacement)
@@ -1150,7 +1179,23 @@ public final class KeepAwakeProvider: ActivityProvider {
             // Fired early — a clock change, or a timer the system ran ahead of
             // schedule. Returning without re-arming is how a session silently
             // never ends at all, which is the bug this is modelled against.
-            if state.isRunning { armDeadline() }
+            guard let session = state.session, state.isRunning else { return }
+            // A hold with no deadline lands here every time: there is nothing
+            // for it to reach, so this timer exists only to renew powerd's
+            // backstop. It used to reschedule itself and renew nothing, so the
+            // backstop ran out an hour in and powerd let the Mac go while the
+            // card still said it was being held — measured on the owner's
+            // Mac as an assertion timing out at 59:59 with no re-arm before it.
+            // A hold missing part of itself — or refused part of its last
+            // renewal — asks again whether or not it has a deadline, and says
+            // so on the card when the answer changes.
+            if session.remaining(at: now()) == nil || assertion.needsRetry {
+                let before = problem
+                rearmBackstop(for: session)
+                guard state.isRunning else { return }
+                if problem != before { publish() }
+            }
+            armDeadline()
             return
         }
         endNow(reason: .timeUp)
@@ -1224,8 +1269,8 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// about a Ledge that is still running and has stopped thinking. An hour,
     /// re-armed every half hour while the session is healthy, bounds that
     /// without the user ever seeing it.
-    private static let openEndedBackstop: TimeInterval = 3600
-    private static let openEndedRearm: TimeInterval = 1800
+    static let openEndedBackstop: TimeInterval = 3600
+    static let openEndedRearm: TimeInterval = 1800
 
     private func backstop(for session: KeepAwakeSession) -> TimeInterval {
         guard let remaining = session.remaining(at: now()) else {
@@ -1250,6 +1295,7 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// if even that fails the session ends rather than carrying on holding
     /// something nobody can account for.
     private func rearmBackstop(for session: KeepAwakeSession) {
+        defer { noteCoverage() }
         if assertion.rearm(timeout: backstop(for: session)) { return }
         Self.log.error("keep awake: the backstop could not be re-armed")
         guard acquire(for: session) else {
@@ -1258,6 +1304,27 @@ public final class KeepAwakeProvider: ActivityProvider {
             return
         }
     }
+
+    /// Whether a running hold is short of what it promises.
+    ///
+    /// The Mac kept awake with the screen left to go dark used to read as a
+    /// normal On: macOS refusing the display or disk assertion was ignored,
+    /// and a refused renewal let the one still held run out unnoticed.
+    private var coverageProblem: KeepAwakePayload.Problem? {
+        assertion.isHeld && !assertion.isComplete ? .partialHold : nil
+    }
+
+    /// Sets or clears `partialHold` after a renewal, leaving any other
+    /// problem alone.
+    private func noteCoverage() {
+        guard problem == nil || problem == .partialHold else { return }
+        problem = coverageProblem
+    }
+
+    /// How soon a hold short of part of itself asks again. The thirty-minute
+    /// renewal is for a backstop that is fine; a screen that may go dark is
+    /// worth asking about every minute.
+    static let partialRetry: TimeInterval = 60
 
     private func releaseEverything() {
         cancelDeadline()
@@ -1620,6 +1687,7 @@ public final class KeepAwakeProvider: ActivityProvider {
                 return
             }
             state = .running(session)
+            problem = coverageProblem
             announcesResume = true
             beginWatching()
             armDeadline()
@@ -1645,9 +1713,45 @@ public final class KeepAwakeProvider: ActivityProvider {
         deadlineWork = work
         // A hold with no deadline has nothing to fire *for*, but powerd's
         // backstop still expires, so the same timer re-arms it instead.
-        let after = session.remaining(at: now()).map { max($0, 0.02) } ?? Self.openEndedRearm
+        var after = session.remaining(at: now()).map { max($0, 0.02) } ?? Self.openEndedRearm
+        // Including a renewal refused while the old assertion still covers
+        // it: waiting the full half-hour would retry at the moment it runs out.
+        if assertion.needsRetry { after = min(after, Self.partialRetry) }
+        deadlineDelayForTesting = after
         DispatchQueue.main.asyncAfter(deadline: .now() + after, execute: work)
         armPublish()
+    }
+
+    private func armReturnToReady() {
+        cancelReturnToReady()
+        // Captured after `didSet` has counted this change, so any state change
+        // after it — a new Start, a Resume — makes the timer a stranger.
+        let revision = stateRevision
+        let era = lifecycle
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.returnToReadyTick(revision: revision, era: era) }
+        }
+        returnToReadyWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.finishedShelfLife, execute: work)
+    }
+
+    private func cancelReturnToReady() {
+        returnToReadyWork?.cancel()
+        returnToReadyWork = nil
+    }
+
+    /// The Finished card has had its say; it becomes the control again.
+    /// Public so tests can stand in for the timer, as with `deadlineTick`.
+    public func returnToReadyTick() {
+        returnToReadyTick(revision: nil, era: nil)
+    }
+
+    private func returnToReadyTick(revision: Int?, era: Int?) {
+        if let revision, revision != stateRevision { return }
+        if let era, era != lifecycle { return }
+        guard case .finished = state else { return }
+        state = .ready
+        publish()
     }
 
     private func cancelDeadline() {
@@ -1764,7 +1868,12 @@ public final class KeepAwakeProvider: ActivityProvider {
 
     private func publish() {
         lastPublishedLabel = nil
-        continuation?.yield(.publish(activity))
+        guard let continuation else { return }
+        continuation.yield(.publish(activity))
+        // The Finished card's twelve seconds start when it is shown. Only the
+        // first showing: republishing it (a lid answer, a setting) must not
+        // keep pushing the return back.
+        if case .finished = state, returnToReadyWork == nil { armReturnToReady() }
     }
 
     /// The activity as published, for tests that care about its shelf life.
@@ -1777,8 +1886,12 @@ public final class KeepAwakeProvider: ActivityProvider {
             // Only a Finished card is news with a shelf life. Ready is a
             // control the user came looking for, and expiring it took the card
             // off screen twelve seconds after it appeared.
+            // The shelf life is the provider's to end, by turning the card
+            // back into the control; this expiry is only the backstop. It
+            // runs a little longer so the Ready publish always lands first
+            // and cancels it, rather than racing it and losing the card.
             expiresAfter: {
-                if case .finished = state { return 12 }
+                if case .finished = state { return Self.finishedShelfLife + 3 }
                 return nil
             }(),
             payload: .keepAwake(payload)

@@ -1657,7 +1657,7 @@ public final class LedgeCoordinator {
     /// the old rule, and the loser simply never appeared. Full ids, not
     /// kinds: two queued device connects must each flash their own card, not
     /// the first `.device` in the queue twice.
-    private var pendingPeeks: [(id: ActivityID, at: TimeInterval)] = []
+    private var pendingPeeks: [(id: ActivityID, at: TimeInterval, byUser: Bool)] = []
 
     /// How long a queued peek stays worth playing. Past this it is old news —
     /// replaying a Bluetooth connect from a minute ago reads as a glitch.
@@ -1667,14 +1667,31 @@ public final class LedgeCoordinator {
     /// to queued entries at drain time. The queue used to be a second entrance
     /// with no bouncer: kinds the Focus filter would have suppressed walked in
     /// through the drain.
-    private func admitPeek(kind: ActivityKind) -> Bool {
+    private func admitPeek(kind: ActivityKind, byUser: Bool = false) -> Bool {
+        Self.admitsPeek(
+            kind: kind, byUser: byUser, greeting: presentation.greeting,
+            quietDuringFocus: preferences.quietDuringFocus, focusActive: focusModeActive
+        )
+    }
+
+    /// The admission rule itself, apart from the coordinator so it can be
+    /// checked without one.
+    ///
+    /// `byUser` is a confirmation of something the user has just done, like
+    /// switching coffee on. Focus keeps the notch from interrupting; it was
+    /// never meant to stop the notch answering, and suppressing the answer
+    /// left a press with nothing to show for it.
+    static func admitsPeek(
+        kind: ActivityKind, byUser: Bool, greeting: Bool,
+        quietDuringFocus: Bool, focusActive: Bool
+    ) -> Bool {
         // Nothing interrupts the hello. It lasts under two seconds, and an
         // arrival landing on top of it left the eyes handing straight over to
         // a volume readout — the ears never got to close, which is the whole
         // shape of the greeting.
-        guard !presentation.greeting else { return false }
-        if preferences.quietDuringFocus, focusModeActive,
-           !Self.peeksDuringFocus.contains(kind) { return false }
+        guard !greeting else { return false }
+        if quietDuringFocus, focusActive, !byUser,
+           !peeksDuringFocus.contains(kind) { return false }
         return true
     }
 
@@ -1826,70 +1843,84 @@ public final class LedgeCoordinator {
             // whenever a countdown ends or is cancelled, and saying so put the
             // default work length in the ears for a timer nobody started.
             guard activity.isWorthAnnouncing else { return }
-            guard self.admitPeek(kind: activity.kind) else {
-                Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
-                return
-            }
-            // While the companion rests, a device or charger announcement is
-            // satellite material, not a takeover: the music keeps the island
-            // and the event shows beside it for its dwell.
-            if self.state.phase == .companion,
-               let content = Self.transientSatellite(for: activity) {
-                self.showSatellite(content, source: activity.id, priority: activity.priority)
-                return
-            }
-            // Whether this arrival is worth standing up for, decided once and
-            // honoured by every path below. Deciding it at the bottom meant
-            // the branches that peek early — a card re-announcing mid-peek, a
-            // queued peek replayed later — went out as ordinary whispers, and
-            // a pomodoro that ends while anything else is on screen is exactly
-            // the case this exists for.
-            let announcement = Self.announcement(for: activity)
-            let duration = announcement == nil
-                ? self.preferences.peekDuration
-                : NotchAnnouncement.duration
-
-            // The SAME card announcing again — Caps Lock toggled mid-peek,
-            // a second Focus flip — restarts the current peek in place with
-            // the fresh payload rather than queueing behind itself: queued,
-            // a rapid caps on-off-on showed its states seconds late, which
-            // read as the indicator failing.
-            if self.state.phase == .peek, self.presentation.peeked?.id == activity.id {
-                self.presentation.peeked = activity
-                self.presentation.announcement = announcement
-                self.send(.peekRequested(duration))
-                return
-            }
-            // A peek already on screen keeps the stage; this one waits its
-            // turn and plays when the current one retires. Every phase the
-            // reducer will decline to take over — an open stack under the
-            // cursor, a HUD hovered or riding on a pinned card — is the same
-            // case: sending would drop the announcement on the floor, so it
-            // queues and plays when the stage clears. The condition mirrors
-            // the reducer's own guards exactly.
-            if self.state.phase == .peek
-                || self.state.phase == .hover || self.state.phase == .expanded
-                || (self.state.phase == .hud && (self.state.isHovering || self.state.isPinned)) {
-                if self.pendingPeeks.count < 3 {
-                    self.pendingPeeks.append((activity.id, Date().timeIntervalSinceReferenceDate))
-                }
-                return
-            }
-            // The card the peek is *for*: selection only moves for standings
-            // that outrank it, so without this the flash showed whatever was
-            // already selected — music starting under a calendar card peeked
-            // the calendar.
-            self.presentation.peeked = activity
-            // Some news is worth more than a two-second whisper: the notch
-            // stands up instead — see `NotchAnnouncement`.
-            self.presentation.announcement = announcement
-            self.send(.peekRequested(duration))
+            self.announce(activity)
+        }
+        activities.onKeepAwakeStarted = { [weak self] activity in
+            // The user's own press. Free ears get the cup and its state for a
+            // Focus-length moment; busy ones get the cup beside them instead,
+            // the way AirPods connecting does while music plays. Focus or not:
+            // it answers a press, it does not interrupt.
+            self?.announce(activity, byUser: true)
         }
         activities.onEmpty = { [weak self] in
             // Nothing left to show, so an overlay held open by a click has
             // nothing to hold open for.
             self?.send(.dismissed)
         }
+    }
+
+    /// Puts an arrival in front of the user: beside the island when music
+    /// already holds it and the arrival is satellite material, otherwise as a
+    /// peek — now, or queued behind whatever has the stage.
+    private func announce(_ activity: Activity, byUser: Bool = false) {
+        guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
+            Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
+            return
+        }
+        // While the companion rests, a device or charger announcement is
+        // satellite material, not a takeover: the music keeps the island
+        // and the event shows beside it for its dwell.
+        if self.state.phase == .companion,
+           let content = Self.transientSatellite(for: activity) {
+            self.showSatellite(content, source: activity.id, priority: activity.priority)
+            return
+        }
+        // Whether this arrival is worth standing up for, decided once and
+        // honoured by every path below. Deciding it at the bottom meant
+        // the branches that peek early — a card re-announcing mid-peek, a
+        // queued peek replayed later — went out as ordinary whispers, and
+        // a pomodoro that ends while anything else is on screen is exactly
+        // the case this exists for.
+        let announcement = Self.announcement(for: activity)
+        let duration = announcement == nil
+            ? self.preferences.peekDuration
+            : NotchAnnouncement.duration
+
+        // The SAME card announcing again — Caps Lock toggled mid-peek,
+        // a second Focus flip — restarts the current peek in place with
+        // the fresh payload rather than queueing behind itself: queued,
+        // a rapid caps on-off-on showed its states seconds late, which
+        // read as the indicator failing.
+        if self.state.phase == .peek, self.presentation.peeked?.id == activity.id {
+            self.presentation.peeked = activity
+            self.presentation.announcement = announcement
+            self.send(.peekRequested(duration))
+            return
+        }
+        // A peek already on screen keeps the stage; this one waits its
+        // turn and plays when the current one retires. Every phase the
+        // reducer will decline to take over — an open stack under the
+        // cursor, a HUD hovered or riding on a pinned card — is the same
+        // case: sending would drop the announcement on the floor, so it
+        // queues and plays when the stage clears. The condition mirrors
+        // the reducer's own guards exactly.
+        if self.state.phase == .peek
+            || self.state.phase == .hover || self.state.phase == .expanded
+            || (self.state.phase == .hud && (self.state.isHovering || self.state.isPinned)) {
+            if self.pendingPeeks.count < 3 {
+                self.pendingPeeks.append((activity.id, Date().timeIntervalSinceReferenceDate, byUser))
+            }
+            return
+        }
+        // The card the peek is *for*: selection only moves for standings
+        // that outrank it, so without this the flash showed whatever was
+        // already selected — music starting under a calendar card peeked
+        // the calendar.
+        self.presentation.peeked = activity
+        // Some news is worth more than a two-second whisper: the notch
+        // stands up instead — see `NotchAnnouncement`.
+        self.presentation.announcement = announcement
+        self.send(.peekRequested(duration))
     }
 
     /// What a resting track — playing, paused, or gone — does to the ears.
@@ -1948,11 +1979,19 @@ public final class LedgeCoordinator {
                 // The rules live in `MediaLinger`, which is where they can be
                 // tested; what is left here is the timer and the drawing.
                 let key = Self.mediaKey(self.presentation.nowPlaying)
-                let verdict = self.linger.paused(
-                    key,
-                    full: min(self.preferences.companionLinger, 3_600),
-                    now: Date().timeIntervalSinceReferenceDate
-                )
+                // Only a track can linger, so only ask when there is one.
+                // `MediaLinger` gives an *unidentifiable* track the plain stay,
+                // and nil is also what `mediaKey` says when there is no track
+                // at all — so whatever else was present-but-not-playing was
+                // granted two minutes for music that did not exist, and the
+                // island sat open with nothing in its ears.
+                let verdict: MediaLinger.Verdict = self.presentation.nowPlaying == nil
+                    ? .neverRested
+                    : self.linger.paused(
+                        key,
+                        full: min(self.preferences.companionLinger, 3_600),
+                        now: Date().timeIntervalSinceReferenceDate
+                    )
                 let remaining: TimeInterval
                 switch verdict {
                 case .stays(let seconds):
@@ -2428,6 +2467,11 @@ public final class LedgeCoordinator {
         case .power(let payload):
             guard payload.isCharging else { return nil }
             return .charging(level: payload.percentage)
+        case .keepAwake(let payload):
+            // Starting a hold while music has the ears: the cup beside the
+            // island, not a takeover of it.
+            guard payload.isRunning else { return nil }
+            return .keepAwake(remaining: payload.isIndefinite ? nil : payload.remaining)
         default:
             return nil
         }
@@ -2558,7 +2602,7 @@ public final class LedgeCoordinator {
                       case .nowPlaying(let payload)? = self.presentation.selected?.payload,
                       payload.duration > 0
                 else { return false }
-                return self.sendMedia(.seek(payload.duration * fraction))
+                return self.sendMedia(.seek(payload.duration * fraction, item: payload.itemKey))
             },
             audioLevels: { [weak self] in self?.simulatedLevels() ?? [] },
             chooseOutput: {
@@ -2812,7 +2856,10 @@ public final class LedgeCoordinator {
                 level: level,
                 // The same rule the HUD draws by: silence at zero is an empty
                 // bar, and only the user's own mute is the muted state.
-                isMuted: VolumeController.showsMuted($0.id, level: level ?? 0)
+                isMuted: VolumeController.showsMuted($0.id, level: level ?? 0),
+                // Asked of the device, not inferred from the fact that a level
+                // came back: the two are different questions.
+                isAdjustable: VolumeController.writer.canSetLevel(of: $0.id)
             )
         }
     }
@@ -3580,7 +3627,7 @@ public final class LedgeCoordinator {
             while !pendingPeeks.isEmpty {
                 let entry = pendingPeeks.removeFirst()
                 guard now - entry.at < Self.pendingPeekLifetime,
-                      admitPeek(kind: entry.id.kind),
+                      admitPeek(kind: entry.id.kind, byUser: entry.byUser),
                       // Gone from the queue (expired, dismissed) means gone:
                       // peeking anyway flashed whatever card happened to be
                       // selected — the exact wrong-card bug peeked exists to
@@ -3786,7 +3833,6 @@ public final class LedgeCoordinator {
             farewell: presentation.farewell,
             playingNowPlaying: playing,
             runningTimer: runningTimer,
-            keepAwake: presentation.runningKeepAwake,
             closeEvent: presentation.closeEvent,
             nowPlaying: presentation.lingeringNowPlaying,
             selected: presentation.selected

@@ -101,7 +101,7 @@ public enum MediaRemoteBridge {
         // Seek is a separate symbol with its own signature, so it is handled
         // before the command table. This is what makes the scrub bar work for a
         // player AppleScript cannot reach — a YouTube tab, say.
-        if case .seek(let position) = command {
+        if case .seek(let position, _) = command {
             guard let setElapsed = PrivateSymbol.lookup(
                 "MRMediaRemoteSetElapsedTime",
                 in: .mediaRemote,

@@ -661,6 +661,23 @@ struct MiniWaveform: View {
     /// How long the bars take to rise or settle when playback starts or stops.
     private static let rampDuration: TimeInterval = 0.28
 
+    /// The six heights to draw.
+    ///
+    /// One shape throughout. Pausing used to drop the live levels and let the
+    /// fallback sine take over for the whole settle, so the bars did not sink
+    /// from where they were — they jumped to a different pattern first and
+    /// sank from *there*. Measured at a fixed clock: 4.42 pt immediately
+    /// before the pause, 13.49 pt on the first frame after it. Whatever was
+    /// last drawn is what settles now, and only the amplitude moves.
+    func heights(at date: Date, amplitude amount: Double) -> [CGFloat] {
+        let live = allowsMotion ? levels() : []
+        let bars = Self.phases.enumerated().map { index, phase in
+            liveHeight(live, index: index, amplitude: amount)
+                ?? height(at: date.timeIntervalSinceReferenceDate, phase: phase, amplitude: amount)
+        }
+        return bars
+    }
+
     /// When `isAnimating` last changed, so the ramp can be computed from the
     /// drawing clock.
     @State private var changedAt: Date = .distantPast
@@ -681,12 +698,8 @@ struct MiniWaveform: View {
             interval: .milliseconds(50)
         ) { date in
             let amount = allowsMotion ? amplitude(at: date) : 0
-            let live = allowsMotion && isAnimating ? levels() : []
             WaveformBars(
-                heights: Self.phases.enumerated().map { index, phase in
-                    liveHeight(live, index: index, amplitude: amount)
-                        ?? height(at: date.timeIntervalSinceReferenceDate, phase: phase, amplitude: amount)
-                },
+                heights: heights(at: date, amplitude: amount),
                 tint: tint, barWidth: 2.5, spacing: 2, height: 14
             )
         }

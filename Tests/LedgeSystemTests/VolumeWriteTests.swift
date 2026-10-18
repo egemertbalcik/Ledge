@@ -1719,3 +1719,48 @@ struct FirstSightingOfMuteTests {
         #expect(!VolumeController.established(result))
     }
 }
+
+/// Whether a route's level can be changed, which is not the same question as
+/// whether it can be read. The card used to draw a slider wherever a level
+/// came back; on a read-only output that slider dragged and sprang straight
+/// back, with nothing to say why.
+@Suite("A level that can be read may still not be writable")
+struct VolumeWritabilityTests {
+
+    private let device: AudioObjectID = 7
+
+    @Test("A device with a writable master can be set")
+    func aWritableMasterIsAdjustable() {
+        let hardware = FakeVolumeHardware()
+        hardware.scalarElements = [VolumeElement.main]
+        #expect(VolumeWriter(hardware: hardware).canSetLevel(of: device))
+    }
+
+    @Test("A device with no volume control at all cannot be set")
+    func noControlIsNotAdjustable() {
+        let hardware = FakeVolumeHardware()
+        hardware.scalarElements = []
+        #expect(!VolumeWriter(hardware: hardware).canSetLevel(of: device))
+    }
+
+    /// The reported case: the level reads perfectly well and every write is
+    /// refused.
+    @Test("A read-only output reports a level and is not adjustable")
+    func aReadOnlyOutputIsNotAdjustable() {
+        let hardware = FakeVolumeHardware()
+        hardware.scalarElements = []
+        hardware.level = 0.6
+        let writer = VolumeWriter(hardware: hardware)
+        #expect(hardware.readScalar(device) == 0.6)
+        #expect(!writer.canSetLevel(of: device))
+    }
+
+    @Test("A read-only master beside writable channels is adjustable")
+    func writableChannelsCount() {
+        let hardware = FakeVolumeHardware()
+        // No master control, but the channels answer.
+        hardware.scalarElements = [1, 2]
+        hardware.channelCount = 2
+        #expect(VolumeWriter(hardware: hardware).canSetLevel(of: device))
+    }
+}

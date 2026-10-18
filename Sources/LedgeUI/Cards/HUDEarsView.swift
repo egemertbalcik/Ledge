@@ -574,19 +574,21 @@ public struct SatelliteView: View {
             )
 
         case .keepAwake(let remaining):
-            // The timer blob, verbatim: same disc, same digits, same seat.
-            // What differs is the rim — a keep-awake has no total to drain
-            // against, so it keeps the quiet full ring the stopwatch wears —
-            // and the label, which drops its seconds above a minute.
+            // The cup, not the number.
+            //
+            // This seat is only ever taken while something *else* is holding
+            // the island — the hold has already had its few seconds in the
+            // ears and stepped back. What is wanted here is the reminder that
+            // the Mac is being held awake, which the glyph says at a glance;
+            // the figure beside it asked to be read, and read as a stray
+            // number with no units next to someone's music. The time left is
+            // still on the card, a swipe away, where there is room to say
+            // what it is a time left *of*.
             circle {
                 ring(level: 1, tint: Color.white.opacity(0.35))
-                Text(SatelliteContent.keepAwakeLabel(remaining: remaining))
-                    .font(.system(size: 9, weight: .bold))
-                    .monospacedDigit()
-                    .minimumScaleFactor(0.45)
-                    .lineLimit(1)
+                Image(systemName: "cup.and.saucer.fill")
+                    .font(.system(size: diameter * 0.34, weight: .medium))
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 5)
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(KeepAwakeCopy.title)

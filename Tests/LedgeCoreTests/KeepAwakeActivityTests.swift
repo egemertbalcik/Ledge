@@ -41,37 +41,31 @@ struct KeepAwakeActivityTests {
 
     // MARK: - The resting ears
 
-    @Test("A running timer keeps the ears when Keep Awake is running too")
-    func timerOutranksKeepAwake() {
+    @Test("A running hold never takes the ears from anything")
+    func aHoldTakesNothing() {
         let running = keepAwake(.running, remaining: 3600)
         let countdown = timer(idle: false)
-        let shown = CompactRest.resolve(
+        // Selected or not, it does not outrank a timer, a meeting — or
+        // nothing at all.
+        #expect(CompactRest.resolve(
             farewell: nil, playingNowPlaying: nil, runningTimer: countdown,
-            keepAwake: running, closeEvent: nil, nowPlaying: nil, selected: nil
-        )
-        // Both are counting down; only one of them is a deadline the user is
-        // waiting on.
-        #expect(shown?.id == countdown.id)
-    }
-
-    @Test("Keep Awake takes the ears from an imminent meeting, and only below the timer")
-    func keepAwakeAboveCloseEvent() {
-        let running = keepAwake(.running, remaining: 3600)
-        let shown = CompactRest.resolve(
-            farewell: nil, playingNowPlaying: nil, runningTimer: nil,
-            keepAwake: running, closeEvent: closeEvent, nowPlaying: nil, selected: nil
-        )
-        #expect(shown?.id == running.id)
-        // With nothing holding the Mac awake the meeting is back.
+            closeEvent: nil, nowPlaying: nil, selected: running
+        )?.id == countdown.id)
         #expect(CompactRest.resolve(
             farewell: nil, playingNowPlaying: nil, runningTimer: nil,
-            keepAwake: nil, closeEvent: closeEvent, nowPlaying: nil, selected: nil
+            closeEvent: closeEvent, nowPlaying: nil, selected: running
         )?.id == closeEvent.id)
+        #expect(CompactRest.resolve(
+            farewell: nil, playingNowPlaying: nil, runningTimer: nil,
+            closeEvent: nil, nowPlaying: nil, selected: running
+        ) == nil)
     }
 
-    @Test("Only a running Keep Awake rests in the ears")
-    func onlyRunningRests() {
-        #expect(keepAwake(.running, remaining: 600).restsInEars)
+    /// The cause of the cup that never left: a hold that has just been
+    /// started is the selected card, and the selected card was the last rung.
+    @Test("No Keep Awake card rests in the ears, running or not")
+    func nothingRests() {
+        #expect(!keepAwake(.running, remaining: 600).restsInEars)
         #expect(!keepAwake(.ready).restsInEars)
         #expect(!keepAwake(.finished(.timeUp)).restsInEars)
     }
@@ -163,5 +157,58 @@ struct KeepAwakeActivityTests {
         // finished one comes ahead of it, because the Mac's power just changed.
         #expect(Urgency.score(of: running) < Urgency.score(of: timer(idle: false)))
         #expect(Urgency.score(of: finished) > Urgency.score(of: timer(idle: false)))
+    }
+}
+
+/// A hold says itself once.
+///
+/// While the ears are showing it — the cup in one, the state in the other —
+/// a disc beside the island saying the same thing is the same fact twice, and
+/// the detached disc hides the ear that was saying it properly.
+@Suite("Keep Awake does not orbit itself")
+struct KeepAwakeSelfOrbitTests {
+
+    private let awake = SatelliteContent.keepAwake(remaining: 3_600)
+    private let privacy = SatelliteContent.privacy(camera: true, microphone: false)
+
+    @Test("While the ears show the hold, the seat stays empty for it")
+    func itYieldsWhileItIsTheIsland() {
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: nil, timer: nil, keepAwake: awake,
+            timerIsMainIsland: false, keepAwakeIsMainIsland: true
+        ) == nil)
+    }
+
+    @Test("Once the ears belong to something else it takes the seat")
+    func itTakesTheSeatWhenItIsNotTheIsland() {
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: nil, timer: nil, keepAwake: awake,
+            timerIsMainIsland: false, keepAwakeIsMainIsland: false
+        ) == awake)
+    }
+
+    /// Yielding is not the same as having nothing: what is behind it still
+    /// gets the seat.
+    @Test("Yielding lets the recording dot through")
+    func whatIsBehindItStillShows() {
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: privacy, timer: nil, keepAwake: awake,
+            timerIsMainIsland: false, keepAwakeIsMainIsland: true
+        ) == privacy)
+    }
+
+    @Test("A timer holding the island is unaffected by the hold's own rule")
+    func theTimerRuleIsSeparate() {
+        let countdown = SatelliteContent.timer(
+            remaining: 60, total: 300, isBreak: false, isRunning: true
+        )
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: nil, timer: countdown, keepAwake: awake,
+            timerIsMainIsland: true, keepAwakeIsMainIsland: true
+        ) == nil)
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: nil, timer: countdown, keepAwake: awake,
+            timerIsMainIsland: false, keepAwakeIsMainIsland: true
+        ) == countdown)
     }
 }

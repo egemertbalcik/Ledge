@@ -161,6 +161,11 @@ public enum KeepAwakeCopy {
 
     public static func resumeButton(remaining: String) -> String { "Resume (\(remaining) left)" }
 
+    /// Running, with the Mac held but the screen or disk part refused. Says
+    /// what is still true, what may not be, and that it is being retried.
+    public static let partialHold =
+        "Your Mac is staying awake, but macOS refused part of it, so the screen may still go dark. Ledge keeps asking."
+
     /// Shown once when the journal could not be read at all.
     public static let journalUnreadable =
         "Ledge couldn't read the last session, so it didn't resume it."

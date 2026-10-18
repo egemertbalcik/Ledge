@@ -182,7 +182,14 @@ public enum NowPlayingCommand: Equatable, Sendable {
     case playPause
     case next
     case previous
-    case seek(TimeInterval)
+    /// A position, and the track it was asked for.
+    ///
+    /// The identity is load-bearing. A queued seek used to carry a bare
+    /// position: release the scrubber on one song, let the next one start
+    /// while the command waits its turn, and the new song jumped to the old
+    /// one's position. The queue bounds how *old* a command may be, not which
+    /// song it lands on.
+    case seek(TimeInterval, item: String?)
 }
 
 /// What became of a transport command.

@@ -48,7 +48,8 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
     /// now. A resume nobody asked for has to announce itself, with End one tap
     /// away — so the fact has to reach the card, not just the provider.
     public var resumed: Bool
-    /// Ready: the last attempt failed, and why. Nil when nothing is wrong.
+    /// Ready: the last attempt failed, and why. Running: only `partialHold`.
+    /// Nil when nothing is wrong.
     public var problem: Problem?
 
     public enum Problem: String, Equatable, Sendable, Codable, CaseIterable {
@@ -58,6 +59,9 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
         /// Too many sessions are waiting to be written down for another one to
         /// be started safely.
         case tooManyUnsaved
+        /// Running: the Mac is held, but macOS refused the screen or disk
+        /// part of it. Ledge keeps asking, and clears this once it has all of it.
+        case partialHold
     }
 
     public init(

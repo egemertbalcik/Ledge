@@ -12,13 +12,27 @@ public struct AudioOutputOption: Identifiable, Equatable, Sendable {
     /// Whether that device is muted. macOS keeps the scalar volume unchanged
     /// while muted, so the level alone cannot say.
     public let isMuted: Bool
+    /// Whether that level can be *changed*, which is a different question from
+    /// whether it can be read. A read-only output reports a perfectly good
+    /// level and refuses every attempt to set it; drawing a slider for one
+    /// gives the user a control that slides back under the finger and says
+    /// nothing about why.
+    public let isAdjustable: Bool
 
-    public init(id: UInt32, name: String, isCurrent: Bool, level: Double? = nil, isMuted: Bool = false) {
+    public init(
+        id: UInt32,
+        name: String,
+        isCurrent: Bool,
+        level: Double? = nil,
+        isMuted: Bool = false,
+        isAdjustable: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.isCurrent = isCurrent
         self.level = level
         self.isMuted = isMuted
+        self.isAdjustable = isAdjustable
     }
 }
 
@@ -864,7 +878,7 @@ public struct NowPlayingCardView: View {
             // interfaces — was drawn as a slider sitting at zero, which reads
             // as an output turned all the way down rather than one whose level
             // is not ours to set. It is a plain row instead.
-            let isAdjustable = option.level != nil
+            let isAdjustable = option.isAdjustable && option.level != nil
 
             ZStack(alignment: .leading) {
                 Capsule(style: .continuous)
@@ -975,7 +989,12 @@ public struct NowPlayingCardView: View {
             actions.selectOutput(option.id)
             routeOptions = actions.outputs()
         }
+        // Only where the operation exists. Installed unconditionally, this
+        // offered VoiceOver an adjustment on routes whose level cannot be
+        // written — the pointer path already declined those, so the two
+        // disagreed about the same row.
         .accessibilityAdjustableAction { direction in
+            guard option.isAdjustable, option.level != nil else { return }
             let step: Double = direction == .increment ? 0.05 : -0.05
             let next = min(max((option.level ?? 0) + step, 0), 1)
             _ = actions.setOutputVolume(option.id, next)
