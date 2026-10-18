@@ -138,10 +138,10 @@ struct ScriptingOnboardingGateTests {
             availablePlayers: { probe.enumerations += 1; return ScriptingNowPlayingSource.players },
             readPlayer: { player in
                 probe.reads += 1
-                return NowPlayingSnapshot(
+                return .answered(NowPlayingSnapshot(
                     title: "Track", artist: "Artist", isPlaying: true,
                     appName: player.displayName, appBundleID: player.bundleID
-                )
+                ))
             }
         )
         #expect(!source.isAvailable)
@@ -156,5 +156,195 @@ struct ScriptingOnboardingGateTests {
         #expect(probe.reads == 2)
         #expect(await source.snapshot(forBundleID: "unknown") == nil)
         #expect(probe.reads == 2)
+    }
+}
+
+/// What happens when the player does not answer, which is not the same as the
+/// player saying nothing is playing. The difference closed a visible gap: one
+/// `osascript` past its three-second deadline, measured against Spotify, used
+/// to retract the card and shut the island in the middle of a pause.
+@Suite("A player that does not answer")
+@MainActor
+struct ScriptingUnreadableReadTests {
+
+    @MainActor
+    private final class Script {
+        var reading: ScriptingNowPlayingSource.PlayerReading = .nothing
+        var clock: TimeInterval = 1_000
+    }
+
+    private static let spotify = ScriptingNowPlayingSource.players.first {
+        $0.bundleID == "com.spotify.client"
+    }!
+
+    private func source(_ script: Script) -> ScriptingNowPlayingSource {
+        ScriptingNowPlayingSource(
+            mayQueryPlayers: { true },
+            availablePlayers: { [Self.spotify] },
+            readPlayer: { _ in script.reading },
+            now: { script.clock }
+        )
+    }
+
+    private func paused(_ title: String) -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: title, artist: "Murda", isPlaying: false,
+            appName: "Spotify", appBundleID: "com.spotify.client"
+        )
+    }
+
+    @Test("An unanswered read keeps the last answer instead of taking the card away")
+    func unreadableHoldsTheLastAnswer() async {
+        let script = Script()
+        let source = source(script)
+
+        script.reading = .answered(paused("karambol"))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        // The next poll's script misses its deadline.
+        script.reading = .unreadable
+        script.clock += 1
+        #expect(await source.snapshot()?.title == "karambol")
+
+        // And the one after it gets through.
+        script.reading = .answered(paused("karambol"))
+        script.clock += 1
+        #expect(await source.snapshot()?.title == "karambol")
+    }
+
+    @Test("A player that says nothing is playing takes its card with it")
+    func nothingIsBelievedAtOnce() async {
+        let script = Script()
+        let source = source(script)
+
+        script.reading = .answered(paused("karambol"))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        // Not a missed deadline: the player answered, and it has stopped.
+        script.reading = .nothing
+        script.clock += 1
+        #expect(await source.snapshot() == nil)
+    }
+
+    @Test("The held answer is not allowed to go stale")
+    func theHeldAnswerExpires() async {
+        let script = Script()
+        let source = source(script)
+
+        script.reading = .answered(paused("karambol"))
+        #expect(await source.snapshot()?.title == "karambol")
+
+        script.reading = .unreadable
+        script.clock += 9
+        #expect(await source.snapshot()?.title == "karambol")
+        script.clock += 2
+        #expect(await source.snapshot() == nil)
+    }
+
+    @Test("Nothing is held for a player that has never answered")
+    func nothingToHoldAtFirst() async {
+        let script = Script()
+        let source = source(script)
+        script.reading = .unreadable
+        #expect(await source.snapshot() == nil)
+    }
+
+    @Test("A stopped player cannot be covered by an answer it gave before")
+    func nothingClearsTheHeldAnswer() async {
+        let script = Script()
+        let source = source(script)
+
+        script.reading = .answered(paused("karambol"))
+        #expect(await source.snapshot()?.title == "karambol")
+        script.reading = .nothing
+        script.clock += 1
+        #expect(await source.snapshot() == nil)
+
+        // The player stops answering now. There is nothing left to show: the
+        // card went away for a reason, and a held answer must not bring it
+        // back.
+        script.reading = .unreadable
+        script.clock += 1
+        #expect(await source.snapshot() == nil)
+    }
+
+    @Test("The single-player path follows the same rule")
+    func theByBundlePathHoldsToo() async {
+        let script = Script()
+        let source = source(script)
+
+        script.reading = .answered(paused("karambol"))
+        #expect(await source.snapshot(forBundleID: "com.spotify.client")?.title == "karambol")
+
+        script.reading = .unreadable
+        script.clock += 1
+        #expect(await source.snapshot(forBundleID: "com.spotify.client")?.title == "karambol")
+
+        script.reading = .nothing
+        script.clock += 1
+        #expect(await source.snapshot(forBundleID: "com.spotify.client") == nil)
+    }
+}
+
+/// Which `osascript` outcomes count as the player having answered. The whole
+/// unanswered-read rule rests on this mapping, so each outcome is pinned.
+@Suite("What one osascript run means")
+@MainActor
+struct ScriptingReadingTests {
+
+    private let separator = "\u{1F}"
+
+    private var spotify: ScriptingNowPlayingSource.Player {
+        ScriptingNowPlayingSource.players.first { $0.bundleID == "com.spotify.client" }!
+    }
+
+    private func isUnreadable(_ reading: ScriptingNowPlayingSource.PlayerReading) -> Bool {
+        if case .unreadable = reading { return true }
+        return false
+    }
+
+    private func isNothing(_ reading: ScriptingNowPlayingSource.PlayerReading) -> Bool {
+        if case .nothing = reading { return true }
+        return false
+    }
+
+    @Test("A missed deadline is not the player saying it has nothing")
+    func failedIsUnreadable() {
+        #expect(isUnreadable(ScriptingNowPlayingSource.reading(from: .failed, player: spotify)))
+    }
+
+    @Test("A refused Automation prompt teaches us nothing about what is playing")
+    func deniedIsUnreadable() {
+        #expect(isUnreadable(ScriptingNowPlayingSource.reading(
+            from: .denied("-1743"), player: spotify
+        )))
+    }
+
+    @Test("An empty answer is the player saying nothing is playing")
+    func emptyOutputIsNothing() {
+        #expect(isNothing(ScriptingNowPlayingSource.reading(from: .output(""), player: spotify)))
+        // osascript puts a newline after the result.
+        #expect(isNothing(ScriptingNowPlayingSource.reading(from: .output("\n"), player: spotify)))
+    }
+
+    @Test("Output that will not parse is not an answer either")
+    func corruptOutputIsUnreadable() {
+        #expect(isUnreadable(ScriptingNowPlayingSource.reading(
+            from: .output("two" + separator + "fields"), player: spotify
+        )))
+    }
+
+    @Test("A well-formed line is an answer")
+    func goodOutputIsAnswered() throws {
+        let fields = ["karambol", "Murda", "Album", "180000", "151", "paused", "id", ""]
+        let reading = ScriptingNowPlayingSource.reading(
+            from: .output(fields.joined(separator: separator)), player: spotify
+        )
+        guard case .answered(let snapshot) = reading else {
+            Issue.record("expected an answer, got \(reading)")
+            return
+        }
+        #expect(snapshot.title == "karambol")
+        #expect(snapshot.isPlaying == false)
     }
 }

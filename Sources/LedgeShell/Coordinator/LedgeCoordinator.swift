@@ -1911,7 +1911,7 @@ public final class LedgeCoordinator {
                 // Nothing restable — close the companion.
                 self.presentation.lingeringNowPlaying = nil
                 self.setRestingHold(false)
-                self.linger.nothingRests()
+                self.linger.nothingRests(now: Date().timeIntervalSinceReferenceDate)
             } else if playing {
                 // Something is a live resident: playing music, a ticking
                 // timer, a close event. None of them is a paused track, and

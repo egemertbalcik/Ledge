@@ -13,7 +13,7 @@ import OSLog
 @MainActor
 struct MediaPress {
 
-    private static let log = Logger(subsystem: "dev.ledgeapp.Ledge", category: "media")
+    private static let log = Logger(subsystem: "com.egemert.ledge", category: "media")
 
     /// Sends the command to the player on the card.
     let send: (NowPlayingCommand) -> NowPlayingDispatch

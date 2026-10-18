@@ -64,8 +64,34 @@ struct MediaLingerTests {
     func nothingRestingForgets() {
         var linger = MediaLinger()
         linger.nowResting(track)
-        linger.nothingRests()
+        linger.nothingRests(now: 1_000)
         #expect(linger.paused(track, full: full, now: 1_000) == .neverRested)
+    }
+
+    /// The blink: the player drops out of the running-application list for one
+    /// poll, the card is retracted, the island is told nothing rests — and the
+    /// track is back half a second later with 119 seconds still owed to it.
+    @Test("A stay already running survives the island going quiet")
+    func runningStaySurvivesABlink() {
+        var linger = MediaLinger()
+        linger.nowResting(track)
+        #expect(linger.paused(track, full: full, now: 1_000) == .stays(120))
+
+        linger.nothingRests(now: 1_000.5)
+        #expect(linger.paused(track, full: full, now: 1_001) == .stays(119))
+    }
+
+    @Test("A stay that has run out is forgotten when nothing rests")
+    func spentStayIsStillForgotten() {
+        var linger = MediaLinger()
+        linger.nowResting(track)
+        #expect(linger.paused(track, full: full, now: 1_000) == .stays(120))
+
+        // The stay ran out while the track sat there paused, and only then did
+        // the island go quiet. Nothing is owed any more, so the same track
+        // turning up hours later is a stranger again.
+        linger.nothingRests(now: 1_200)
+        #expect(linger.paused(track, full: full, now: 9_000) == .neverRested)
     }
 
     @Test("Two tracks keep their own clocks")

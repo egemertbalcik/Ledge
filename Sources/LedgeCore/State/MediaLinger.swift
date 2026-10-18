@@ -48,8 +48,27 @@ public struct MediaLinger: Equatable, Sendable {
     /// Nothing rests at all any more — so nothing has a stay owing to it. A
     /// track that has been away and comes back paused must not inherit the
     /// courtesy from whatever played last.
-    public mutating func nothingRests() {
-        restingKey = nil
+    ///
+    /// With one exception, and it is what makes a blink survivable: a track
+    /// whose stay is *already running* keeps its claim. The island can go
+    /// quiet for a moment without the user doing anything — a player that
+    /// drops out of the running-application list and straight back in — and
+    /// that moment used to cost the pause everything. The card returned half a
+    /// second later, its stay was refused as never having rested, and the
+    /// island stayed shut for the remainder of the pause.
+    ///
+    /// The exception is not the hole the rest of this type exists to close: a
+    /// stay only runs because this track was playing and then stopped inside
+    /// the last stay's length, so a track paused hours ago has none to keep
+    /// and is forgotten exactly as before.
+    public mutating func nothingRests(now: TimeInterval) {
+        guard let key = restingKey,
+              let deadline = deadlines[key],
+              deadline > now
+        else {
+            restingKey = nil
+            return
+        }
     }
 
     /// What a paused track may have.

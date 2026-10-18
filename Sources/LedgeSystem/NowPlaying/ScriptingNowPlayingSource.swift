@@ -78,7 +78,8 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// can supply system-wide media while the tour is unfinished.
     private let mayQueryPlayers: @MainActor () -> Bool
     private let availablePlayers: @MainActor () -> [Player]
-    private let readPlayer: @MainActor (Player) async -> NowPlayingSnapshot?
+    private let readPlayer: @MainActor (Player) async -> PlayerReading
+    private let now: @MainActor () -> TimeInterval
 
     public convenience init(mayQueryPlayers: @escaping @MainActor () -> Bool = { true }) {
         self.init(mayQueryPlayers: mayQueryPlayers, availablePlayers: Self.runningPlayers, readPlayer: Self.query)
@@ -87,12 +88,45 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     init(
         mayQueryPlayers: @escaping @MainActor () -> Bool,
         availablePlayers: @escaping @MainActor () -> [Player],
-        readPlayer: @escaping @MainActor (Player) async -> NowPlayingSnapshot?
+        readPlayer: @escaping @MainActor (Player) async -> PlayerReading,
+        now: @escaping @MainActor () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.mayQueryPlayers = mayQueryPlayers
         self.availablePlayers = availablePlayers
         self.readPlayer = readPlayer
+        self.now = now
     }
+
+    /// What one read of a player came to.
+    ///
+    /// `nothing` and `unreadable` are the distinction this type exists for. A
+    /// player that answers "stopped" has told us something; a player that did
+    /// not answer has not. Collapsing the two into a bare nil is how a single
+    /// `osascript` that missed its three-second deadline came to close the
+    /// island on a track the user had just paused.
+    enum PlayerReading: Sendable {
+        case answered(NowPlayingSnapshot)
+        /// The player replied, and nothing is playing.
+        case nothing
+        /// The player did not reply, or we were not allowed to ask.
+        case unreadable
+    }
+
+    /// The last answer a player gave, kept only long enough to ride out one
+    /// that does not reply.
+    ///
+    /// Bounded tightly on purpose. The card's own fifteen-minute paused
+    /// lifetime and the two-minute companion linger are policies about what
+    /// the user wants to see; this is nothing of the kind — it covers a player
+    /// that missed a deadline, which is a handful of seconds at most. Past the
+    /// grace the answer is dropped and the absence is reported honestly, stale
+    /// data being the one thing worse than a card that goes away.
+    private var heldAnswer: (snapshot: NowPlayingSnapshot, at: TimeInterval)?
+
+    /// How long an unanswered read may be covered by the last answer. One
+    /// `osascript` deadline is three seconds, and the poll after it has to
+    /// land too.
+    private static let unreadableGrace: TimeInterval = 10
 
     /// True when at least one supported player is already running.
     ///
@@ -103,9 +137,19 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         mayQueryPlayers() && !availablePlayers().isEmpty
     }
 
+    /// Remembers each player's process, so a blink in the lookup below can be
+    /// told from a player that has genuinely quit. The rule and the evidence
+    /// for it live in `PlayerLiveness`.
+    private static var liveness = PlayerLiveness()
+
     static func runningPlayers() -> [Player] {
-        players.filter {
-            !NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundleID).isEmpty
+        players.filter { player in
+            liveness.isRunning(
+                player.bundleID,
+                found: NSRunningApplication
+                    .runningApplications(withBundleIdentifier: player.bundleID)
+                    .first
+            )
         }
     }
 
@@ -116,7 +160,7 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         guard mayQueryPlayers(),
               let player = availablePlayers().first(where: { $0.bundleID == bundleID })
         else { return nil }
-        return await readPlayer(player)
+        return settle(await readPlayer(player), from: player)
     }
 
     /// Whether this source knows how to script the given app at all.
@@ -133,19 +177,69 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
             let names = running.map(\.displayName).joined(separator: ",")
             Self.log.notice("media/scripting: running players = [\(names, privacy: .public)]")
         }
+        var anyUnreadable = false
         for player in running {
-            guard let snapshot = await readPlayer(player) else {
+            switch await readPlayer(player) {
+            case .answered(let snapshot):
+                // Something actively playing always wins over something
+                // paused, so two open players cannot fight over the card.
+                if snapshot.isPlaying { return remember(snapshot) }
+                if firstPaused == nil { firstPaused = snapshot }
+            case .nothing:
                 if DebugSwitches.tracing("media") {
                     Self.log.notice("media/scripting: \(player.displayName, privacy: .public) answered nothing")
                 }
-                continue
+            case .unreadable:
+                anyUnreadable = true
+                if DebugSwitches.tracing("media") {
+                    Self.log.notice("media/scripting: \(player.displayName, privacy: .public) did not answer")
+                }
             }
-            // Something actively playing always wins over something paused, so
-            // two open players cannot fight over the card.
-            if snapshot.isPlaying { return snapshot }
-            if firstPaused == nil { firstPaused = snapshot }
         }
-        return firstPaused
+        if let firstPaused { return remember(firstPaused) }
+        // Nobody is playing — but "nobody answered" is not that. A player
+        // which missed its deadline keeps its last answer for a few seconds
+        // rather than having the card taken off the user mid-pause.
+        guard anyUnreadable else { return remember(nil) }
+        return held()
+    }
+
+    /// Keeps the answer that a later unanswered read may stand on, and passes
+    /// it straight back. An authoritative nothing drops it: a player that has
+    /// genuinely stopped must take its card with it.
+    private func remember(_ snapshot: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
+        guard let snapshot else {
+            heldAnswer = nil
+            return nil
+        }
+        heldAnswer = (snapshot, now())
+        return snapshot
+    }
+
+    /// The last answer, while it is young enough to speak for a player that
+    /// has gone quiet.
+    private func held() -> NowPlayingSnapshot? {
+        guard let heldAnswer, now() - heldAnswer.at < Self.unreadableGrace else {
+            self.heldAnswer = nil
+            return nil
+        }
+        return heldAnswer.snapshot
+    }
+
+    /// One reading, with the held answer applied — the single-player path's
+    /// share of the rule above.
+    private func settle(_ reading: PlayerReading, from player: Player) -> NowPlayingSnapshot? {
+        switch reading {
+        case .answered(let snapshot):
+            return remember(snapshot)
+        case .nothing:
+            return remember(nil)
+        case .unreadable:
+            if DebugSwitches.tracing("media") {
+                Self.log.notice("media/scripting: \(player.displayName, privacy: .public) did not answer")
+            }
+            return held()
+        }
     }
 
     // MARK: - Scripting
@@ -193,26 +287,47 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         denials = AutomationDenialLatch()
     }
 
-    static func query(_ player: Player) async -> NowPlayingSnapshot? {
+    static func query(_ player: Player) async -> PlayerReading {
         let now = Date().timeIntervalSinceReferenceDate
         // A refused Automation prompt is not going to change its mind in the
         // next second. Before the latch, every poll re-spawned osascript just
         // to be refused again and logged an error each time, forever.
-        guard !denials.isDenied(player.bundleID, now: now) else { return nil }
+        guard !denials.isDenied(player.bundleID, now: now) else { return .unreadable }
 
-        switch await runOsascript(script(for: player)) {
-        case .output(let output):
-            return parse(output, player: player)
-        case .denied(let detail):
+        let result = await runOsascript(script(for: player))
+        if case .denied(let detail) = result {
             denials.recordDenial(player.bundleID, now: now)
             log.notice("""
                 osascript: Automation for \(player.displayName, privacy: .public) is denied \
                 (\(detail, privacy: .public)) — not asking again for \
                 \(Int(AutomationDenialLatch.cooldown), privacy: .public)s
                 """)
-            return nil
+        }
+        return reading(from: result, player: player)
+    }
+
+    /// What one `osascript` run means for the card. Separated from `query` so
+    /// every outcome can be pinned without a player to script: which of them
+    /// count as the player having answered is the whole of the rule.
+    static func reading(from result: ScriptResult, player: Player) -> PlayerReading {
+        switch result {
+        case .output(let output):
+            // The script answers "" for a player that is not running or is
+            // stopped, and that is an answer: nothing is playing there.
+            guard !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return .nothing }
+            // Output that will not parse is not an answer. It is a corrupt or
+            // unexpected sample, and acting on it either way would be a guess.
+            guard let snapshot = parse(output, player: player) else { return .unreadable }
+            return .answered(snapshot)
+        case .denied:
+            // Not allowed to ask, so nothing has been learned about what is
+            // playing.
+            return .unreadable
         case .failed:
-            return nil
+            // A missed deadline, or a process that would not start. The player
+            // was not heard from; it did not say it had nothing.
+            return .unreadable
         }
     }
 
