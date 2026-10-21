@@ -1155,7 +1155,13 @@ public final class LedgeCoordinator {
         // Blank notes left behind by a quit, a crash or a kill while one was
         // open. Closing a window discards its note if it is empty, but nothing
         // closes a window when the process dies under it.
-        Task { [notes] in await notes.discardEmpties() }
+        //
+        // Then the card's titles against the notes, which an index written by
+        // 1.2.1 can have wrong.
+        Task { [notes] in
+            await notes.discardEmpties()
+            await notes.reconcileIndex()
+        }
         runNotesSelfTestIfRequested()
         presentation.audioLevels = { [weak self] in self?.simulatedLevels() ?? [] }
         displayPanels.reconcile()
@@ -3139,6 +3145,7 @@ public final class LedgeCoordinator {
                 for controller in self.displayPanels.all {
                     controller.applyCapturePreference()
                 }
+                self.notesWindow.applyCapturePreference()
                 self.observeLiveEffectPreferences()
             }
         }

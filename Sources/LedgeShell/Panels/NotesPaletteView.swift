@@ -69,7 +69,13 @@ struct NotesPaletteView<Row: View>: View {
         VStack(spacing: 0) {
             field
             Divider().overlay(NoteInk.edge)
-            if count == 0 { empty } else { rows }
+            // The results take whatever the window leaves them, so the keys
+            // keep the line the note's own footer sits on rather than riding
+            // up and down with each keystroke that finds nothing.
+            Group {
+                if count == 0 { empty } else { rows }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
             Divider().overlay(NoteInk.edge)
             hints
         }

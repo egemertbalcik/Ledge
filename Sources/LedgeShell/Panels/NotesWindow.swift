@@ -546,6 +546,23 @@ final class NotesWindowController {
         }
     }
 
+    /// A window full of the user's own writing is exactly the window not to
+    /// put on a shared screen. Follows the same preference the overlay does
+    /// rather than inventing a second rule for the same question.
+    private var captureSharing: NSWindow.SharingType {
+        preferences.hideFromScreenCapture ? .none : .readOnly
+    }
+
+    /// Re-reads "Show Ledge in screenshots and recordings", for when it changes.
+    ///
+    /// The panel is built once, by the warm-up shortly after launch, and kept
+    /// for the session — so reading the setting only while building it left
+    /// the note window capturable all through a screen share that the switch
+    /// had been turned off for.
+    func applyCapturePreference() {
+        panel?.sharingType = captureSharing
+    }
+
     private func makePanel() -> NotesPanel {
         let panel = NotesPanel(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
@@ -591,10 +608,7 @@ final class NotesWindowController {
         // notch is hardware — a note is not, and one that appeared on every
         // desktop would be intrusive.
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        // A window full of the user's own writing is exactly the window not to
-        // put on a shared screen. Follows the same preference the overlay does
-        // rather than inventing a second rule for the same question.
-        panel.sharingType = preferences.hideFromScreenCapture ? .none : .readOnly
+        panel.sharingType = captureSharing
 
         panel.onEscape = { [weak self] in
             guard let self else { return }

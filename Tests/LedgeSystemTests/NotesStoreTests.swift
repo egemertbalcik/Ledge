@@ -561,3 +561,233 @@ struct NotesBlankTests {
         #expect(revived.map { String($0.text.characters) } == "typed after it went")
     }
 }
+
+/// The index is what the card reads at launch, so it has to change when a
+/// note is created, retitled or given a new preview.
+@Suite("The notes index")
+struct NotesIndexTests {
+
+    private func scratch() -> URL {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ledge-notes-tests/\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func indexed(_ dir: URL) -> [String: NoteSummary] {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("index.json")),
+              let list = try? JSONDecoder().decode([NoteSummary].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: list.map { ($0.id, $0) })
+    }
+
+    @Test("A new note is in the index once it has words in it")
+    func newNoteReachesIndex() async throws {
+        let dir = scratch()
+        let store = NotesStore(directory: dir, now: { 1 })
+        let note = await store.create()
+        await store.update(note.id, text: AttributedString("Shopping\nmilk"))
+        await store.flush()
+        try #require(FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(note.id).json").path),
+                     "the note itself was written")
+        #expect(indexed(dir)[note.id]?.title == "Shopping")
+        #expect(indexed(dir)[note.id]?.preview == "milk")
+    }
+
+    @Test("A new note nobody typed in stays out of the index")
+    func blankStaysOutOfIndex() async throws {
+        let dir = scratch()
+        let store = NotesStore(directory: dir, now: { 1 })
+        let kept = await store.create()
+        await store.update(kept.id, text: AttributedString("kept"))
+        let scrap = await store.create()
+        await store.update(scrap.id, text: AttributedString("scrap"))
+        await store.delete(scrap.id)
+        await store.flush()
+        try #require(indexed(dir)[kept.id] != nil, "an index has been written")
+
+        let blank = await store.create()
+        await store.flush()
+        #expect(indexed(dir)[blank.id] == nil)
+    }
+
+    @Test("A retitled note keeps its new title on the card after a relaunch")
+    func retitleSurvivesRelaunch() async throws {
+        let dir = scratch()
+        let clock = OSAllocatedUnfairLock(initialState: TimeInterval(100))
+        let store = NotesStore(directory: dir, now: { clock.withLock { $0 } })
+        let note = await store.create()
+        await store.update(note.id, text: AttributedString("Old title\nold body"))
+        // A delete writes the index whatever else does, so there is one to
+        // go stale.
+        let scrap = await store.create()
+        await store.update(scrap.id, text: AttributedString("scrap"))
+        await store.delete(scrap.id)
+        await store.flush()
+        try #require(indexed(dir)[note.id]?.title == "Old title", "the index lists the note by its old title")
+
+        clock.withLock { $0 = 200 }
+        await store.update(note.id, text: AttributedString("New title\nnew body"))
+        await store.flush()
+        try #require(await store.list().first?.title == "New title", "in session the card says the new title")
+
+        let relaunched = NotesStore(directory: dir, now: { 300 })
+        let summary = await relaunched.list().first { $0.id == note.id }
+        #expect(summary?.title == "New title")
+        #expect(summary?.preview == "new body")
+    }
+
+    @Test("A change under the title reaches the card's preview after a relaunch")
+    func previewSurvivesRelaunch() async throws {
+        let dir = scratch()
+        let store = NotesStore(directory: dir, now: { 1 })
+        let note = await store.create()
+        await store.update(note.id, text: AttributedString("Same title\nold body"))
+        await store.flush()
+        try #require(indexed(dir)[note.id]?.preview == "old body", "the index lists the old preview")
+
+        await store.update(note.id, text: AttributedString("Same title\nnew body"))
+        await store.flush()
+        let relaunched = NotesStore(directory: dir, now: { 2 })
+        #expect(await relaunched.list().first?.preview == "new body")
+    }
+
+    @Test("An index left stale by an older build is corrected by the next edit")
+    func staleIndexHealsOnEdit() async throws {
+        let dir = scratch()
+        let first = NotesStore(directory: dir, now: { 1 })
+        let note = await first.create()
+        let long = "New title\n" + String(repeating: "word ", count: 40)
+        await first.update(note.id, text: AttributedString(long))
+        await first.flush()
+        // What 1.2.1 left behind: the note retitled, the index never told.
+        let stale = [NoteSummary(id: note.id, title: "Old title", preview: "old", editedAt: 1)]
+        try JSONEncoder().encode(stale).write(to: dir.appendingPathComponent("index.json"))
+
+        let relaunched = NotesStore(directory: dir, now: { 2 })
+        try #require(await relaunched.list().first?.title == "Old title", "the card starts from the stale index")
+        // An edit past the end of the preview: neither the title nor the
+        // preview moves, so only comparing with the index can catch it.
+        await relaunched.update(note.id, text: AttributedString(long + "more"))
+        await relaunched.flush()
+        #expect(indexed(dir)[note.id]?.title == "New title")
+    }
+
+    /// What 1.2.1 can leave on disk: a note that says "Current title" listed
+    /// in the index as "Old title", and a second note, listed as newer, whose
+    /// preview alone is out of date.
+    private func staleFolder() throws -> (dir: URL, stale: String, other: String) {
+        let dir = scratch()
+        let stale = NoteBody(id: UUID().uuidString, text: AttributedString("Current title\ncurrent body"),
+                             createdAt: 1, editedAt: 30)
+        let other = NoteBody(id: UUID().uuidString, text: AttributedString("Other\nbody"),
+                             createdAt: 1, editedAt: 20)
+        for note in [stale, other] {
+            try JSONEncoder().encode(note).write(to: dir.appendingPathComponent("\(note.id).json"))
+        }
+        let index = [NoteSummary(id: stale.id, title: "Old title", preview: "old body", editedAt: 10),
+                     NoteSummary(id: other.id, title: "Other", preview: "old", editedAt: 20)]
+        try JSONEncoder().encode(index).write(to: dir.appendingPathComponent("index.json"))
+        return (dir, stale.id, other.id)
+    }
+
+    private func file(_ dir: URL, _ id: String) -> Data? {
+        try? Data(contentsOf: dir.appendingPathComponent("\(id).json"))
+    }
+
+    @Test("Opening a note listed under an old title and closing it untouched corrects the card for good")
+    func openWithoutEditHealsStaleIndex() async throws {
+        let (dir, stale, other) = try staleFolder()
+        let bytes = file(dir, stale)
+        let store = NotesStore(directory: dir, now: { 99 })
+        try #require(await store.list().map(\.title) == ["Other", "Old title"],
+                     "the card starts from the stale index")
+
+        // Open, then the window's close flush: the same text back, and a flush.
+        let body = try #require(await store.body(stale))
+        await store.update(stale, text: body.text)
+        await store.flush()
+
+        let relaunched = NotesStore(directory: dir, now: { 100 })
+        let list = await relaunched.list()
+        #expect(list.map(\.title) == ["Other", "Current title"])
+        #expect(list.map(\.id) == [other, stale])
+        #expect(list.first { $0.id == stale }?.editedAt == 10)
+        #expect(list.first { $0.id == stale }?.preview == "current body")
+        #expect(file(dir, stale) == bytes)
+    }
+
+    @Test("After launch the card's titles are checked against notes nobody has opened")
+    func launchPassHealsUnopenedNotes() async throws {
+        let (dir, stale, other) = try staleFolder()
+        let bytes = file(dir, stale)
+        let store = NotesStore(directory: dir, now: { 99 })
+        try #require(await store.list().first { $0.id == stale }?.title == "Old title",
+                     "the card starts from the stale index")
+
+        let told = OSAllocatedUnfairLock(initialState: 0)
+        await store.setOnChange { told.withLock { $0 += 1 } }
+
+        await store.reconcileIndex()
+        #expect(await store.list().map(\.title) == ["Other", "Current title"])
+        #expect(told.withLock { $0 } > 0, "the card was told")
+        await store.flush()
+
+        let relaunched = NotesStore(directory: dir, now: { 100 })
+        let list = await relaunched.list()
+        #expect(list.map(\.title) == ["Other", "Current title"])
+        #expect(list.map(\.id) == [other, stale])
+        #expect(list.first { $0.id == other }?.preview == "body")
+        #expect(list.first { $0.id == stale }?.editedAt == 10)
+        #expect(file(dir, stale) == bytes)
+    }
+
+    @Test("The launch check leaves alone a note already being written in")
+    func launchPassSkipsHeldNote() async throws {
+        let (dir, stale, _) = try staleFolder()
+        let store = NotesStore(directory: dir, now: { 99 })
+        _ = await store.body(stale)
+        await store.update(stale, text: AttributedString("Typed title\nunsaved"))
+        try #require(await store.list().first { $0.id == stale }?.title == "Typed title",
+                     "the edit is in the listing and not yet on disk")
+
+        await store.reconcileIndex()
+        #expect(await store.list().first { $0.id == stale }?.title == "Typed title")
+    }
+
+    @Test("The launch check tells the card once, however many notes it corrects")
+    func launchPassTellsCardOnce() async throws {
+        let dir = scratch()
+        var index: [NoteSummary] = []
+        for n in 0 ..< 50 {
+            let note = NoteBody(id: UUID().uuidString, text: AttributedString("Current \(n)\nbody"),
+                                createdAt: 1, editedAt: TimeInterval(n))
+            try JSONEncoder().encode(note).write(to: dir.appendingPathComponent("\(note.id).json"))
+            index.append(NoteSummary(id: note.id, title: "Old \(n)", preview: "body", editedAt: TimeInterval(n)))
+        }
+        try JSONEncoder().encode(index).write(to: dir.appendingPathComponent("index.json"))
+        let store = NotesStore(directory: dir, now: { 99 })
+        try #require(await store.list().allSatisfy { $0.title.hasPrefix("Old") }, "all fifty start stale")
+        let told = OSAllocatedUnfairLock(initialState: 0)
+        await store.setOnChange { told.withLock { $0 += 1 } }
+
+        await store.reconcileIndex()
+        try #require(await store.list().allSatisfy { $0.title.hasPrefix("Current") }, "all fifty were corrected")
+        #expect(told.withLock { $0 } == 1)
+
+        await store.reconcileIndex()
+        #expect(told.withLock { $0 } == 1, "a pass that corrects nothing says nothing")
+    }
+
+    @Test("Opening a stale note tells the card straight away")
+    func openTellsCardAtOnce() async throws {
+        let (dir, stale, _) = try staleFolder()
+        let store = NotesStore(directory: dir, now: { 99 })
+        try #require(await store.list().first { $0.id == stale }?.title == "Old title",
+                     "the card starts from the stale index")
+        let told = OSAllocatedUnfairLock(initialState: 0)
+        await store.setOnChange { told.withLock { $0 += 1 } }
+
+        _ = await store.body(stale)
+        #expect(told.withLock { $0 } == 1)
+    }
+}

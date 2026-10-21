@@ -258,12 +258,66 @@ public actor NotesStore {
             }
             bodies[id] = note
             lastWritten[id] = data
+            if reconcileListing(with: note) {
+                scheduleIndexWrite()
+                noteChanged()
+            }
             return note
         } catch {
             quarantine(bodyURL(id), reason: "unreadable")
             Self.log.error("note unreadable — set aside")
             return nil
         }
+    }
+
+    /// Puts the card's title and preview for a note back in line with the
+    /// note itself.
+    ///
+    /// The index is a cache, and 1.2.1 never wrote it on an edit, so an index
+    /// from then can name a note by a title it no longer has. Only the words
+    /// are corrected. The edited time stays as listed, because the card is
+    /// ordered by it and reading a note is not editing it — and the note's own
+    /// file is never written from here.
+    ///
+    /// Says whether anything changed, and leaves telling the card to the
+    /// caller: an open tells it at once, the launch pass once at the end.
+    private func reconcileListing(with note: NoteBody) -> Bool {
+        guard var listed = summaries[note.id] else { return false }
+        let actual = note.summary
+        guard listed.title != actual.title || listed.preview != actual.preview else { return false }
+        listed.title = actual.title
+        listed.preview = actual.preview
+        summaries[note.id] = listed
+        indexDirty = true
+        return true
+    }
+
+    /// Checks every listed note against its file, once, after launch.
+    ///
+    /// Opening a note corrects its own entry, but the card shows notes nobody
+    /// has opened yet. One read per note, off the main actor, a note at a time
+    /// with a yield in between so an open or a keystroke never waits behind the
+    /// whole folder. The bodies are not kept: the card still only needs titles.
+    /// The card is told once, at the end: every change is a fresh sort and
+    /// publication of the whole list, and an old index can be wrong about
+    /// hundreds of notes.
+    public func reconcileIndex() async {
+        load()
+        var changed = false
+        for id in Array(summaries.keys) {
+            await Task.yield()
+            // Held means already read, or written since; either way the
+            // listing came from it and is right.
+            guard bodies[id] == nil, summaries[id] != nil,
+                  let data = try? Data(contentsOf: bodyURL(id)),
+                  let note = try? JSONDecoder().decode(NoteBody.self, from: data),
+                  note.version <= NoteBody.currentVersion
+            else { continue }
+            if reconcileListing(with: note) { changed = true }
+        }
+        guard changed else { return }
+        scheduleIndexWrite()
+        noteChanged()
     }
 
     // MARK: - Writing
@@ -411,11 +465,16 @@ public actor NotesStore {
         note.text = text
         note.editedAt = now()
 
-        let before = note.summary
+        // Compared with what the card lists, not with the note a moment ago.
+        // The note's own summary was taken after the text had changed, so it
+        // never differed and the index was never written; a new note is listed
+        // blank, so its first words are what put it in the index; and an entry
+        // an older build left stale is put right by the next edit.
+        let listed = summaries[id]
         bodies[id] = note
         summaries[id] = note.summary
         dirtyBodies.insert(id)
-        if before.title != note.title || before.preview != note.preview {
+        if listed?.title != note.title || listed?.preview != note.preview {
             indexDirty = true
         }
         if oldestDirtyAt == nil { oldestDirtyAt = ContinuousClock.now }

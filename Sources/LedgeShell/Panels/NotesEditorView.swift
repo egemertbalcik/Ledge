@@ -18,6 +18,11 @@ final class NotesEditorModel: ObservableObject {
     /// when a different one is swapped into the same window.
     @Published private(set) var noteID: String?
 
+    /// Bumped by every `load`, so the view can start the window's undo
+    /// history over once the new text is in the text view. Not the id: the
+    /// same note reopened has the same one.
+    @Published private(set) var loads = 0
+
     /// Told on every change, so the store can take it.
     var onEdit: ((AttributedString) -> Void)?
 
@@ -201,6 +206,7 @@ final class NotesEditorModel: ObservableObject {
         text = Self.rendered(body.text)
         selection = AttributedTextSelection()
         noteID = body.id
+        loads &+= 1
     }
 
     func edited() {
@@ -315,6 +321,9 @@ struct NotesEditorView: View {
     /// point at all. The user sees a window they can type into with no sign of
     /// where the text will go.
     @FocusState private var writing: Bool
+    /// The window's, which is where ⌘Z goes. One for the whole session,
+    /// because the window is.
+    @Environment(\.undoManager) private var undoManager
     /// Puts the window away. The system's own close button is hidden because
     /// the view draws its own header, so without this there is no way out.
     var onClose: () -> Void = {}
@@ -341,6 +350,12 @@ struct NotesEditorView: View {
                 overlay
             }
         }
+        // The window's shape, whatever is in it. The black is drawn behind
+        // this stack in a clear window, so a body shorter than the window — a
+        // list, a search with nothing found — pulled the outline and its
+        // shadow in around it, and every keystroke across "no match" looked
+        // like the window resizing itself.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background {
             // The window reads as a piece of the island that came loose, so it
             // is the same near-black rather than a system material.
@@ -353,6 +368,13 @@ struct NotesEditorView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .animation(.smooth(duration: 0.18), value: model.notice)
+        // A note's history starts when it is loaded. The text view records the
+        // load itself as an edit, and keeps whatever was typed in the note
+        // before, so ⌘Z after a switch put the last note's text into this one
+        // and saved it there — and on the first note of a session undid it
+        // to nothing, which closing then threw away. Here rather than on the
+        // editor: opened from All Notes, the editor is new in this same pass.
+        .onChange(of: model.loads) { _, _ in undoManager?.removeAllActions() }
         // Grows out of the corner nearest the notch, which is where the window
         // came from. Scale and nothing else: the window's own alpha covers the
         // first frame, and a second fade here only muddies it.
