@@ -151,7 +151,9 @@ public final class NowPlayingProvider: ActivityProvider {
     /// knowledge. A minute is long enough to cover a browser handing its slot
     /// around between tabs, and short enough that a player genuinely stopped
     /// does not leave a card sitting there. A track whose length is known
-    /// expires earlier, when it would have ended.
+    /// expires earlier, when it would have ended, and a source that can still
+    /// ask the player ends it the moment the player says it stopped — see
+    /// `NowPlayingHoldingSource`.
     static let nativeHoldWithoutSighting: TimeInterval = 60
 
     /// What the source last reported, whether or not it earned a card.
@@ -160,7 +162,7 @@ public final class NowPlayingProvider: ActivityProvider {
     /// the source would be a second or more of osascript for an answer we
     /// already have, and the question a switch asks is not "what is playing"
     /// but "what is this allowed to do" — see `reconsider()`.
-    private var lastSnapshot: NowPlayingSnapshot?
+    private var lastReading: NowPlayingReading?
 
     /// Whether video may hold the ears. Read fresh on every poll rather than
     /// captured, so turning the toggle off clears the compact view that is up.
@@ -309,8 +311,16 @@ public final class NowPlayingProvider: ActivityProvider {
     /// injected clock instead of three quarters of an hour of real seconds.
     func refreshNow() async {
         let read = beginRead()
-        let snapshot = await source.snapshot()
-        publish(snapshot, from: read)
+        publish(await ask(), from: read)
+    }
+
+    /// One read of the source, with whatever it can say about the player it
+    /// is holding. A source that holds nothing is only ever reporting.
+    private func ask() async -> NowPlayingReading {
+        if let holding = source as? any NowPlayingHoldingSource {
+            return await holding.reading()
+        }
+        return NowPlayingReading(snapshot: await source.snapshot())
     }
 
     /// The user pressed something. Told to the source before the re-read, so a
@@ -333,7 +343,7 @@ public final class NowPlayingProvider: ActivityProvider {
     /// compact switch republishes the same card with the ears released.
     public func reconsider() {
         guard continuation != nil else { return }
-        publish(lastSnapshot, from: beginRead())
+        publish(lastReading ?? NowPlayingReading(snapshot: nil), from: beginRead())
     }
 
     public func refreshSoon() {
@@ -351,9 +361,9 @@ public final class NowPlayingProvider: ActivityProvider {
                 try? await Task.sleep(for: .milliseconds(delayMs))
                 guard let self, !Task.isCancelled, self.run == token else { return }
                 let read = self.beginRead()
-                let snapshot = await self.source.snapshot()
+                let reading = await self.ask()
                 guard !Task.isCancelled else { return }
-                self.publish(snapshot, from: read)
+                self.publish(reading, from: read)
             }
         }
     }
@@ -386,7 +396,7 @@ public final class NowPlayingProvider: ActivityProvider {
         pauses.cardWentAway()
         lastTrackKey = nil
         shownCoverKey = nil
-        lastSnapshot = nil
+        lastReading = nil
         heldNative = nil
     }
 
@@ -419,14 +429,14 @@ public final class NowPlayingProvider: ActivityProvider {
     private func poll(run token: Int) async {
         while !Task.isCancelled {
             let read = beginRead()
-            let snapshot = await source.snapshot()
+            let reading = await ask()
             // The provider may have been stopped — or stopped and started
             // again — during the (seconds-long) osascript wait. Publishing
             // then would plant a stale publishedID into the run that followed.
             guard continuation != nil, !Task.isCancelled, token == run else { return }
-            publish(snapshot, from: read)
+            publish(reading, from: read)
 
-            let interval = self.interval(playing: snapshot?.isPlaying ?? false)
+            let interval = self.interval(playing: reading.snapshot?.isPlaying ?? false)
             do {
                 try await Task.sleep(for: .seconds(interval))
             } catch {
@@ -444,15 +454,22 @@ public final class NowPlayingProvider: ActivityProvider {
     /// published, in which case this one is describing a past the card has left
     /// behind: letting it through is how a button press appeared to be undone a
     /// second after it was made.
-    private func publish(_ snapshot: NowPlayingSnapshot?, from read: Read) {
+    private func publish(_ reading: NowPlayingReading, from read: Read) {
         guard read.run == run, continuation != nil, read.number > publishedRead
         else { return }
         publishedRead = read.number
-        publish(snapshot)
+        publish(reading)
     }
 
-    private func publish(_ reported: NowPlayingSnapshot?) {
-        lastSnapshot = reported
+    private func publish(_ reading: NowPlayingReading) {
+        lastReading = reading
+        let reported = reading.snapshot
+        // The source asked the player we are holding and heard it has stopped,
+        // then answered with something else. Holding on would be holding
+        // against the one thing that could have confirmed it.
+        if let stopped = reading.heardStopped, heldNative?.snapshot.appBundleID == stopped {
+            heldNative = nil
+        }
         // A web page with cards switched off is refused here rather than
         // hidden in the view, so nothing downstream has to know the
         // difference: no activity means no card, no page dot, no selection,
@@ -461,16 +478,16 @@ public final class NowPlayingProvider: ActivityProvider {
         let policy = webMedia()
         var snapshot = reported
         var refusedAsWebContent = false
-        /// Whether what we are about to publish came from the source this poll,
-        /// rather than being the native card we are holding on its behalf.
-        var isReported = true
+        /// Whether what we are about to publish was seen this poll, rather
+        /// than held — by us, or by the source itself.
+        var isSighting = !reading.isHeld
         if let reported, !policy.allowsCard(ownerIsApp: ownerIsApp(reported.appBundleID)) {
             // Hidden, so it gets no card — but it does not get to take the
             // music's card away either. The player that was playing keeps it
             // while that is still credible; see `heldNative`.
             if let held = heldNativeCard(at: now()) {
                 snapshot = held
-                isReported = false
+                isSighting = false
             } else {
                 snapshot = nil
                 refusedAsWebContent = true
@@ -556,15 +573,17 @@ public final class NowPlayingProvider: ActivityProvider {
             Self.log.notice("media: \(snapshot.appBundleID, privacy: .public) playing=\(snapshot.isPlaying, privacy: .public) elapsed=\(snapshot.elapsed, format: .fixed(precision: 1), privacy: .public) title=\(snapshot.title, privacy: .public)")
         }
 
-        if isApp, isReported {
+        if isApp, isSighting {
             // The source is naming a player: this is knowledge, and it
             // replaces whatever was being held.
             //
-            // Only a *reported* snapshot may do this. Storing the substituted
-            // one made every hidden-page poll look like a fresh sighting, so
-            // the sixty seconds restarted a second at a time and a live stream
-            // could have been held for ever — the one thing the bound exists
-            // to prevent.
+            // Only a *sighting* may do this. Storing the substituted one made
+            // every hidden-page poll look like a fresh sighting, so the sixty
+            // seconds restarted a second at a time and a live stream could
+            // have been held for ever — the one thing the bound exists to
+            // prevent. The composite's own held answer is the same thing one
+            // layer down: taken for a sighting, it renewed this hold for as
+            // long as the composite held, and the minute became two.
             heldNative = snapshot.isPlaying ? (snapshot, now()) : nil
         }
 
@@ -622,7 +641,8 @@ public final class NowPlayingProvider: ActivityProvider {
                     snapshot, showsVideo: showsVideo(), webMedia: policy, ownerIsApp: isApp
                 ),
                 isLive: snapshot.isLive,
-                ownerIsApp: isApp
+                ownerIsApp: isApp,
+                transportKey: snapshot.transportKey
             ))
         )))
 

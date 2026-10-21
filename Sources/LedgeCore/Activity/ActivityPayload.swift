@@ -371,6 +371,12 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
     /// one album, sharing a cover, read as the same song.
     public var itemKey: String?
 
+    /// What a seek checks the player is still on: the player's own id for the
+    /// item, present only when its own script said so. Not `itemKey`, which
+    /// is the card's name for the song and may have been kept from a source
+    /// that names it differently. Not `Codable`: it is never in a fixture.
+    public var transportKey: String?
+
     /// Identity of the artwork revision — the item and the cover it has — used
     /// for caching and for equality, so a replaced cover redraws the face
     /// without anything believing the song changed.
@@ -421,9 +427,11 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
         kind: MediaKind = .audio,
         showsInCompact: Bool = true,
         isLive: Bool = false,
-        ownerIsApp: Bool = false
+        ownerIsApp: Bool = false,
+        transportKey: String? = nil
     ) {
         self.ownerIsApp = ownerIsApp
+        self.transportKey = transportKey
         self.title = title
         self.artist = artist
         self.album = album
@@ -455,6 +463,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
             && lhs.sourceName == rhs.sourceName
             && lhs.accent == rhs.accent
             && lhs.itemKey == rhs.itemKey
+            && lhs.transportKey == rhs.transportKey
             && lhs.artworkKey == rhs.artworkKey
             && lhs.kind == rhs.kind
             && lhs.showsInCompact == rhs.showsInCompact
@@ -486,6 +495,7 @@ public struct NowPlayingPayload: Equatable, Sendable, Codable {
         sourceName = try c.decodeIfPresent(String.self, forKey: .sourceName) ?? ""
         accent = try c.decodeIfPresent(AccentColor.self, forKey: .accent) ?? .neutral
         itemKey = try c.decodeIfPresent(String.self, forKey: .itemKey)
+        transportKey = nil
         artworkKey = try c.decodeIfPresent(String.self, forKey: .artworkKey)
         artworkData = nil
         kind = try c.decodeIfPresent(MediaKind.self, forKey: .kind) ?? .audio

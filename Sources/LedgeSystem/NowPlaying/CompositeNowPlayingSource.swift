@@ -26,7 +26,7 @@ import os
 /// touched the transport, or on a slow cadence; between runs the cached answer
 /// is returned with its position projected forward.
 @MainActor
-public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChangePublishing {
+public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChangePublishing, NowPlayingHoldingSource {
 
     /// What the app can currently see, for the one line in Settings that says
     /// so. A demotion used to be invisible: browser media simply stopped
@@ -302,8 +302,14 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// they share one pass, and a pass nobody is still waiting for is never
     /// started at all.
     public func snapshot() async -> NowPlayingSnapshot? {
+        await reading().snapshot
+    }
+
+    /// The answer, and what this read learned about the player it holds.
+    /// See `NowPlayingHoldingSource`.
+    public func reading() async -> NowPlayingReading {
         // Already given up before asking: no pass, no subprocess, nothing.
-        guard !Task.isCancelled else { return nil }
+        guard !Task.isCancelled else { return NowPlayingReading(snapshot: nil) }
         let (pass, ticket) = enlist()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
@@ -336,9 +342,13 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     private func begin(_ pass: ReadPass) {
         passesBegun += 1
         activeTask = Task { @MainActor [weak self] in
-            guard let self else { return pass.finish(with: nil) }
+            guard let self else { return pass.finish(with: NowPlayingReading(snapshot: nil)) }
+            self.thisRead = NowPlayingReading(snapshot: nil)
             let answer = self.keepingOneNamePerSong(await self.read())
-            pass.finish(with: answer)
+            var reading = self.thisRead
+            reading.snapshot = answer
+            self.placeStops(after: reading.isHeld ? nil : answer)
+            pass.finish(with: reading)
             self.activePass = nil
             self.activeTask = nil
             self.advance()
@@ -350,7 +360,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     private func advance() {
         guard activePass == nil, let next = pendingPass else { return }
         pendingPass = nil
-        guard next.hasWaiters else { return next.finish(with: nil) }
+        guard next.hasWaiters else { return next.finish(with: NowPlayingReading(snapshot: nil)) }
         activePass = next
         begin(next)
     }
@@ -366,7 +376,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         guard !pass.hasWaiters else { return }
         if pendingPass === pass {
             pendingPass = nil
-            pass.finish(with: nil)
+            pass.finish(with: NowPlayingReading(snapshot: nil))
             return
         }
         if activePass === pass { activeTask?.cancel() }
@@ -394,14 +404,26 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// different metadata and takes a new name with it.
     private func keepingOneNamePerSong(_ snapshot: NowPlayingSnapshot?) -> NowPlayingSnapshot? {
         guard var snapshot else { return nil }
-        let song = "\(snapshot.title)\u{1F}\(snapshot.artist)\u{1F}\(snapshot.album)"
-        let player = snapshot.appBundleID
-        if let known = namedSongs[player], known.song == song {
-            snapshot.trackKey = known.key
-            return snapshot
+        let name = outgoingName(snapshot)
+        if name == snapshot.trackKey {
+            namedSongs[snapshot.appBundleID] = (snapshot.trackKey, Self.song(snapshot))
         }
-        namedSongs[player] = (snapshot.trackKey, song)
+        snapshot.trackKey = name
         return snapshot
+    }
+
+    /// The name this snapshot would go out with if it were answered now,
+    /// without naming anything: what a stop is placed against, when the item
+    /// it was heard for is not the one on the way out.
+    private func outgoingName(_ snapshot: NowPlayingSnapshot) -> String {
+        if let known = namedSongs[snapshot.appBundleID], known.song == Self.song(snapshot) {
+            return known.key
+        }
+        return snapshot.trackKey
+    }
+
+    private static func song(_ snapshot: NowPlayingSnapshot) -> String {
+        "\(snapshot.title)\u{1F}\(snapshot.artist)\u{1F}\(snapshot.album)"
     }
 
     private func read() async -> NowPlayingSnapshot? {
@@ -503,6 +525,38 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// The last answer that was actually playing, kept so a different item
     /// arriving *paused* cannot take its place.
     private var heldPlaying: (snapshot: NowPlayingSnapshot, at: TimeInterval)?
+
+    /// What the read in progress has learned beyond its answer: whether the
+    /// answer is a held player, and which player it heard stop. One is enough
+    /// because only one pass is ever inside `read`.
+    private var thisRead = NowPlayingReading(snapshot: nil)
+
+    /// Each stop the scripting source has heard, placed against the item it
+    /// was heard for, and whether a different item has played since.
+    ///
+    /// A stop is about one item, not the player for ever. Kept against the
+    /// whole player, Music stopping one track took the hold away from the
+    /// next one it played, while the scripted reads that could have said so
+    /// were failing. A repeat of the *same* item does not lift it: the
+    /// adapter goes on describing a stopped track as playing, and that stale
+    /// copy is exactly what the stop exists to overrule.
+    private var stops: [String: (number: Int, item: String?, outlived: Bool)] = [:]
+
+    /// The item each player was last answered with, as named on the way out.
+    private var lastItem: [String: String] = [:]
+
+    /// The item a read aimed at one player was asking about when that player
+    /// answered nothing, by stop number.
+    ///
+    /// Taken where the question is asked, because the answer that finally
+    /// goes out may be another player's: with Spotify holding the notch, the
+    /// stop heard while asking Music about New was placed against whatever
+    /// Music was last shown with, and New — never shown, never heard playing
+    /// — later counted as a different item and outlived its own stop.
+    ///
+    /// One per player, overwritten by the next; a target is only read for
+    /// the stop number it was taken with, and each number is placed once.
+    private var stopTargets: [String: (number: Int, item: String)] = [:]
 
     /// How long after last being seen playing a track keeps the notch against
     /// anything else the system names.
@@ -619,11 +673,11 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
                 // all is where this gives up.
                 if now - held.at < Self.appHoldAgainstPage,
                    await stillPlaying(held.snapshot, at: now) {
-                    return Self.projecting(held.snapshot, from: held.at, to: now)
+                    return holding(held, at: now)
                 }
             } else if now - held.at < Self.heldGrace,
                       !corroborated(answered, heldBundleID: held.snapshot.appBundleID, at: now) {
-                return Self.projecting(held.snapshot, from: held.at, to: now)
+                return holding(held, at: now)
             }
         }
         challenger = nil
@@ -642,11 +696,25 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // first is still going, it keeps the notch and the newcomer waits —
         // unless the newcomer is the thing the user has just started, which is
         // what two players sounding at once nearly always means.
-        if let held = await fallback(at: now),
-           held.isPlaying,
-           held.appBundleID == incumbent?.bundleID {
-            guard handsOver(from: held, to: answered, at: now) else { return held }
-            Self.log.notice("now playing: \(answered.appBundleID, privacy: .public) took the notch from \(held.appBundleID, privacy: .public) — both playing")
+        //
+        // A stop the player has given is its latest word, so it is asked
+        // before the fallback's answer, which may be cached from earlier.
+        let incumbentID = incumbent?.bundleID
+        let scripted = await fallback(at: now)
+        if let incumbentID, saidNothing(incumbentID) {
+            // Stopped behind the newcomer: the same as paused, for a player
+            // that answered it has nothing loaded rather than a paused track.
+            thisRead.heardStopped = incumbentID
+        } else if let held = scripted,
+           held.appBundleID == incumbentID {
+            if held.isPlaying {
+                guard handsOver(from: held, to: answered, at: now) else { return held }
+                Self.log.notice("now playing: \(answered.appBundleID, privacy: .public) took the notch from \(held.appBundleID, privacy: .public) — both playing")
+            } else {
+                // Paused behind the newcomer. Passed on with the answer, so
+                // nothing downstream goes on holding the player for us.
+                thisRead.heardStopped = held.appBundleID
+            }
         }
 
         incumbent = answered.isPlaying ? (answered.appBundleID, now) : nil
@@ -754,16 +822,63 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// player the system has stopped naming. Three answers:
     ///
     /// - it names this player and says playing: hold the notch;
-    /// - it names this player and says paused: the user paused it, and the
+    /// - it names this player and says paused, or this player answered that
+    ///   nothing is playing at all: the user paused or stopped it, and the
     ///   page is welcome to the notch now;
     /// - it says nothing useful (no Automation permission, or a player it
     ///   cannot script): no information, so the hold stands until
     ///   `appHoldAgainstPage` runs out.
     private func stillPlaying(_ held: NowPlayingSnapshot, at now: TimeInterval) async -> Bool {
+        // The player's latest word, whichever read heard it, before a cached
+        // fallback answer that may predate it — and before the adapter, whose
+        // playing snapshot of a stopped player is all that put it here.
+        if saidNothing(held.appBundleID) { return false }
         guard let scripted = await fallback(at: now),
               scripted.appBundleID == held.appBundleID
-        else { return true }
+        else { return !saidNothing(held.appBundleID) }
         return scripted.isPlaying
+    }
+
+    /// Whether this player's latest answer to the scripting source was that
+    /// nothing is playing at all — stopped, which is as final as paused. Nil
+    /// from either read is otherwise only "no information"; this is the one
+    /// kind of nil that is an answer.
+    private func saidNothing(_ bundleID: String) -> Bool {
+        guard let number = stopsHeard[bundleID] else { return false }
+        // Heard during this read, so not yet placed: it is about whatever the
+        // player has now.
+        guard let stop = stops[bundleID], stop.number == number else { return true }
+        return !stop.outlived
+    }
+
+    private var stopsHeard: [String: Int] {
+        (scripting as? ScriptingNowPlayingSource)?.stopsHeard ?? [:]
+    }
+
+    /// Places each new stop against the item it was heard for, and lets a
+    /// different item that has played since outlive it. Called once a read
+    /// has its answer, with nil when that answer was held rather than seen.
+    ///
+    /// Compared on the name the answer goes out with, after
+    /// `keepingOneNamePerSong`: the adapter and the script name one song
+    /// differently, and a stale adapter copy of the stopped track must read
+    /// as the same item, not a new one.
+    private func placeStops(after seen: NowPlayingSnapshot?) {
+        let heard = stopsHeard
+        stops = stops.filter { heard[$0.key] != nil }
+        for (bundleID, number) in heard where stops[bundleID]?.number != number {
+            // The item the read aimed at the player was asking about, and for
+            // a stop heard with no such question — the scan of every player —
+            // the one it was last answered with.
+            let target = stopTargets[bundleID]
+            let item = target?.number == number ? target?.item : lastItem[bundleID]
+            stops[bundleID] = (number, item, false)
+        }
+        guard let seen else { return }
+        if seen.isPlaying, let stop = stops[seen.appBundleID], stop.item != seen.trackKey {
+            stops[seen.appBundleID]?.outlived = true
+        }
+        lastItem[seen.appBundleID] = seen.trackKey
     }
 
     /// Keeps the last playing answer, which is what a paused newcomer is
@@ -779,6 +894,16 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         }
     }
 
+
+    /// The held player as this read's answer, marked as held: nothing saw it
+    /// this time, and whoever reads this must not take it for a sighting.
+    private func holding(
+        _ held: (snapshot: NowPlayingSnapshot, at: TimeInterval),
+        at now: TimeInterval
+    ) -> NowPlayingSnapshot {
+        thisRead.isHeld = true
+        return Self.projecting(held.snapshot, from: held.at, to: now)
+    }
 
     /// A held snapshot with its position moved forward, so the scrub bar keeps
     /// running while the system is looking somewhere else.
@@ -836,6 +961,12 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
 
         // Nothing to cache: the player quit, or is not ours to script.
         scriptedByPlayer[bundleID] = nil
+        // Or it answered that nothing is playing. The question was about this
+        // item, so that is whose stop it is, whatever the notch ends up
+        // showing.
+        if let number = stopsHeard[bundleID] {
+            stopTargets[bundleID] = (number, outgoingName(fromAdapter))
+        }
         return fromAdapter
     }
 
@@ -974,7 +1105,7 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
 /// has someone waiting even in the turn between being chosen and being joined.
 private final class ReadPass: @unchecked Sendable {
 
-    typealias Waiter = CheckedContinuation<NowPlayingSnapshot?, Never>
+    typealias Waiter = CheckedContinuation<NowPlayingReading, Never>
 
     /// What a departing waiter left behind.
     enum Departure {
@@ -991,9 +1122,8 @@ private final class ReadPass: @unchecked Sendable {
         var waiting: Set<Int> = []
         var attached: [Int: Waiter] = [:]
         var nextTicket = 0
-        /// The answer, once there is one. Doubly optional: the outer layer is
-        /// "has this pass finished", the inner one "was anything playing".
-        var answer: NowPlayingSnapshot??
+        /// The answer, once there is one.
+        var answer: NowPlayingReading?
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -1015,12 +1145,12 @@ private final class ReadPass: @unchecked Sendable {
     /// Hands over the continuation to resume when the pass is done — or
     /// straight away, if the pass finished or the caller gave up first.
     func attach(_ continuation: Waiter, to ticket: Int) {
-        let answerNow = state.withLock { s -> NowPlayingSnapshot?? in
+        let answerNow = state.withLock { s -> NowPlayingReading? in
             if let answer = s.answer {
                 s.waiting.remove(ticket)
-                return .some(answer)
+                return answer
             }
-            guard s.waiting.contains(ticket) else { return .some(nil) }
+            guard s.waiting.contains(ticket) else { return NowPlayingReading(snapshot: nil) }
             s.attached[ticket] = continuation
             return nil
         }
@@ -1034,19 +1164,55 @@ private final class ReadPass: @unchecked Sendable {
             s.waiting.remove(ticket)
             return (s.attached.removeValue(forKey: ticket), !s.waiting.isEmpty)
         }
-        continuation?.resume(returning: nil)
+        continuation?.resume(returning: NowPlayingReading(snapshot: nil))
         return remaining ? .othersRemain : .lastOneOut
     }
 
     /// The pass is over. Everyone still waiting gets the same answer, and
     /// anyone who joins afterwards gets it immediately rather than hanging.
-    func finish(with answer: NowPlayingSnapshot?) {
+    func finish(with answer: NowPlayingReading) {
         let waiters = state.withLock { s -> [Waiter] in
-            s.answer = .some(answer)
+            s.answer = answer
             s.waiting.removeAll()
             defer { s.attached.removeAll() }
             return Array(s.attached.values)
         }
         for waiter in waiters { waiter.resume(returning: answer) }
+    }
+}
+
+/// A source that sometimes answers with a player it is holding rather than one
+/// it saw.
+///
+/// The composite keeps an app's media on the notch while a page holds the
+/// system's one now-playing slot, and lets go on its own terms: the player
+/// saying paused, or a minute without a sighting. Its held answer used to reach
+/// the provider looking like a fresh report, so the provider held the player
+/// again on its own account — a second minute on top of the first, and a pause
+/// the composite had already heard went on showing as "playing".
+@MainActor
+public protocol NowPlayingHoldingSource: NowPlayingSource {
+    func reading() async -> NowPlayingReading
+}
+
+/// One answer from a `NowPlayingHoldingSource`, and what the read learned
+/// besides.
+public struct NowPlayingReading: Equatable, Sendable {
+
+    public var snapshot: NowPlayingSnapshot?
+
+    /// The answer is a player held against whatever the system named
+    /// instead, moved forward from when it was last seen. Not a sighting.
+    public var isHeld: Bool
+
+    /// A player this read asked directly and heard is not playing, while it
+    /// answered with something else. Anything still holding that player
+    /// stands in for knowledge that has now arrived.
+    public var heardStopped: String?
+
+    public init(snapshot: NowPlayingSnapshot?, isHeld: Bool = false, heardStopped: String? = nil) {
+        self.snapshot = snapshot
+        self.isHeld = isHeld
+        self.heardStopped = heardStopped
     }
 }

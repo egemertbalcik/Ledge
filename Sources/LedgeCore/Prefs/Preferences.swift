@@ -260,6 +260,16 @@ public enum Prefs {
     /// somebody looking for one.
     public static let accessibilityWasAsked = PrefKey<Bool>("general.accessibilityAsked", default: false)
 
+    /// Whether the user has pressed Automation in the Permissions tab.
+    ///
+    /// Until then nothing sends Music or Spotify an Apple Event, and nothing
+    /// asks the system about the grant: on macOS 26 either one can be the
+    /// Automation dialog itself. Written down because the press is consent to
+    /// be asked, and that has to outlast the launch it happened in. Finishing
+    /// the tour used to count instead, and put the dialog up with no button
+    /// pressed.
+    public static let automationWasAsked = PrefKey<Bool>("general.automationAsked", default: false)
+
     /// A security-scoped bookmark to the Focus database folder, base64 encoded.
     ///
     /// Written when the user picks `~/Library/DoNotDisturb/DB` in an open
@@ -444,12 +454,14 @@ public final class Preferences {
     public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
     public var tourPage: Double { didSet { persist(tourPage, Prefs.tourPage) } }
     public var accessibilityWasAsked: Bool { didSet { persist(accessibilityWasAsked, Prefs.accessibilityWasAsked) } }
+    public var automationWasAsked: Bool { didSet { persist(automationWasAsked, Prefs.automationWasAsked) } }
     public var focusFolderBookmark: String { didSet { persist(focusFolderBookmark, Prefs.focusFolderBookmark) } }
     public var debugTint: Bool { didSet { persist(debugTint, Prefs.debugTint) } }
 
     public init(store: PreferenceStoring) {
         self.store = store
         WebMediaMigration.run(store: store)
+        AutomationMigration.run(store: store)
         store.removeAll(named: Prefs.retiredNames)
         bottomRadius = store.value(for: Prefs.bottomRadius)
         closedBottomRadius = store.value(for: Prefs.closedBottomRadius)
@@ -506,6 +518,7 @@ public final class Preferences {
         hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
         tourPage = store.value(for: Prefs.tourPage)
         accessibilityWasAsked = store.value(for: Prefs.accessibilityWasAsked)
+        automationWasAsked = store.value(for: Prefs.automationWasAsked)
         focusFolderBookmark = store.value(for: Prefs.focusFolderBookmark)
         debugTint = store.value(for: Prefs.debugTint)
     }

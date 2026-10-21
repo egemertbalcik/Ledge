@@ -77,7 +77,13 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    public override init() { super.init() }
+    /// Where the Automation press is remembered — see `mayAskAboutPlayers`.
+    private let preferences: Preferences
+
+    public init(preferences: Preferences) {
+        self.preferences = preferences
+        super.init()
+    }
 
     /// A location manager with this object as its delegate. macOS will not show
     /// the authorization prompt for a manager that has no delegate set, so every
@@ -218,13 +224,19 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
 
     /// Whether this app may talk to Music or Spotify yet.
     ///
-    /// Set false until the welcome tour has been through, because the query is
-    /// not as silent as its `askUserIfNeeded: false` promises: on macOS 26 the
-    /// first one against an undecided app raises the Automation dialog. A
-    /// fresh user met that dialog seconds after launch, before anything had
+    /// False until the user has pressed Automation in the Permissions tab,
+    /// because the query is not as silent as its `askUserIfNeeded: false`
+    /// promises: on macOS 26 the first one against an undecided app raises
+    /// the Automation dialog, and so does the first read of a player. A fresh
+    /// user met that dialog seconds after launch, before anything had
     /// explained what Ledge was — and answering it wrongly is the one mistake
     /// TCC will not let them take back from inside the app.
-    public var mayAskAboutPlayers = false
+    ///
+    /// Finishing the tour used to open this. The tour never mentions
+    /// Automation, so the dialog still came with no button pressed: a few
+    /// seconds after the tour closed, or at a returning user's launch. The
+    /// press is remembered, so it is asked for once, not once per launch.
+    public var mayAskAboutPlayers: Bool { preferences.automationWasAsked }
 
     /// When the last Apple Event query was started. Every other permission is
     /// a local read; this one is an IPC round-trip to another application, and
@@ -433,7 +445,7 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             // queries were held back (see `mayAskAboutPlayers`), which also
             // meant the status could only ever read "not requested" — so
             // granting it here could never show up in the row that asked.
-            mayAskAboutPlayers = true
+            preferences.automationWasAsked = true
             await requestAutomation()
             // The answer arrives on a background query; make sure the next
             // reading actually runs one rather than serving the rate-limited

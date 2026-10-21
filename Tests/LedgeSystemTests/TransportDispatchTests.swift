@@ -47,7 +47,7 @@ struct TransportDispatchTests {
 
     @Test("A saturated queue reports busy, not unsupported")
     func saturatedQueueReportsBusy() {
-        let commander = NowPlayingCommander()
+        let commander = NowPlayingCommander.allowingAutomation()
         Self.withFullQueue {
             #expect(
                 commander.sendViaScripting(.playPause, to: Self.spotify)
@@ -63,7 +63,7 @@ struct TransportDispatchTests {
 
     @Test("A player with no scripting dictionary is unsupported, whatever the queue")
     func browserIsUnsupported() {
-        let commander = NowPlayingCommander()
+        let commander = NowPlayingCommander.allowingAutomation()
         #expect(
             commander.sendViaScripting(.playPause, to: Self.browser)
                 == NowPlayingCommander.ScriptingDispatch.unsupported
@@ -82,7 +82,7 @@ struct TransportDispatchTests {
     /// fallback. So an unmoved stamp is proof the fallback was not taken.
     @Test("A saturated Spotify queue never reaches MediaRemote")
     func saturatedQueueNeverFallsBack() {
-        let commander = NowPlayingCommander()
+        let commander = NowPlayingCommander.allowingAutomation()
         Self.withFullQueue {
             let before = NowPlayingCommander.lastCommandAt
             for _ in 0..<20 {
@@ -102,7 +102,7 @@ struct TransportDispatchTests {
 
     @Test("A saturated Music queue never reaches MediaRemote either")
     func saturatedMusicQueueNeverFallsBack() {
-        let commander = NowPlayingCommander()
+        let commander = NowPlayingCommander.allowingAutomation()
         Self.withFullQueue {
             let before = NowPlayingCommander.lastCommandAt
             for _ in 0..<20 {
@@ -155,7 +155,7 @@ struct TransportDispatchTests {
 /// spoken to — eight commands may be waiting and a player that has stopped
 /// answering holds each for up to five seconds — so the source re-read, got
 /// the state from before the press, and cached that as fresh.
-@Suite("When a transport command marks the reading stale", .serialized)
+@Suite("When a transport command marks the reading stale", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct TransportDispatchTimingTests {
 
@@ -173,9 +173,12 @@ struct TransportDispatchTimingTests {
             NowPlayingCommander.commands = originalQueue
         }
 
-        let commander = NowPlayingCommander()
+        let commander = NowPlayingCommander.allowingAutomation()
         #expect(commander.send(.playPause, to: Self.spotify) == .queued)
-        for _ in 0..<10_000 where !gate.isWaiting { await Task.yield() }
+        // However long the runner takes to pick it up: ten thousand yields
+        // ran out on a loaded machine. The suite's time limit catches a
+        // command that never reaches the player.
+        while !gate.isWaiting, !Task.isCancelled { await Task.yield() }
         #expect(gate.isWaiting, "the first command never reached the player")
 
         // A second press queues behind a player that is not answering.
@@ -228,6 +231,18 @@ private final class ScriptGate: @unchecked Sendable {
     }
 }
 
+extension NowPlayingCommander {
+    /// A commander for a player that has answered a read, which is what
+    /// these suites are about. Whether Automation allows it is its own suite.
+    static func allowingAutomation() -> NowPlayingCommander {
+        NowPlayingCommander(
+            systemOwner: { nil },
+            dispatchGlobally: { MediaRemoteBridge.send($0) },
+            automationAllows: { _ in true }
+        )
+    }
+}
+
 /// Records what actually went out globally, so the paths that must send
 /// nothing can be held to it.
 @MainActor
@@ -235,10 +250,11 @@ private final class Dispatches {
 
     private(set) var commands: [NowPlayingCommand] = []
 
-    func commander(owner: String?) -> NowPlayingCommander {
+    func commander(owner: String?, automationAllows: Bool = true) -> NowPlayingCommander {
         NowPlayingCommander(
             systemOwner: { owner },
-            dispatchGlobally: { self.commands.append($0) }
+            dispatchGlobally: { self.commands.append($0) },
+            automationAllows: { _ in automationAllows }
         )
     }
 }
@@ -326,15 +342,21 @@ struct GlobalTransportTargetingTests {
 /// seams are shared statics that the other transport suites swap, and a test
 /// that awaited with them swapped raced those suites when run together.
 @Suite("A seek is scoped to the song it was asked on")
+@MainActor
 struct SeekScopeTests {
 
+    private static let spotify = ScriptingNowPlayingSource.players.first {
+        $0.bundleID == "com.spotify.client"
+    }!
+
     private func script(_ command: NowPlayingCommand) -> String {
-        NowPlayingCommander.transportScript(command, scriptName: "Spotify")
+        NowPlayingCommander.transportScript(command, for: Self.spotify)
     }
 
     @Test("The script checks the track before it writes the position")
     func theScriptGuardsTheTrack() {
-        let script = script(.seek(150, item: "spotify:track:abc"))
+        // The key the card actually sends: the player's id, filed under it.
+        let script = script(.seek(150, item: "com.spotify.client|spotify:track:abc"))
         #expect(script.contains("spotify:track:abc"))
         #expect(script.contains("id of current track"))
         #expect(script.contains("set player position to 150.000"))
@@ -356,7 +378,7 @@ struct SeekScopeTests {
 
     @Test("A track id cannot close the string it is written into")
     func aTrackIdIsEscaped() {
-        let script = script(.seek(10, item: "a\" & (do shell script \"echo\") & \"b"))
+        let script = script(.seek(10, item: "com.spotify.client|a\" & (do shell script \"echo\") & \"b"))
         // Every quote the id carried is escaped, so the whole of it stays
         // inside one string literal and none of it can be read as code.
         let literal = #""a\" & (do shell script \"echo\") & \"b""#
@@ -369,5 +391,133 @@ struct SeekScopeTests {
         #expect(script(.next).contains("next track"))
         #expect(script(.previous).contains("previous track"))
         #expect(script(.next).contains("tell application \"Spotify\""))
+    }
+}
+
+/// What the card's buttons do for Spotify and Music without Automation.
+///
+/// Every press went to `osascript`. With Automation refused it was refused in
+/// turn and nothing happened; with it undecided the press was what raised the
+/// Automation dialog. The README says the card still works without it, so a
+/// player Automation is not known to allow goes the system's way instead —
+/// under the same rule as any other unaddressed command.
+@Suite("Transport without Automation", .serialized)
+@MainActor
+struct TransportWithoutAutomationTests {
+
+    private static let spotify = "com.spotify.client"
+    private static let music = "com.apple.Music"
+    private static let browser = "com.apple.Safari"
+
+    /// Runs the body with `osascript` replaced by a recorder, and returns
+    /// every script it queued once the queue has drained. The queue captures
+    /// the runner at admission, so nothing queued here can reach a player —
+    /// and the swap is undone before the wait, so another suite's commands
+    /// never land in this recorder.
+    private static func scriptsRun(_ body: () -> Void) async -> [String] {
+        let ran = OSAllocatedUnfairLock(initialState: [String]())
+        let original = NowPlayingCommander.runScript
+        NowPlayingCommander.runScript = { source in ran.withLock { $0.append(source) } }
+        body()
+        NowPlayingCommander.runScript = original
+        await NowPlayingCommander.commands.drain()
+        return ran.withLock { $0 }
+    }
+
+    @Test("A Spotify press goes to the system when Spotify owns its slot")
+    func pressGoesToTheSystem() async {
+        let sent = Dispatches()
+        let commander = sent.commander(owner: Self.spotify, automationAllows: false)
+        var answer: NowPlayingDispatch?
+        let scripted = await Self.scriptsRun {
+            answer = commander.send(.playPause, to: Self.spotify)
+        }
+        // Reached: the press was answered as sent, not dropped.
+        #expect(answer == .unconfirmed)
+        #expect(answer?.wasSent == true)
+        #expect(sent.commands == [.playPause], "the press never reached MediaRemote")
+        #expect(scripted.isEmpty, "an Apple Event went to a player Automation does not allow")
+    }
+
+    @Test("The commander the app builds asks the latch, so a never-heard-from Spotify is not scripted")
+    func theAppsCommanderAsksTheLatch() async throws {
+        // Reached: nothing in this process has had an answer from Spotify.
+        try #require(ScriptingNowPlayingSource.isKnownAllowed(Self.spotify) == false)
+        var globals: [NowPlayingCommand] = []
+        let commander = NowPlayingCommander(
+            systemOwner: { Self.spotify },
+            dispatchGlobally: { globals.append($0) }
+        )
+        var answer: NowPlayingDispatch?
+        let scripted = await Self.scriptsRun {
+            answer = commander.send(.playPause, to: Self.spotify)
+        }
+        #expect(answer == .unconfirmed)
+        #expect(globals == [.playPause])
+        #expect(scripted.isEmpty)
+    }
+
+    @Test("Next, previous and a seek take the same way, for Music too")
+    func everyCommandTakesTheSystemPath() async {
+        let sent = Dispatches()
+        let commander = sent.commander(owner: Self.music, automationAllows: false)
+        let commands: [NowPlayingCommand] = [.next, .previous, .seek(30, item: "com.apple.Music|41234")]
+        var answers: [NowPlayingDispatch] = []
+        let scripted = await Self.scriptsRun {
+            answers = commands.map { commander.send($0, to: Self.music) }
+        }
+        #expect(answers == [.unconfirmed, .unconfirmed, .unconfirmed])
+        #expect(sent.commands == commands)
+        #expect(scripted.isEmpty)
+    }
+
+    @Test("Without Automation a press is still refused when the system points elsewhere")
+    func stillRefusedForAnotherOwner() async {
+        // MediaRemote would toggle the browser tab, not the Spotify card.
+        let sent = Dispatches()
+        let commander = sent.commander(owner: Self.browser, automationAllows: false)
+        var answer: NowPlayingDispatch?
+        let scripted = await Self.scriptsRun {
+            answer = commander.send(.playPause, to: Self.spotify)
+        }
+        #expect(answer == .wrongPlayer)
+        #expect(scripted.isEmpty)
+        #expect(sent.commands.isEmpty, "a command was aimed at a player nobody asked for")
+    }
+
+    @Test("A player Automation allows is still scripted, and never sent globally")
+    func allowedPlayerIsScripted() {
+        let sent = Dispatches()
+        let commander = sent.commander(owner: Self.spotify, automationAllows: true)
+        TransportDispatchTests.withoutTouchingAnyPlayer {
+            #expect(commander.send(.playPause, to: Self.spotify) == .queued)
+        }
+        #expect(sent.commands.isEmpty)
+    }
+
+    @Test("Only an answer makes a player known to allow it, and a refusal takes that back")
+    func knowledgeComesFromAnswers() throws {
+        // A player of its own, so the shared latch other suites read is
+        // never touched by this one.
+        let player = ScriptingNowPlayingSource.Player(
+            bundleID: "test.automation.\(UUID().uuidString)",
+            displayName: "Test", scriptName: "Test",
+            durationIsMilliseconds: false, hasArtworkURL: false
+        )
+        let id = player.bundleID
+        #expect(ScriptingNowPlayingSource.isKnownAllowed(id) == false, "undecided must not count as allowed")
+
+        let now = Date().timeIntervalSinceReferenceDate
+        // Nothing playing, a missed deadline: neither says Automation is granted.
+        ScriptingNowPlayingSource.learn(from: .output(""), reading: .nothing, player: player, now: now)
+        ScriptingNowPlayingSource.learn(from: .failed, reading: .unreadable, player: player, now: now)
+        #expect(ScriptingNowPlayingSource.isKnownAllowed(id) == false)
+
+        let answered = NowPlayingSnapshot(title: "T", artist: "A", appName: "Test", appBundleID: id)
+        ScriptingNowPlayingSource.learn(from: .output("x"), reading: .answered(answered), player: player, now: now)
+        try #require(ScriptingNowPlayingSource.isKnownAllowed(id), "an answer did not count")
+
+        ScriptingNowPlayingSource.learn(from: .denied("-1743"), reading: .unreadable, player: player, now: now)
+        #expect(ScriptingNowPlayingSource.isKnownAllowed(id) == false, "a refusal left the player allowed")
     }
 }

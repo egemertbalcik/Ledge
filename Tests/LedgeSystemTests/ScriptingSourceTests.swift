@@ -99,6 +99,45 @@ struct AutomationDenialLatchTests {
         #expect(afterEnd == false)
     }
 
+    @Test("A player is known to allow Automation only once it has answered")
+    func allowedOnlyAfterAnAnswer() {
+        var latch = AutomationDenialLatch()
+        let undecided = latch.isKnownAllowed("com.spotify.client", now: 0)
+        #expect(undecided == false, "a player never heard from counted as allowed")
+        latch.recordAnswer("com.spotify.client")
+        let answered = latch.isKnownAllowed("com.spotify.client", now: 0)
+        let other = latch.isKnownAllowed("com.apple.Music", now: 0)
+        #expect(answered)
+        #expect(other == false)
+    }
+
+    @Test("A refusal outlives its cooldown as undecided, not allowed")
+    func refusalForgetsTheAnswer() {
+        var latch = AutomationDenialLatch()
+        let cooldown = AutomationDenialLatch.cooldown
+        latch.recordAnswer("com.apple.Music")
+        latch.recordDenial("com.apple.Music", now: 0)
+        // Reached: the refusal has lapsed, so the latch no longer says denied.
+        let lapsed = latch.isDenied("com.apple.Music", now: cooldown + 1)
+        #expect(lapsed == false)
+        // The grant was taken back; only a new answer can restore it, or a
+        // play button would send an Apple Event to a player that said no.
+        let allowed = latch.isKnownAllowed("com.apple.Music", now: cooldown + 1)
+        #expect(allowed == false)
+    }
+
+    @Test("A grant clears refusals and keeps what has answered")
+    func forgettingDenialsKeepsAnswers() {
+        var latch = AutomationDenialLatch()
+        latch.recordAnswer("com.spotify.client")
+        latch.recordDenial("com.apple.Music", now: 0)
+        latch.forgetDenials()
+        let music = latch.isDenied("com.apple.Music", now: 1)
+        let spotify = latch.isKnownAllowed("com.spotify.client", now: 1)
+        #expect(music == false)
+        #expect(spotify)
+    }
+
     @Test("Denying one player does not silence the other")
     func perPlayer() {
         var latch = AutomationDenialLatch()
@@ -477,5 +516,41 @@ struct ScriptingHeldAnswerIsolationTests {
         script.clock += 1
         script.byPlayer["com.spotify.client"] = .unreadable
         #expect(await source.snapshot() == nil)
+    }
+
+    /// The stop is the player's word, whichever read heard it, and it stands
+    /// until the player says something else. A read of every player stops at
+    /// the first one playing, so it must not forget a stop it never asked
+    /// about; and silence, or not being allowed to ask, is not something else.
+    @Test("A stop is kept for its player until that player answers again")
+    func stopIsKeptUntilThePlayerAnswers() async throws {
+        let script = Script()
+        var mayAsk = true
+        let source = ScriptingNowPlayingSource(
+            mayQueryPlayers: { mayAsk },
+            availablePlayers: { [Self.spotify, Self.music] },
+            readPlayer: { player in script.byPlayer[player.bundleID] ?? .nothing },
+            now: { script.clock }
+        )
+        script.byPlayer["com.apple.Music"] = .nothing
+        script.byPlayer["com.spotify.client"] = .answered(snapshot("com.spotify.client", "karambol", playing: true))
+
+        #expect(await source.snapshot(forBundleID: "com.apple.Music") == nil)
+        try #require(source.answeredNothing == ["com.apple.Music"], "reached: the targeted read heard Music stop")
+
+        let everyone = await source.snapshot()
+        try #require(everyone?.appBundleID == "com.spotify.client", "reached: the scan stopped at Spotify")
+        #expect(source.answeredNothing == ["com.apple.Music"], "and did not forget Music")
+
+        script.byPlayer["com.apple.Music"] = .unreadable
+        _ = await source.snapshot(forBundleID: "com.apple.Music")
+        mayAsk = false
+        _ = await source.snapshot()
+        #expect(source.answeredNothing == ["com.apple.Music"], "nor did silence, or not being allowed to ask")
+
+        mayAsk = true
+        script.byPlayer["com.apple.Music"] = .answered(snapshot("com.apple.Music", "Sonata", playing: true))
+        _ = await source.snapshot(forBundleID: "com.apple.Music")
+        #expect(source.answeredNothing.isEmpty, "Music answering again is what retires it")
     }
 }

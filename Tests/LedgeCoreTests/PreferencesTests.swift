@@ -51,17 +51,22 @@ struct PreferencesTests {
         // is one preference (`@Observable` stores them as `_name`, and its
         // own registrar as `_$observationRegistrar`), and every one of them
         // must be in `allNames` — except the store, the loading latch, the
-        // onboarding flags and the two records of something that happened
+        // onboarding flags and the records of something that happened
         // outside Ledge, all of which reset deliberately leaves alone.
         //
         // `accessibilityWasAsked` is one of those: macOS shows its one-time
         // Accessibility message once in an app's life, and resetting Ledge's
         // settings does not buy another one. Forgetting it would make the
         // guide promise a dialog that cannot appear.
+        //
+        // `automationWasAsked` is another: the Automation answer it led to
+        // lives in TCC and survives a reset, so forgetting the press would
+        // only switch Music and Spotify off until it was made again.
         let mirror = Mirror(reflecting: Preferences(store: MemoryPreferenceStore()))
         let excluded: Set<String> = [
             "_store", "_isLoading", "_hasCompletedOnboarding", "_hasBeenIntroduced",
             "_tourPage", "_focusFolderBookmark", "_accessibilityWasAsked",
+            "_automationWasAsked",
         ]
         let stored = mirror.children.compactMap { child -> String? in
             guard let label = child.label,

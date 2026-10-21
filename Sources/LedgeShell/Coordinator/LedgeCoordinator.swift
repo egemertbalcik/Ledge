@@ -1068,7 +1068,7 @@ public final class LedgeCoordinator {
     }
 
     private let screenshots = ScreenshotWatcher()
-    private let permissions = PermissionCenter()
+    private lazy var permissions = PermissionCenter(preferences: preferences)
     private let settingsModel = SettingsModel()
     /// Transport control, told where the system is actually pointing.
     ///
@@ -1198,10 +1198,6 @@ public final class LedgeCoordinator {
             hardware=\(geometry.isHardwareNotch, privacy: .public) \
             scale=\(geometry.displayScale, privacy: .public)
             """)
-
-        // A returning user has already been through the tour, so nothing is
-        // held back for them; a new one meets no dialog until they finish it.
-        permissions.mayAskAboutPlayers = preferences.hasCompletedOnboarding
 
         effects.onTimer = { [weak self] timer in self?.send(.timerFired(timer)) }
         activities.setPinnedKind(ActivityKind(rawValue: preferences.pinnedCard))
@@ -1459,24 +1455,20 @@ public final class LedgeCoordinator {
     /// answer.
     ///
     /// Closing used to leave the flag alone, so the tour came back on every
-    /// launch until somebody reached the end. That is nagging, and it also
-    /// left Automation shut for good: the player gate opened only on Done, so
-    /// anybody who closed the tour got no Apple Event queries at all and a
-    /// permission that read "Not requested" for the life of the install.
+    /// launch until somebody reached the end. That is nagging.
+    ///
+    /// The tour no longer opens the player gate either. Opening it here put
+    /// the Automation dialog up a few seconds after the tour closed — at the
+    /// next read of a player that was merely open — and at every later launch
+    /// of somebody who had never been asked, with no button pressed and
+    /// nothing on screen to explain it. Automation is asked for by its own
+    /// button in the Permissions tab, which remembers the press (see
+    /// `PermissionCenter.mayAskAboutPlayers`), so it is never shut for good
+    /// and never asked for on its own.
     private func onboardingFinished() {
         let wasFirstRun = !preferences.hasCompletedOnboarding
         preferences.hasCompletedOnboarding = true
         preferences.tourPage = 0
-        // Everything that can raise a system dialog was held back until the
-        // tour had explained what Ledge is. It may run now — but not *this
-        // instant*: the first automation query is itself a prompt (see
-        // `mayAskAboutPlayers`), and firing it here put the Automation dialog
-        // on screen at the exact moment the tour window vanished, with
-        // nothing left to explain it. That is the ambush the deferral exists
-        // to prevent, four pages later. The query happens on its own the next
-        // time something reads the permission — opening the Permissions pane,
-        // or a media card wanting a player.
-        permissions.mayAskAboutPlayers = true
         activities.startEnabled()
         if wasFirstRun { playWelcome() }
     }
@@ -2602,7 +2594,9 @@ public final class LedgeCoordinator {
                       case .nowPlaying(let payload)? = self.presentation.selected?.payload,
                       payload.duration > 0
                 else { return false }
-                return self.sendMedia(.seek(payload.duration * fraction, item: payload.itemKey))
+                // The player's own id, never the card's name for the song —
+                // see `NowPlayingPayload.transportKey`.
+                return self.sendMedia(.seek(payload.duration * fraction, item: payload.transportKey))
             },
             audioLevels: { [weak self] in self?.simulatedLevels() ?? [] },
             chooseOutput: {

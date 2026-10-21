@@ -117,7 +117,7 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
             // moved. And the other way round, two songs from one album share a
             // cover and so became one song — which is how a paused track could
             // inherit the previous one's retirement and never appear at all.
-            trackKey: trackID.map { "\(bundle)|\($0)" },
+            trackKey: trackID.map { TrackKey.identified($0, by: bundle) },
             artworkID: artworkID,
             artworkData: artwork.flatMap { Data(base64Encoded: $0) },
             // The system's word when it gives one. When it does not, a thing

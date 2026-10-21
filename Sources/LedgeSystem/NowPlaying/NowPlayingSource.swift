@@ -1,6 +1,40 @@
 import Foundation
 import LedgeCore
 
+/// How an item's `trackKey` is spelled, in the one place it is spelled.
+///
+/// Two shapes, both filed under the player so two apps never share one:
+/// `bundle|id` when the player or the system names the item, and
+/// `bundle|artist|album|title` when nothing does. A seek has to tell them
+/// apart, because the player can confirm its own id and nothing else. Taking
+/// a key apart anywhere but here is how the seek guard came to compare the
+/// whole key with the player's bare id, which never matched, and refused
+/// every scrub of Spotify and Music.
+enum TrackKey {
+
+    static func identified(_ id: String, by bundleID: String) -> String {
+        "\(bundleID)|\(id)"
+    }
+
+    static func described(artist: String, album: String, title: String, by bundleID: String) -> String {
+        "\(bundleID)|\(artist)|\(album)|\(title)"
+    }
+
+    /// The id a key names the item by, when it is a key for this player that
+    /// carries one. Nil for a described key, and for another player's key.
+    ///
+    /// A described key always has more separators after the player; an id
+    /// has none. An id that did contain one reads as no id at all, which
+    /// costs the seek its guard, never the seek itself.
+    static func itemID(in key: String, for bundleID: String) -> String? {
+        let prefix = "\(bundleID)|"
+        guard key.hasPrefix(prefix) else { return nil }
+        let id = key.dropFirst(prefix.count)
+        guard !id.isEmpty, !id.contains("|") else { return nil }
+        return String(id)
+    }
+}
+
 /// What is playing, right now, wherever it is playing.
 public struct NowPlayingSnapshot: Equatable, Sendable {
 
@@ -20,6 +54,18 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
     /// Stable identity for the track, for artwork caching. Usually a URL or id
     /// from the player; falls back to the metadata itself.
     public var trackKey: String
+
+    /// The item as the player's own script names it, filed under the player
+    /// — the only identity a seek can check. Nil unless this answer came from
+    /// that player's script.
+    ///
+    /// Kept apart from `trackKey`, which is the card's name for the song and
+    /// is deliberately held across sources: the composite keeps the first
+    /// name a song had, often the adapter's MediaRemote identifier. A seek
+    /// guarded on that compared it with AppleScript's `id of current track`,
+    /// a different namespace, and dropped every scrub for the rest of the
+    /// song.
+    public var transportKey: String?
 
     /// Where the artwork can be fetched from, when the player exposes it.
     public var artworkURL: URL?
@@ -54,7 +100,8 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
         artworkID: String? = nil,
         artworkData: Data? = nil,
         isLive: Bool = false,
-        kind: MediaKind = .audio
+        kind: MediaKind = .audio,
+        transportKey: String? = nil
     ) {
         self.title = title
         self.artist = artist
@@ -64,12 +111,13 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
         self.duration = duration
         self.appName = appName
         self.appBundleID = appBundleID
-        self.trackKey = trackKey ?? "\(appBundleID)|\(artist)|\(album)|\(title)"
+        self.trackKey = trackKey ?? TrackKey.described(artist: artist, album: album, title: title, by: appBundleID)
         self.artworkURL = artworkURL
         self.artworkID = artworkID
         self.artworkData = artworkData
         self.isLive = isLive
         self.kind = kind
+        self.transportKey = transportKey
     }
 
     /// Which cover this item is carrying, as distinct from which item it is.
@@ -110,6 +158,7 @@ public struct NowPlayingSnapshot: Equatable, Sendable {
             && lhs.appName == rhs.appName
             && lhs.appBundleID == rhs.appBundleID
             && lhs.trackKey == rhs.trackKey
+            && lhs.transportKey == rhs.transportKey
             && lhs.artworkURL == rhs.artworkURL
             && lhs.artworkID == rhs.artworkID
             && lhs.kind == rhs.kind
@@ -189,6 +238,9 @@ public enum NowPlayingCommand: Equatable, Sendable {
     /// while the command waits its turn, and the new song jumped to the old
     /// one's position. The queue bounds how *old* a command may be, not which
     /// song it lands on.
+    ///
+    /// The item is a snapshot's `transportKey`, or nil when no script has
+    /// named the song.
     case seek(TimeInterval, item: String?)
 }
 

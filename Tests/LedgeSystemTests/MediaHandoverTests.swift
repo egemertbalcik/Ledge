@@ -167,6 +167,35 @@ struct MediaHandoverTests {
         #expect(await source.snapshot()?.appBundleID == Self.safari)
     }
 
+    /// The same hand-over, as the provider reads it. A held answer has to say
+    /// it is held, or the provider takes it for a sighting and holds the
+    /// player again on its own; and the pause heard behind the page has to be
+    /// passed on, or the provider goes on holding what the composite let go.
+    @Test("A held answer says so, and so does the pause that ends it")
+    func heldAnswerIsMarked() async throws {
+        let clock = Clock()
+        let adapter = Source(identifier: "adapter", value: track(Self.spotify, title: "Song"))
+        let scripting = Source(identifier: "scripting", value: track(Self.spotify, title: "Song"))
+        let source = composite(adapter: adapter, scripting: scripting, clock: clock)
+        let seen = await source.reading()
+        try #require(seen.snapshot?.appBundleID == Self.spotify)
+        #expect(!seen.isHeld, "the player named by the system is a sighting")
+
+        adapter.value = track(Self.safari, title: "Video")
+        clock.now += 1
+        let held = await source.reading()
+        try #require(held.snapshot?.appBundleID == Self.spotify, "reached: Spotify held against the page")
+        #expect(held.isHeld)
+        #expect(held.heardStopped == nil)
+
+        scripting.value = track(Self.spotify, title: "Song", playing: false)
+        clock.now += CompositeNowPlayingSource.scriptingCadenceWhilePlaying + 1
+        let after = await source.reading()
+        try #require(after.snapshot?.appBundleID == Self.safari, "reached: the pause let the page through")
+        #expect(!after.isHeld)
+        #expect(after.heardStopped == Self.spotify)
+    }
+
     /// Without Automation permission there is no way to ask whether the player
     /// is still going, so the hold is bounded rather than indefinite: a minute
     /// with no sighting of the app at all, and the page is let through.

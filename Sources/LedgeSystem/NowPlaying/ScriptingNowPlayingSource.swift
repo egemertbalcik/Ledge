@@ -74,8 +74,8 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     ]
 
     /// Apple Events can raise a prompt even when only reading. Keep the
-    /// onboarding gate here, not on the whole media provider: the adapter
-    /// can supply system-wide media while the tour is unfinished.
+    /// Automation gate here, not on the whole media provider: the adapter
+    /// can supply system-wide media before the user has been asked.
     private let mayQueryPlayers: @MainActor () -> Bool
     private let availablePlayers: @MainActor () -> [Player]
     private let readPlayer: @MainActor (Player) async -> PlayerReading
@@ -128,6 +128,28 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// and every transport button on it — addressed the wrong player. An
     /// answer may only ever stand in for the player that gave it.
     private var heldAnswers: [String: (snapshot: NowPlayingSnapshot, at: TimeInterval)] = [:]
+
+    /// The players whose latest answer, from either kind of read, was that
+    /// nothing is playing.
+    ///
+    /// Both reads return nil for it, and nil cannot carry the difference
+    /// between "Music said it has stopped" and "nobody could be asked". The
+    /// composite needs the first to let go of a player it is holding against
+    /// a page. Kept per player until that player answers again: a read of
+    /// every player stops at the first one playing, so it cannot be relied on
+    /// to ask Music twice, and a stop heard by the targeted read is as much
+    /// the player's word as one heard by the scan. A player that did not
+    /// answer, or was never asked, is left as it was.
+    ///
+    /// Each stop is numbered, so whoever reads this can tell a stop it has
+    /// already placed against an item from one the player has just given.
+    /// Which item a stop was about is not this type's to know: the answer
+    /// says nothing playing, and names nothing.
+    private(set) var stopsHeard: [String: Int] = [:]
+    private var stopsCounted = 0
+
+    /// The players whose latest answer was a stop, whichever stop it was.
+    var answeredNothing: Set<String> { Set(stopsHeard.keys) }
 
     /// How long an unanswered read may be covered by the last answer. One
     /// `osascript` deadline is three seconds, and the poll after it has to
@@ -232,9 +254,12 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     private func remember(_ snapshot: NowPlayingSnapshot?, from player: Player) -> NowPlayingSnapshot? {
         guard let snapshot else {
             heldAnswers[player.bundleID] = nil
+            stopsCounted += 1
+            stopsHeard[player.bundleID] = stopsCounted
             return nil
         }
         heldAnswers[player.bundleID] = (snapshot, now())
+        stopsHeard[player.bundleID] = nil
         return snapshot
     }
 
@@ -307,7 +332,19 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
     /// waiting out its cooldown would keep Music/Spotify details absent for
     /// up to ten minutes after the grant.
     public static func forgetDenials() {
-        denials = AutomationDenialLatch()
+        denials.forgetDenials()
+    }
+
+    /// Whether a transport command may be scripted to this player: it has
+    /// answered a read, and has not refused since.
+    ///
+    /// Reads may be the first Apple Event a player gets, once the user has
+    /// pressed Automation in the Permissions tab; that press is consent to be
+    /// asked. A command never may. Sent to a refused player it does nothing,
+    /// and sent to an undecided one it raises the Automation dialog from a
+    /// play button. Either way the system path is the right one.
+    static func isKnownAllowed(_ bundleID: String) -> Bool {
+        denials.isKnownAllowed(bundleID, now: Date().timeIntervalSinceReferenceDate)
     }
 
     static func query(_ player: Player) async -> PlayerReading {
@@ -318,15 +355,29 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
         guard !denials.isDenied(player.bundleID, now: now) else { return .unreadable }
 
         let result = await runOsascript(script(for: player))
-        if case .denied(let detail) = result {
+        let reading = reading(from: result, player: player)
+        learn(from: result, reading: reading, player: player, now: now)
+        return reading
+    }
+
+    /// What one run says about Automation for this player. Separate from
+    /// `query` so it can be pinned without a player to script.
+    static func learn(from result: ScriptResult, reading: PlayerReading, player: Player, now: TimeInterval) {
+        switch (result, reading) {
+        case (.denied(let detail), _):
             denials.recordDenial(player.bundleID, now: now)
             log.notice("""
                 osascript: Automation for \(player.displayName, privacy: .public) is denied \
                 (\(detail, privacy: .public)) — not asking again for \
                 \(Int(AutomationDenialLatch.cooldown), privacy: .public)s
                 """)
+        case (_, .answered):
+            // Only a real answer. An empty one can come from the script's own
+            // `if it is not running` check, which no Apple Event reached.
+            denials.recordAnswer(player.bundleID)
+        default:
+            break
         }
-        return reading(from: result, player: player)
     }
 
     /// What one `osascript` run means for the card. Separated from `query` so
@@ -444,6 +495,7 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
             }
             : nil
 
+        let ownID = fields[6].isEmpty ? nil : TrackKey.identified(fields[6], by: player.bundleID)
         return NowPlayingSnapshot(
             title: fields[0],
             artist: fields[1],
@@ -457,14 +509,19 @@ public final class ScriptingNowPlayingSource: NowPlayingSource {
             duration: duration > 0 ? max(duration, elapsed) : 0,
             appName: player.displayName,
             appBundleID: player.bundleID,
-            trackKey: fields[6].isEmpty ? nil : "\(player.bundleID)|\(fields[6])",
-            artworkURL: artworkURL
+            trackKey: ownID,
+            artworkURL: artworkURL,
+            // The one place a transport id is minted: this player's script,
+            // answering for itself. The card's name may later be replaced by
+            // one kept from another source; this never is.
+            transportKey: ownID
         )
     }
 }
 
 /// Remembers which players the user has refused Automation for, so they are
-/// not asked again on every poll.
+/// not asked again on every poll — and which have answered a script, which is
+/// the only evidence of a grant that costs no prompt to collect.
 ///
 /// Pure and clock-injected so the policy is testable without a TCC prompt.
 struct AutomationDenialLatch: Sendable {
@@ -476,7 +533,31 @@ struct AutomationDenialLatch: Sendable {
 
     private var deniedUntil: [String: TimeInterval] = [:]
 
+    /// Players that have answered a read since they last refused.
+    private var answered: Set<String> = []
+
     init() {}
+
+    /// The player answered, so Automation for it is granted.
+    mutating func recordAnswer(_ bundleID: String) {
+        answered.insert(bundleID)
+    }
+
+    /// Whether this player is known to take Apple Events from Ledge: it has
+    /// answered, and has not refused since.
+    ///
+    /// Undecided and refused read the same here, on purpose. Either way an
+    /// event is the wrong thing to send — refused, it does nothing at all;
+    /// undecided, it is the Automation dialog.
+    mutating func isKnownAllowed(_ bundleID: String, now: TimeInterval) -> Bool {
+        answered.contains(bundleID) && !isDenied(bundleID, now: now)
+    }
+
+    /// The user granted Automation: any refusal believed is stale. What has
+    /// answered still has.
+    mutating func forgetDenials() {
+        deniedUntil = [:]
+    }
 
     /// True while a refusal is still believed. A latch whose cooldown has
     /// passed is cleared here, so the very next attempt goes through.
@@ -489,6 +570,9 @@ struct AutomationDenialLatch: Sendable {
 
     mutating func recordDenial(_ bundleID: String, now: TimeInterval) {
         deniedUntil[bundleID] = now + Self.cooldown
+        // A grant taken back. Past the cooldown this player is undecided
+        // again until it answers, not allowed.
+        answered.remove(bundleID)
     }
 }
 
@@ -515,9 +599,10 @@ private final class ErrorBuffer: @unchecked Sendable {
 
 /// Transport control.
 ///
-/// Prefers MediaRemote, whose commands are un-gated and reach whichever player
-/// the system considers current. Falls back to telling the specific app, which
-/// also covers seeking — MediaRemote's seek takes a different signature.
+/// Prefers telling the specific app, which is the only way to address the
+/// player on the card, wherever Automation is known to allow it. Otherwise
+/// MediaRemote, which reaches whichever player the system considers current,
+/// and so only when that is the card's player.
 @MainActor
 public final class NowPlayingCommander: NowPlayingCommanding {
 
@@ -549,14 +634,32 @@ public final class NowPlayingCommander: NowPlayingCommanding {
     /// on the paths that must refuse — without touching a real player.
     private let dispatchGlobally: @MainActor (NowPlayingCommand) -> Void
 
-    public init(
+    /// Whether this player is known to take Apple Events from Ledge — see
+    /// `ScriptingNowPlayingSource.isKnownAllowed`. Injected so a test can
+    /// say either without a TCC decision behind it.
+    private let automationAllows: @MainActor (String) -> Bool
+
+    public convenience init(
         systemOwner: @escaping @MainActor () -> String? = { nil },
         dispatchGlobally: @escaping @MainActor (NowPlayingCommand) -> Void = {
             MediaRemoteBridge.send($0)
         }
     ) {
+        self.init(
+            systemOwner: systemOwner,
+            dispatchGlobally: dispatchGlobally,
+            automationAllows: { ScriptingNowPlayingSource.isKnownAllowed($0) }
+        )
+    }
+
+    init(
+        systemOwner: @escaping @MainActor () -> String?,
+        dispatchGlobally: @escaping @MainActor (NowPlayingCommand) -> Void,
+        automationAllows: @escaping @MainActor (String) -> Bool
+    ) {
         self.systemOwner = systemOwner
         self.dispatchGlobally = dispatchGlobally
+        self.automationAllows = automationAllows
     }
 
     /// What happened to a command offered to the scripting path.
@@ -573,6 +676,9 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         case queued
         case unsupported
         case busy
+        /// A scriptable player that Automation is not known to allow:
+        /// undecided, refused, or not yet heard from.
+        case notAllowed
     }
 
     @discardableResult
@@ -600,12 +706,17 @@ public final class NowPlayingCommander: NowPlayingCommanding {
             Self.log.notice("command dropped: \(bundleID, privacy: .public) has a full queue")
             return .refused
 
-        case .unsupported:
-            // No scripting dictionary for this player (a browser, say), so the
-            // only way left is MediaRemote — and MediaRemote has no idea which
-            // player was meant. It acts on whichever one the *system*
-            // considers now-playing, which is the right one exactly when the
-            // system agrees with the card.
+        case .unsupported, .notAllowed:
+            // No scripting dictionary for this player (a browser, say), or no
+            // Automation to use it with, so the only way left is MediaRemote.
+            // Without Automation that is how the card's buttons work at all:
+            // an Apple Event to a refused player did nothing, and to an
+            // undecided one it put the Automation dialog up from a play
+            // button.
+            //
+            // MediaRemote has no idea which player was meant. It acts on
+            // whichever one the *system* considers now-playing, which is the
+            // right one exactly when the system agrees with the card.
             //
             // It often does not. A native player with no scripting dictionary
             // can be held on the card — that is what `heldPlaying` is for —
@@ -658,7 +769,10 @@ public final class NowPlayingCommander: NowPlayingCommanding {
 
     /// The AppleScript one transport command becomes. Pure, so what is sent
     /// can be checked without a queue, a player, or `osascript`.
-    nonisolated static func transportScript(_ command: NowPlayingCommand, scriptName: String) -> String {
+    nonisolated static func transportScript(
+        _ command: NowPlayingCommand,
+        for player: ScriptingNowPlayingSource.Player
+    ) -> String {
         let body: String
         switch command {
         case .playPause: body = "playpause"
@@ -673,13 +787,22 @@ public final class NowPlayingCommander: NowPlayingCommanding {
             // scrub released on one song used to land on whichever song was
             // playing when the command finally ran.
             //
-            // A seek with no identity to check is still written — a player
-            // that will not say what it is playing can still be scrubbed,
-            // which is how it behaved before any of this.
+            // The item is the snapshot's `transportKey` — the player's own id,
+            // from its own script — never the card's name for the song, which
+            // may be MediaRemote's identifier kept from an earlier answer. The
+            // player only knows its own id, so the id is what is compared.
+            //
+            // A seek with no id to check is still written, unguarded: a card
+            // the script has not yet answered for, or a player that will not
+            // say what it is playing, can still be scrubbed, which is how it
+            // behaved before any of this. Sending it to MediaRemote instead
+            // was the other choice, and the worse one: nothing has confirmed
+            // that the system's seek reaches these players, and a scrub that
+            // silently does nothing is the failure being fixed here.
             let write = String(format: "set player position to %.3f", position)
-            if let item, !item.isEmpty {
+            if let item, let id = TrackKey.itemID(in: item, for: player.bundleID) {
                 body = """
-                if ((id of current track) as text) is not \(Self.literal(item)) then return
+                if ((id of current track) as text) is not \(Self.literal(id)) then return
                     \(write)
                 """
             } else {
@@ -688,7 +811,7 @@ public final class NowPlayingCommander: NowPlayingCommanding {
         }
 
         return """
-        tell application "\(scriptName)"
+        tell application "\(player.scriptName)"
             if it is not running then return
             \(body)
         end tell
@@ -704,8 +827,9 @@ public final class NowPlayingCommander: NowPlayingCommanding {
             Self.log.debug("no scripting fallback for \(bundleID, privacy: .public)")
             return .unsupported
         }
+        guard automationAllows(bundleID) else { return .notAllowed }
 
-        let source = Self.transportScript(command, scriptName: player.scriptName)
+        let source = Self.transportScript(command, for: player)
 
         // Queued rather than fired and forgotten. Every press used to launch
         // its own process with no timeout and no bound, so a player that had
