@@ -199,25 +199,23 @@ struct LevelsCardTests {
 /// What happens in the frame after a card opens.
 ///
 /// Both of the card redesigns landed with the same complaint: the card arrives,
-/// settles, and then moves again. It is the same cause in both — the island
-/// opens at the unmeasured floor and springs to the measured height a moment
-/// later — and the fix is that a card's *first* measurement is not a change
-/// anybody asked to see.
+/// settles, and then moves again. The island opens at the estimate, so the
+/// estimate has to be right (`CardOpeningTests`); where it is not, the card's
+/// first measurement joins the opening spring rather than being applied around
+/// it (`IslandTransitionTests`, which films that).
 @Suite("A card arriving")
 @MainActor
 struct CardArrivalTests {
 
     private let levels = ActivityID(kind: .levels, source: "levels")
 
-    @Test("A card's first measurement lands without animation")
-    func theFirstMeasurementIsSilent() {
+    @Test("A card's first measurement is kept, and later ones are still followed")
+    func theFirstMeasurementIsKept() {
         let presentation = NotchPresentation()
         #expect(!presentation.hasMeasured(levels))
 
-        // There is no way to observe a transaction after the fact, so what is
-        // checked is the condition the suppression turns on: the first report
-        // is the one where nothing is known yet, and every later one is a
-        // change to something already on screen.
+        // The first report is the one where nothing is known yet, and every
+        // later one is a change to something already on screen.
         presentation.reportCardContent(height: 150, from: levels)
         #expect(presentation.hasMeasured(levels))
         #expect(presentation.cardContentHeight(for: levels) == 150)

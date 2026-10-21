@@ -97,7 +97,9 @@ public struct ActivityCardView: View {
             KeepAwakeCardView(
                 payload: payload,
                 actions: keepAwakeActions,
-                isCompactWidth: isCompactWidth
+                isCompactWidth: isCompactWidth,
+                swapResponse: swapResponse,
+                swapDamping: swapDamping
             )
             .measuredContent(activity.id, onContentHeight)
         case .levels(let payload):

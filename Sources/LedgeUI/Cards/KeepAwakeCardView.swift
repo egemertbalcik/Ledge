@@ -19,6 +19,10 @@ public struct KeepAwakeCardView: View {
     private let payload: KeepAwakePayload
     private let actions: KeepAwakeActions
     private let isCompactWidth: Bool
+    /// The island's own resize spring, so a change of face and the shape
+    /// growing or shrinking around it move as one.
+    private let swapResponse: Double
+    private let swapDamping: Double
 
     /// The length on the Ready card. Seeded from the payload — which carries
     /// the user's own default — and kept afterwards, so a length chosen and
@@ -62,6 +66,13 @@ public struct KeepAwakeCardView: View {
     /// the card to say so.
     @State private var waitHasLasted = false
 
+    /// One per line of words that can change while the card is up: the
+    /// sentence under the rail, the third stop's name, and the two notes.
+    @State private var sentenceTurns = TextTurns()
+    @State private var thirdLabelTurns = TextTurns()
+    @State private var lidLineTurns = TextTurns()
+    @State private var problemTurns = TextTurns()
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
 
@@ -78,11 +89,15 @@ public struct KeepAwakeCardView: View {
         activeField: KeepAwakeSpan.Field? = nil,
         /// Opens with the lid-closed mode's reason already shown, which is
         /// otherwise a press away.
-        lidNote: Bool = false
+        lidNote: Bool = false,
+        swapResponse: Double = 0.38,
+        swapDamping: Double = 0.68
     ) {
         self.payload = payload
         self.actions = actions
         self.isCompactWidth = isCompactWidth
+        self.swapResponse = swapResponse
+        self.swapDamping = swapDamping
         _flow = State(initialValue: KeepAwakeCardFlow(isAsking: startsAsking,
                                                       showsLidNote: lidNote))
         _draft = State(initialValue: draft)
@@ -132,22 +147,37 @@ public struct KeepAwakeCardView: View {
         if isCompactWidth {
             compact
         } else {
-            Group {
+            // A ZStack, not a Group: a Group hands its modifiers to each face
+            // separately, so the animation below arrived on the incoming face
+            // as something new rather than as a change, and every swap cut.
+            ZStack(alignment: .topLeading) {
                 // The question first, whatever is running behind it. It used
-                // to be reachable only from `ready`, so pressing Lid closed
+                // to be reachable only from the resting face, so pressing Lid closed
                 // while the Mac was already being held set the flag and drew
                 // the switches anyway — the question never appeared, and the
                 // two faces rendered byte-identically.
                 if flow.isAsking {
                     asking
                 } else {
+                    // Off and a running hold in one arm. Two arms are two
+                    // views even when both draw `switches`, so pressing Coffee
+                    // threw the rail away and built a new one with the bead
+                    // already on its stop, and the slide it was drawn for
+                    // never ran.
                     switch payload.phase {
-                    case .ready: ready
-                    case .running: running
-                    case .finished(let reason): finished(reason)
+                    case .ready, .running:
+                        switches
+                            .transition(Motion.expandedSwap(reduced: reduceMotion))
+                    case .finished(let reason):
+                        finished(reason)
+                            .transition(Motion.expandedSwap(reduced: reduceMotion))
                     }
                 }
             }
+            // Ending and coming back are a change of face, on the island's own
+            // resize spring so the faces and the shape around them are one
+            // movement rather than a cut inside a spring.
+            .animation(faceMotion, value: isShowingFinished)
             // The same inset the notes and shelf cards use. This card had
             // none, so its content ran to the edges while every one beside it
             // was held off them. The card's own width is set by the island and
@@ -156,6 +186,17 @@ public struct KeepAwakeCardView: View {
             .padding(.top, Self.topInset)
             .padding(.bottom, Self.bottomInset)
         }
+    }
+
+    /// How the card's own faces change: the spring the island resizes with,
+    /// or its short ease under Reduce Motion.
+    private var faceMotion: Animation {
+        Motion.expand(response: swapResponse, damping: swapDamping, reduced: reduceMotion)
+    }
+
+    private var isShowingFinished: Bool {
+        if case .finished = payload.phase { return true }
+        return false
     }
 
     /// Shared with the cards either side of this one, so a swipe between them
@@ -167,25 +208,8 @@ public struct KeepAwakeCardView: View {
     /// under the button.
     private static let bottomInset: CGFloat = 14
 
-    // MARK: - Ready
+    // MARK: - Ready and running
 
-    /// The Ready card has two faces of its own: the one it rests on, and the
-    /// question the lid-closed mode asks. They are written apart because they
-    /// are different things — one is a switch and a way in, the other is a
-    /// form — and because sharing a header row is how the resting face came to
-    /// carry the question's wording and the question's shape.
-    @ViewBuilder private var ready: some View {
-        resting
-    }
-
-    /// The resting face: what somebody sees before they have started anything.
-    ///
-    /// Three rows and no paragraph. The identity and the switch share the top
-    /// row, because they are the same statement — this is Keep Awake, and it
-    /// is off. The lid-closed mode is a row of its own underneath, because it
-    /// is a second way in rather than a second button for the first one. Each
-    /// of the two sentences the card can have to say owns its own slot, so
-    /// neither can be crowded out by the other.
     /// The resting face and a running hold are the same thing: two switches
     /// and whatever they have to say for themselves.
     ///
@@ -196,45 +220,57 @@ public struct KeepAwakeCardView: View {
     /// button that only existed on the resting face: switch the Mac awake and
     /// the one door to the lid-closed mode vanished, with no way back to it
     /// short of switching off again. One face, both switches, always.
-    private var resting: some View { switches }
-
+    ///
+    /// A running hold has no countdown of its own either. The plain mode has
+    /// no end to count back from, and a timed one says so in the figure
+    /// beside the title.
     private var switches: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             rail
             // Always drawn, even when empty, so the card does not jump when a
             // preview appears under the pointer.
-            Text(consequenceLine)
-                .font(.cardCaption)
-                .foregroundStyle(flow.hovering != nil
-                                 ? Self.previewTint
-                                 : .white.opacity(contrast == .increased ? 0.75 : 0.5))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                // Sized to what it holds. Two lines were reserved so that a
-                // sentence wrapping at the duo width could not make the card
-                // grow under the pointer — but at 275, where the card
-                // actually lives, every one of these is a single line, so the
-                // reserve was fourteen points of black on every card to
-                // prevent a jump at the narrowest width alone.
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .padding(.top, 6)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: consequenceLine)
+            ZStack(alignment: .topLeading) {
+                Text(consequenceLine)
+                    .font(.cardCaption)
+                    .foregroundStyle(flow.hovering != nil
+                                     ? Self.previewTint
+                                     : .white.opacity(contrast == .increased ? 0.75 : 0.5))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    // Sized to what it holds. Two lines were reserved so that a
+                    // sentence wrapping at the duo width could not make the card
+                    // grow under the pointer — but at 275, where the card
+                    // actually lives, every one of these is a single line, so the
+                    // reserve was fourteen points of black on every card to
+                    // prevent a jump at the narrowest width alone.
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .id(sentenceTurns.turn(for: consequenceLine))
+                    .transition(wordSwap)
+            }
+            .padding(.top, 6)
 
             // Anything about the lid-closed hold *now*. Its own slot, so a
             // preview can never take its place: a sentence saying the Mac is
             // not being held must not vanish because somebody moved a pointer.
             if let line = lidLine {
-                note(line, opacity: contrast == .increased ? 0.9 : 0.7)
+                note(line, opacity: contrast == .increased ? 0.9 : 0.7, turns: lidLineTurns)
             }
             // And a failure left by an earlier session, which is about last
             // time rather than now, so it goes underneath and never competes.
             if let problem = problemLine {
                 // Dimmer and further down than the lid sentence: that one is
                 // about this Mac now, this one is about last time.
-                note(problem, opacity: contrast == .increased ? 0.75 : 0.5, top: 6)
+                note(problem, opacity: contrast == .increased ? 0.75 : 0.5, top: 6, turns: problemTurns)
             }
         }
+        // A press changes the whole face at once — the bead, the fill, which
+        // stop is lit, the caption, the figure, how tall the sentence is — and
+        // it all moves on the island's own spring, so the rail and the shape
+        // around it are one movement. The bead and the fill keep their own
+        // quicker spring underneath this.
+        .animation(faceMotion, value: chosenStop)
+        .animation(faceMotion, value: beadKind)
     }
 
     /// The card's identity, and — only when there is one worth showing — the
@@ -310,6 +346,10 @@ public struct KeepAwakeCardView: View {
                     .frame(width: max(0, xs[filledTo] - xs[0]), height: Self.trackThickness)
                     .offset(x: xs[0], y: Self.trackY)
                     .animation(reduceMotion ? nil : Motion.levelChange, value: filledTo)
+                    // Under Reduce Motion it does not grow along the rail;
+                    // the old length fades out as the new one fades in.
+                    .id(reduceMotion ? filledTo : -1)
+                    .transition(.opacity)
                 if lidIsWaiting, lidIsUnsettled {
                     // Requested, not proven, and still being asked. Once
                     // the answer is no — or no answer ever came — the dashes
@@ -345,38 +385,62 @@ public struct KeepAwakeCardView: View {
     }
 
     /// Where the card is, and whether that is proven.
+    ///
+    /// One view whatever it is saying: the fill, the ring, the halo and the
+    /// strike are properties of it, not a view each. With a view per kind, a
+    /// bead that changed kind on its way to a new stop — Off to Coffee, Coffee
+    /// to Lid shut — left the old one fading where it was and the new one
+    /// fading in at the far stop. It never travelled.
     private func bead(x: CGFloat) -> some View {
         let size = chosenStop == 0 ? Self.beadRest : Self.beadSize
-        return ZStack {
-            switch beadKind {
-            case .resting:
-                Circle().fill(.white.opacity(contrast == .increased ? 1 : 0.85))
-            case .held:
-                Circle()
-                    .fill(Self.tint)
-                    .overlay(Circle().strokeBorder(Self.tint.opacity(0.16), lineWidth: 3)
-                        .scaleEffect(1.4))
-            case .checking:
-                BreathingRing(tint: Self.tint, still: reduceMotion)
-            case .cannotTell:
-                // The same hollow ring, standing still. The request is not in
-                // the air any more; what is unknown is its outcome.
-                BreathingRing(tint: Self.tint.opacity(0.8), still: true)
-            case .notHeld:
-                Circle()
-                    .fill(Color.black)
-                    .overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 1.5))
-                    .overlay(
-                        Rectangle()
-                            .fill(.white.opacity(0.7))
-                            .frame(width: 1.2, height: size + 4)
-                            .rotationEffect(.degrees(45))
-                    )
-            }
+        let kind = beadKind
+        return Circle()
+            .fill(beadFill(kind))
+            // A held lid wears a faint halo outside the disc.
+            .overlay(
+                Circle().strokeBorder(Self.tint.opacity(0.16), lineWidth: 3)
+                    .scaleEffect(1.4)
+                    .opacity(kind == .held ? 1 : 0)
+            )
+            // The hollow ring: breathing while a request is in the air, still
+            // once nobody is waiting on an answer — "cannot tell" — and white
+            // under the strike when the answer was no.
+            .overlay(
+                Circle().strokeBorder(beadRing(kind), lineWidth: 1.5)
+                    .modifier(Breath(active: kind == .checking && !reduceMotion))
+                    .opacity(kind == .checking || kind == .cannotTell || kind == .notHeld ? 1 : 0)
+            )
+            .overlay(
+                Rectangle()
+                    .fill(.white.opacity(0.7))
+                    .frame(width: 1.2, height: size + 4)
+                    .rotationEffect(.degrees(45))
+                    .opacity(kind == .notHeld ? 1 : 0)
+            )
+            .frame(width: size, height: size)
+            .offset(x: x - size / 2, y: Self.trackY - (size - Self.trackThickness) / 2)
+            .animation(reduceMotion ? nil : Motion.levelChange, value: chosenStop)
+            // Under Reduce Motion the bead does not travel: it fades out on
+            // the stop it left and in on the one it went to.
+            .id(reduceMotion ? chosenStop : -1)
+            .transition(.opacity)
+    }
+
+    private func beadFill(_ kind: BeadKind) -> Color {
+        switch kind {
+        case .resting: return .white.opacity(contrast == .increased ? 1 : 0.85)
+        case .held: return Self.tint
+        // Black, so neither the stop mark nor the dashes show through.
+        case .checking, .cannotTell, .notHeld: return .black
         }
-        .frame(width: size, height: size)
-        .offset(x: x - size / 2, y: Self.trackY - (size - Self.trackThickness) / 2)
-        .animation(reduceMotion ? nil : Motion.levelChange, value: chosenStop)
+    }
+
+    private func beadRing(_ kind: BeadKind) -> Color {
+        switch kind {
+        case .notHeld: return .white.opacity(0.7)
+        case .cannotTell: return Self.tint.opacity(0.8)
+        default: return Self.tint
+        }
     }
 
     private func railLabels(_ xs: [CGFloat]) -> some View {
@@ -390,8 +454,12 @@ public struct KeepAwakeCardView: View {
                 Text(KeepAwakeCopy.railOff)
                     .foregroundStyle(labelTint(0))
                 Spacer(minLength: 2)
-                Text(thirdStopLabel)
-                    .foregroundStyle(labelTint(2))
+                ZStack(alignment: .trailing) {
+                    Text(thirdStopLabel)
+                        .foregroundStyle(labelTint(2))
+                        .id(thirdLabelTurns.turn(for: thirdStopLabel))
+                        .transition(wordSwap)
+                }
             }
             Text(KeepAwakeCopy.railAwake)
                 .foregroundStyle(labelTint(1))
@@ -694,21 +762,43 @@ public struct KeepAwakeCardView: View {
     }
 
     /// A sentence under the rail, in its own slot.
-    private func note(_ text: String, opacity: Double, top: CGFloat = 8) -> some View {
-        Text(text)
-            // Medium at 11, not semibold at 10. Three facts set in the same
-            // heavy small caps three points apart read as one grey block six
-            // lines deep, and nobody could see where "now" ended and "last
-            // time" began.
-            .font(.cardNote)
-            .foregroundStyle(.white.opacity(opacity))
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // Flush left. The indent this used to carry lined the sentence up
-            // with a second switch row's text; there is no second row now, and
-            // the indent only made the card look like a form.
-            .padding(.top, top)
-            .transition(.opacity)
+    private func note(_ text: String, opacity: Double, top: CGFloat = 8,
+                      turns: TextTurns) -> some View {
+        ZStack(alignment: .topLeading) {
+            Text(text)
+                // Medium at 11, not semibold at 10. Three facts set in the same
+                // heavy small caps three points apart read as one grey block six
+                // lines deep, and nobody could see where "now" ended and "last
+                // time" began.
+                .font(.cardNote)
+                .foregroundStyle(.white.opacity(opacity))
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .id(turns.turn(for: text))
+                .transition(wordSwap)
+        }
+        // Flush left. The indent this used to carry lined the sentence up
+        // with a second switch row's text; there is no second row now, and
+        // the indent only made the card look like a form.
+        .padding(.top, top)
+        .transition(.opacity)
+    }
+
+    /// Words that change go out before the new ones come in.
+    ///
+    /// Cross-faded in place, the old sentence and the new one were drawn over
+    /// each other for a tenth of a second and read as neither — and worse
+    /// while the rail was moving, when the two sat a few points apart. Each
+    /// carries its own timing, so it is the same whether the change rides
+    /// the island's spring, a hover, or nothing at all, and a burst of
+    /// presses only ever has one line on its way in. The calendar's month
+    /// name does the same.
+    private var wordSwap: AnyTransition {
+        let out = reduceMotion ? 0.07 : 0.1
+        return .asymmetric(
+            insertion: .opacity.animation(.easeOut(duration: reduceMotion ? 0.09 : 0.14).delay(out)),
+            removal: .opacity.animation(.easeIn(duration: out))
+        )
     }
 
     // MARK: - Geometry
@@ -1096,18 +1186,6 @@ public struct KeepAwakeCardView: View {
         setDraft(moved)
     }
 
-    // MARK: - Running
-
-    /// A running hold wears the same face it was switched on from.
-    ///
-    /// There is no third layout and no countdown of its own. The plain mode
-    /// has no end to count back from — it is a condition, not a race — and it
-    /// used to draw a 34pt stopwatch counting *up*, which turned a switch into
-    /// a timer nobody started. The lid-closed mode does have an end, and it
-    /// says so in the caption under its own switch, where the thing it is
-    /// about is.
-    private var running: some View { switches }
-
     // MARK: - Finished
 
     private func finished(_ reason: KeepAwakeEndReason) -> some View {
@@ -1367,33 +1445,50 @@ public struct KeepAwakeActions {
     }
 }
 
-/// The bead for a hold that was asked for and has not been answered.
+/// The ring's slow breath while a lid request is in the air: full to 0.4
+/// and back, 1.2 s each way.
 ///
-/// Its own view so the breath has somewhere to live: an `@State` on the card
-/// would be reset by every publish, and the card publishes once a minute for
-/// the whole of a session that may run for days.
-private struct BreathingRing: View {
-    let tint: Color
-    let still: Bool
-    @State private var dim = false
+/// Worked out from the clock rather than with a repeating animation. The ring
+/// stays mounted whatever the bead is saying — that is what lets the bead
+/// travel — and a repeating animation, once started on a view that stays,
+/// cannot be stopped.
+private struct Breath: ViewModifier {
+    let active: Bool
+    /// When this breath began, so it always starts from full rather than
+    /// wherever the clock happens to be.
+    @State private var since = Date()
 
-    var body: some View {
-        // The fill never fades, only the ring. Fading the whole thing let the
-        // grey stop mark and the end of the dashes show through at the faint
-        // end of the breath, and a hollow ring with something inside it reads
-        // as a target rather than as waiting.
-        Circle()
-            .fill(Color.black)
-            .overlay(
-                Circle()
-                    .strokeBorder(tint, lineWidth: 1.5)
-                    .opacity(still ? 1 : (dim ? 0.4 : 1))
-            )
-            .onAppear {
-                guard !still else { return }
-                withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
-                    dim = true
-                }
-            }
+    func body(content: Content) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { context in
+            content.opacity(active ? Self.level(after: context.date.timeIntervalSince(since)) : 1)
+        }
+        .onChange(of: active) { _, now in
+            if now { since = Date() }
+        }
+    }
+
+    static func level(after seconds: TimeInterval) -> Double {
+        0.7 + 0.3 * cos(2 * .pi * seconds / 2.4)
+    }
+}
+
+/// A new number each time a line of text changes, so the old words and the
+/// new are two views that can leave and arrive in turn.
+///
+/// A number rather than the text itself: keyed on the text, going back to a
+/// sentence that was still fading out brought that copy straight back, on top
+/// of the one arriving. Counted where the body reads it, so the new words
+/// never spend a frame in the old words' view.
+@MainActor
+final class TextTurns {
+    private var last: String?
+    private var count = 0
+
+    func turn(for text: String) -> Int {
+        if text != last {
+            last = text
+            count += 1
+        }
+        return count
     }
 }

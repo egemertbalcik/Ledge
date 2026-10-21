@@ -1029,12 +1029,18 @@ struct TransportButton: View {
     let action: () -> Void
 
     @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: size, weight: weight))
                 .foregroundStyle(tint)
+                // Play and pause trade places rather than cutting, in the
+                // same beat as the bars start to settle or rise; a plain
+                // cross-fade with Reduce Motion.
+                .contentTransition(reduceMotion ? .opacity : .symbolEffect(.replace))
+                .animation(Motion.medium, value: symbol)
                 .frame(width: 30, height: 28)
                 .background(
                     hovering ? AnyShapeStyle(.white.opacity(0.16)) : AnyShapeStyle(.clear),
@@ -1067,20 +1073,69 @@ struct NowPlayingEqualizer: View {
     // centre line growing symmetrically, neighbours out of phase.
     private static let phases: [Double] = [0.0, 0.55, 0.2, 0.75, 0.35, 0.9]
 
+    /// When `isAnimating` last changed, so the ramp can be read off the
+    /// drawing clock — the same ramp the ears' bars use.
+    @State private var changedAt: Date = .distantPast
+
+    /// The settle gets a finite budget, then the clock stops.
+    @State private var parked = true
+    @State private var parkTask: Task<Void, Never>?
+
+    private var allowsMotion: Bool { animationsEnabled && !reduceMotion }
+
     var body: some View {
+        // Kept running through the settle once playback stops. Stopping it the
+        // moment the card's state flipped dropped the bars flat in one frame,
+        // on every press of the card's own pause button — the snap the ears
+        // were cured of long ago.
         FixedRateClock(
-            isActive: isAnimating && animationsEnabled && !reduceMotion,
+            isActive: allowsMotion && (isAnimating || !parked),
             interval: .milliseconds(50)
         ) { date in
-            let t = date.timeIntervalSinceReferenceDate
-            let live = isAnimating && animationsEnabled && !reduceMotion ? levels() : []
+            let amount = allowsMotion
+                ? MiniWaveform.rampAmplitude(since: changedAt, at: date, rising: isAnimating) : 0
             WaveformBars(
-                heights: Self.phases.enumerated().map { index, phase in
-                    height(at: t, phase: phase, live: live, index: index) * scale
-                },
+                heights: heights(at: date, amplitude: amount).map { $0 * scale },
                 tint: .white.opacity(0.9), barWidth: 2.5 * scale,
                 spacing: 2.5 * scale, height: 18 * scale
             )
+        }
+        .onChange(of: isAnimating) { _, playing in
+            changedAt = Date()
+            parkTask?.cancel()
+            parked = !allowsMotion
+            if playing {
+                parkTask = nil
+            } else if allowsMotion {
+                parkTask = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(MiniWaveform.rampDuration + 0.05))
+                    guard !Task.isCancelled else { return }
+                    parked = true
+                }
+            }
+        }
+        .onChange(of: allowsMotion) { _, allowed in
+            if !allowed {
+                parkTask?.cancel()
+                parkTask = nil
+                parked = true
+            }
+        }
+        .onDisappear {
+            parkTask?.cancel()
+            parkTask = nil
+            parked = true
+        }
+    }
+
+    /// The six heights to draw, before `scale`. The shape is the same playing
+    /// or settling — the levels keep coming while paused — and only the
+    /// amplitude moves, so the bars sink from where they were.
+    func heights(at date: Date, amplitude: Double) -> [CGFloat] {
+        let live = allowsMotion ? levels() : []
+        let time = date.timeIntervalSinceReferenceDate
+        return Self.phases.enumerated().map { index, phase in
+            height(at: time, phase: phase, live: live, index: index, amplitude: amplitude)
         }
     }
 
@@ -1088,16 +1143,17 @@ struct NowPlayingEqualizer: View {
         at time: TimeInterval,
         phase: Double,
         live: [Double],
-        index: Int
+        index: Int,
+        amplitude: Double
     ) -> CGFloat {
-        guard isAnimating && animationsEnabled && !reduceMotion else { return 3 }
+        guard amplitude > 0 else { return 3 }
         if live.count == Self.phases.count {
             let level = live[index]
             guard level.isFinite else { return 3 }
-            return 3 + CGFloat(min(max(level, 0), 1)) * 14
+            return 3 + CGFloat(min(max(level, 0), 1) * amplitude) * 14
         }
         let wave = sin((time * 4.2) + phase * .pi * 2)
-        return 3 + CGFloat((wave + 1) / 2) * 14
+        return 3 + CGFloat((wave + 1) / 2) * 14 * amplitude
     }
 }
 
@@ -1175,30 +1231,45 @@ struct NowPlayingArtwork: View {
 
     @ViewBuilder
     private var content: some View {
-        if let image = shownImage {
-            Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-        } else {
-            ZStack {
-                LinearGradient(
-                    colors: [payload.accent.color.opacity(0.5), payload.accent.color.opacity(0.2)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                )
-                // A music note over a film is the wrong apology. Plenty of
-                // media arrives with no artwork at all — a browser publishes
-                // whatever the page bothered to set, which is often nothing —
-                // so the placeholder should at least be honest about what it
-                // is standing in for.
-                Image(systemName: payload.isVideo ? "play.rectangle.fill" : "music.note")
-                    .font(.system(size: size * 0.4, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.8))
+        // Keyed by the image, so a face that changes outside a turn — a
+        // cover arriving late, or any change with Reduce Motion — can
+        // cross-fade. The swap at edge-on carries no animation and stays a
+        // plain swap: nothing of the card is visible to fade. The ZStack is
+        // what lets the outgoing face stay beneath the incoming one.
+        ZStack {
+            if let image = shownImage {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                    .id(ObjectIdentifier(image))
+                    .transition(Motion.coverSwap)
+            } else {
+                ZStack {
+                    // The card's own black, under the tint: what it looks
+                    // like at rest, but opaque, so the cover it fades in over
+                    // does not show through and then vanish at the end.
+                    Color.black
+                    LinearGradient(
+                        colors: [payload.accent.color.opacity(0.5), payload.accent.color.opacity(0.2)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                    // A music note over a film is the wrong apology. Plenty of
+                    // media arrives with no artwork at all — a browser publishes
+                    // whatever the page bothered to set, which is often nothing —
+                    // so the placeholder should at least be honest about what it
+                    // is standing in for.
+                    Image(systemName: payload.isVideo ? "play.rectangle.fill" : "music.note")
+                        .font(.system(size: size * 0.4, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .transition(Motion.coverSwap)
             }
         }
     }
 
-    /// First image ever: show it plainly, no theatre.
+    /// First image ever: no theatre, but a cover that lands on an open card
+    /// fades in over the placeholder rather than cutting in.
     private func seedIfNeeded() {
         if shownImage == nil, shownKey == nil, let image = decodedImage() {
-            shownImage = image
+            withAnimation(Motion.medium) { shownImage = image }
             shownKey = trackKey
             latestImage = image
             latestKey = trackKey
@@ -1255,7 +1326,9 @@ struct NowPlayingArtwork: View {
         latestKey = trackKey
         latestImage = image
         guard trackKey == shownKey, let image else { return }
-        if shownImage !== image { shownImage = image }
+        if shownImage !== image {
+            withAnimation(Motion.medium) { shownImage = image }
+        }
     }
 
     /// One clean card turn about the vertical axis. Next spins one way, previous
@@ -1288,7 +1361,7 @@ struct NowPlayingArtwork: View {
         guard !reduceMotion else {
             shownKey = key
             if let arrived = latestImage {
-                shownImage = arrived
+                withAnimation(Motion.medium) { shownImage = arrived }
                 return
             }
             // No cover yet. The old one holds for the same grace the turn
@@ -1299,7 +1372,7 @@ struct NowPlayingArtwork: View {
             graceTask = Task { @MainActor in
                 try? await Task.sleep(for: Self.edgeOnGrace)
                 guard !Task.isCancelled, shownKey == key, latestKey == key else { return }
-                shownImage = latestImage
+                withAnimation(Motion.medium) { shownImage = latestImage }
             }
             return
         }
@@ -1314,16 +1387,23 @@ struct NowPlayingArtwork: View {
             // decide what it turns back with. Read through the state boxes —
             // `payload` on this captured struct is whatever it was when the
             // turn began.
-            var face = latestKey == key ? latestImage : nil
+            //
+            // The song it turns back with is the newest one, not the one that
+            // started the turn. Two skips inside the out-leg used to come back
+            // on the placeholder — the first song's cover had already been
+            // overwritten by the second's — and then turn a second time,
+            // though both covers were in hand.
+            var landing = latestKey ?? key
+            var face = latestImage
             if face == nil {
                 var waited: Duration = .zero
                 while waited < Self.edgeOnGrace {
                     try? await Task.sleep(for: Self.edgeOnStep)
                     waited += Self.edgeOnStep
                     if Task.isCancelled { break }
-                    // Moved on again — stop waiting for a cover nobody needs.
-                    if let current = latestKey, current != key { break }
-                    if let arrived = latestImage, latestKey == key {
+                    // Moved on again: wait for that song's cover instead.
+                    if let current = latestKey, current != landing { landing = current }
+                    if let arrived = latestImage {
                         face = arrived
                         break
                     }
@@ -1335,7 +1415,7 @@ struct NowPlayingArtwork: View {
             // about what is on. The placeholder says "no cover" instead, and
             // `artworkArrived` still fills it in if one turns up late.
             shownImage = face
-            shownKey = key
+            shownKey = landing
             angle = -out
             withAnimation(.easeOut(duration: 0.18)) { angle = 0 }
             try? await Task.sleep(for: .milliseconds(190))

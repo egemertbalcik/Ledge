@@ -9,6 +9,7 @@ public struct CompactEarsView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.weatherUnits) private var weatherUnits
+    @Environment(\.chargeChangeAnimation) private var chargeChangeOverride
 
     private let audioLevels: () -> [Double]
 
@@ -24,6 +25,11 @@ public struct CompactEarsView: View {
     /// cutout. Clamped so a hand-edited value cannot push content offscreen.
     private let leadingOffset: CGFloat
     private let trailingOffset: CGFloat
+
+    /// The song whose cover the music ears last wore, so the next song can
+    /// borrow it while its own is on the way — see `EarCover`.
+    @State private var wornCover: EarCover?
+    @State private var coverHold: Task<Void, Never>?
 
     public init(activity: Activity, cutoutWidth: CGFloat, inset: CGFloat,
         audioLevels: @escaping () -> [Double] = { [] },
@@ -80,10 +86,22 @@ public struct CompactEarsView: View {
             .offset(x: -(trailingOffset + inwardNudge))
         }
         .padding(.horizontal, inset)
+        .onAppear { coverChanged() }
+        .onChange(of: coverIdentity) { _, _ in coverChanged() }
+        .onDisappear {
+            coverHold?.cancel()
+            coverHold = nil
+        }
         // Driven by identity: a now-playing card republishes every second, and
         // animating on the whole activity would restart this on every tick.
         .animation(Motion.earContent, value: activity.id)
         .animation(Motion.earContent, value: trailingHidden)
+        // Charging starting or stopping refreshes the same card in place, so
+        // the swap above never runs. Both ears follow it on one beat, from
+        // here rather than inside each: the readout's ear re-centres a row
+        // that has grown a ring, and only an animation this far out moves
+        // the row as well as what is in it.
+        .animation(chargeChange, value: isCharging)
         // Glyph and readout are one activity: a single element, the way the
         // level HUD's ears read, instead of VoiceOver landing on an unlabelled
         // image and then a bare "24°".
@@ -164,7 +182,8 @@ public struct CompactEarsView: View {
         if case .nowPlaying(let payload) = activity.payload {
             // Album art in the ear, so the resting companion reads as "music",
             // not a generic note glyph.
-            NowPlayingThumbnail(payload: payload, accent: accent)
+            let cover = shownCover(for: payload)
+            NowPlayingThumbnail(payload: cover, accent: cover.accent.color)
                 // Twenty, and two and a half points nearer the outer edge.
                 //
                 // Centred content in a 48pt ear puts a 22pt tile 15pt from the
@@ -237,6 +256,15 @@ public struct CompactEarsView: View {
             // on a white rounded tile — unmistakably "calendar", where the
             // flat glyph read as clip-art.
             CalendarDayTile()
+        } else if case .power = activity.payload {
+            // The battery dissolving into the bolt when charging starts in
+            // place, rather than cutting to it: a plain cross-fade, for the
+            // reason the level HUD gives for its own glyph.
+            Image(systemName: symbolName)
+                .font(.cardTitle)
+                .foregroundStyle(accent)
+                .padding(.horizontal, 6)
+                .contentTransition(.opacity)
         } else {
             Image(systemName: symbolName)
                 .font(.cardTitle)
@@ -264,7 +292,11 @@ public struct CompactEarsView: View {
     private var trailingContent: some View {
         switch activity.payload {
         case .nowPlaying(let payload):
-            MiniWaveform(isAnimating: payload.isPlaying, tint: accent, levels: audioLevels)
+            // The colour belongs to the cover on the tile, held and faded with
+            // it; whether the bars move is still this song's own state.
+            let cover = shownCover(for: payload)
+            MiniWaveform(isAnimating: payload.isPlaying, tint: cover.accent.color, levels: audioLevels)
+                .animation(Motion.medium, value: cover.accent)
         case .device(let payload):
             // The battery as a ring: the charged arc drawn thicker than the
             // track. For multi-cell devices (AirPods: case/left/right) the lowest
@@ -308,21 +340,19 @@ public struct CompactEarsView: View {
             // the plain readout (red when it is time to find a cable).
             // Single-line always: "100%" beside the ring is at the ear's
             // limit, and a wrapped percentage read as two stacked digits.
-            if payload.isCharging {
-                HStack(spacing: 4) {
+            //
+            // One percentage either way, with the ring arriving beside it, so
+            // charging starting in place moves the number over rather than
+            // swapping one label for another twelve points along.
+            HStack(spacing: 4) {
+                if payload.isCharging {
                     BatteryRing(level: max(payload.percentage, 0.02))
-                    Text("\(Int((payload.percentage * 100).rounded()))%")
-                        .font(.cardCaption)
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.9))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .transition(Motion.earSwap(reduced: reduceMotion))
                 }
-            } else {
                 Text("\(Int((payload.percentage * 100).rounded()))%")
                     .font(.cardCaption)
                     .monospacedDigit()
-                    .foregroundStyle(payload.percentage < 0.2 ? .red : .white.opacity(0.9))
+                    .foregroundStyle(!payload.isCharging && payload.percentage < 0.2 ? .red : .white.opacity(0.9))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
@@ -436,6 +466,47 @@ public struct CompactEarsView: View {
         }
     }
 
+    // MARK: - The cover the music ears wear
+
+    private func incomingCover() -> EarCover? {
+        guard case .nowPlaying(let payload) = activity.payload else { return nil }
+        return EarCover(player: activity.id, payload: payload)
+    }
+
+    /// What decides the cover. Not the whole payload: that changes every
+    /// second with the position.
+    private var coverIdentity: EarCover.Identity? { incomingCover()?.identity }
+
+    /// The payload whose cover and colour the ears draw: this one, or the
+    /// last song's while this one's cover is on its way.
+    private func shownCover(for payload: NowPlayingPayload) -> NowPlayingPayload {
+        let incoming = EarCover(player: activity.id, payload: payload)
+        guard let worn = wornCover, EarCover.mayStandIn(worn, for: incoming) else { return payload }
+        return worn.payload
+    }
+
+    private func coverChanged() {
+        guard let incoming = incomingCover() else { return }
+        if let worn = wornCover, EarCover.mayStandIn(worn, for: incoming) {
+            // Bounded from the first song that came without a cover, and not
+            // restarted by the next one: skipping through several such songs
+            // must not keep the old cover up indefinitely.
+            guard coverHold == nil else { return }
+            coverHold = Task { @MainActor in
+                try? await Task.sleep(for: EarCover.hold)
+                guard !Task.isCancelled else { return }
+                coverHold = nil
+                // Nothing came. The placeholder is the honest answer now,
+                // faded in rather than cut.
+                withAnimation(Motion.medium) { wornCover = nil }
+            }
+            return
+        }
+        coverHold?.cancel()
+        coverHold = nil
+        wornCover = incoming
+    }
+
     /// The card's relative countdown with its "in " prefix dropped: "1h 59m",
     /// "15m", "now". Only the ear uses this — the card keeps the full phrase.
     static func earCountdown(_ seconds: TimeInterval) -> String {
@@ -447,6 +518,18 @@ public struct CompactEarsView: View {
         Circle()
             .fill(accent)
             .frame(width: 6, height: 6)
+    }
+
+    /// Whether the power card on show is charging. False for every other card.
+    private var isCharging: Bool {
+        if case .power(let payload) = activity.payload { payload.isCharging } else { false }
+    }
+
+    /// How the power ears follow charging starting or stopping under a card
+    /// that stays put. The ears' own swap timing, or a short ease without the
+    /// spring's travel when motion is reduced, the way the island opens.
+    private var chargeChange: Animation {
+        chargeChangeOverride ?? (reduceMotion ? .easeInOut(duration: 0.18) : Motion.earContent)
     }
 
     private var symbolName: String {
@@ -589,6 +672,49 @@ struct BatteryRing: View {
     }
 }
 
+/// What the music ears wear: one song's tile and the colour its bars take.
+///
+/// A new song is published the moment its title is known, and its cover —
+/// with the colour taken from it — a fetch later: about 0.15 s cold, and over
+/// a second when the re-read behind the fetch goes through a script. Drawn as
+/// it came, that was three hard states for one song: the old cover, a grey
+/// note with grey bars, then the new cover. The ears carry no title, so the
+/// old cover may stand in for a while, and the change is one cross-fade.
+struct EarCover {
+    let player: ActivityID
+    let payload: NowPlayingPayload
+
+    /// How long the last cover may stand in for a song with none yet. Long
+    /// enough for a cover behind a scripted re-read (up to about 1.4 s);
+    /// short enough that a song with no cover of its own settles on the
+    /// placeholder soon after it starts.
+    static let hold: Duration = .milliseconds(1500)
+
+    struct Identity: Equatable {
+        let player: ActivityID
+        let song: String
+        let cover: String?
+        let hasCover: Bool
+        let accent: AccentColor
+    }
+
+    var song: String { payload.itemKey ?? "\(payload.title)\u{1F}\(payload.artist)" }
+    var hasCover: Bool { payload.artworkData != nil }
+
+    var identity: Identity {
+        Identity(player: player, song: song, cover: payload.artworkKey,
+                 hasCover: hasCover, accent: payload.accent)
+    }
+
+    /// Whether `worn` may stand in for `incoming`: the same player, another
+    /// song, and only while that song has no cover of its own. A song that
+    /// loses its cover, or a different player, gets the placeholder at once.
+    static func mayStandIn(_ worn: EarCover, for incoming: EarCover) -> Bool {
+        worn.player == incoming.player && worn.hasCover && !incoming.hasCover
+            && worn.song != incoming.song
+    }
+}
+
 /// The tiny album-art tile shown in the companion ear. Falls back to a tinted
 /// gradient with a note when the player exposes no artwork.
 struct NowPlayingThumbnail: View {
@@ -609,20 +735,39 @@ struct NowPlayingThumbnail: View {
         return img
     }
 
+    /// Which face is up: a cover by its key, or the placeholder.
+    private var faceKey: String? {
+        guard let data = payload.artworkData else { return nil }
+        return payload.artworkKey ?? "\(payload.title)-\(data.count)"
+    }
+
     var body: some View {
         ZStack {
+            // Each face keyed and faded, so a cover changing — a new song's
+            // arriving, or the placeholder taking over — is one cross-fade,
+            // the same with Reduce Motion.
             if let image {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                    .id(faceKey)
+                    .transition(Motion.coverSwap)
             } else {
-                LinearGradient(
-                    colors: [accent.opacity(0.6), accent.opacity(0.25)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                )
-                Image(systemName: "music.note")
-                    .font(.cardCaption)
-                    .foregroundStyle(.white.opacity(0.9))
+                ZStack {
+                    // The ear's own black under the tint, so the placeholder
+                    // is opaque: a cover it fades in over must not show
+                    // through and then vanish at the end.
+                    Color.black
+                    LinearGradient(
+                        colors: [accent.opacity(0.6), accent.opacity(0.25)],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                    Image(systemName: "music.note")
+                        .font(.cardCaption)
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                .transition(Motion.coverSwap)
             }
         }
+        .animation(Motion.medium, value: faceKey)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -659,7 +804,8 @@ struct MiniWaveform: View {
     }
 
     /// How long the bars take to rise or settle when playback starts or stops.
-    private static let rampDuration: TimeInterval = 0.28
+    /// The card's equalizer uses the same ramp, so the two are one motif.
+    static let rampDuration: TimeInterval = 0.28
 
     /// The six heights to draw.
     ///
@@ -740,10 +886,15 @@ struct MiniWaveform: View {
     /// at its final value immediately rather than interpolated — so an animation
     /// modifier could not smooth it.
     private func amplitude(at date: Date) -> Double {
-        let progress = min(max(date.timeIntervalSince(changedAt) / Self.rampDuration, 0), 1)
+        Self.rampAmplitude(since: changedAt, at: date, rising: isAnimating)
+    }
+
+    /// The ramp itself, shared with the card's equalizer.
+    static func rampAmplitude(since changedAt: Date, at date: Date, rising: Bool) -> Double {
+        let progress = min(max(date.timeIntervalSince(changedAt) / rampDuration, 0), 1)
         // Smoothstep, so the bars ease away instead of sliding linearly to flat.
         let eased = progress * progress * (3 - 2 * progress)
-        return isAnimating ? eased : 1 - eased
+        return rising ? eased : 1 - eased
     }
 
     private func height(at time: TimeInterval, phase: Double, amplitude: Double) -> CGFloat {
@@ -775,5 +926,19 @@ public struct PageDots: View {
                 }
             }
         }
+    }
+}
+
+private struct ChargeChangeAnimationKey: EnvironmentKey {
+    static let defaultValue: Animation? = nil
+}
+
+extension EnvironmentValues {
+    /// Stands in for the power ears' timing when charging starts or stops.
+    /// Nil in the app. A test holds the change part-way with it, so what it
+    /// sees does not depend on when the run loop gets round to drawing.
+    var chargeChangeAnimation: Animation? {
+        get { self[ChargeChangeAnimationKey.self] }
+        set { self[ChargeChangeAnimationKey.self] = newValue }
     }
 }

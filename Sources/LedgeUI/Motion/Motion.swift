@@ -120,6 +120,17 @@ public enum Motion {
     /// crossfade, no translation, no scale, no blur.
     public static var reducedSwap: AnyTransition { .opacity }
 
+    /// One cover giving way to another: the new face fades in over the old,
+    /// which stays whole beneath it until the fade is done. Two plain fades
+    /// over a black ear left the tile a sixth darker at the halfway point.
+    /// Movement-free, so it is its own Reduce Motion form.
+    public static var coverSwap: AnyTransition {
+        .asymmetric(
+            insertion: .opacity,
+            removal: .modifier(active: StaysBeneath(progress: 0), identity: StaysBeneath(progress: 1))
+        )
+    }
+
     /// The media card turning over to its output list and back.
     ///
     /// Anchored at the AirPlay button, because that is where the press was: the
@@ -174,5 +185,16 @@ struct EarSwapEffect: ViewModifier {
             .opacity(hidden ? 0 : 1)
             .scaleEffect(hidden ? 0.72 : 1)
             .blur(radius: hidden ? 2.5 : 0)
+    }
+}
+
+/// The outgoing half of `Motion.coverSwap`: drawn unchanged, under whatever
+/// replaces it. The progress does nothing visible; it is there so the face
+/// is kept for the length of the fade instead of leaving at once.
+private struct StaysBeneath: ViewModifier, Animatable {
+    nonisolated var animatableData: Double
+    init(progress: Double) { animatableData = progress }
+    func body(content: Content) -> some View {
+        content.zIndex(-1)
     }
 }

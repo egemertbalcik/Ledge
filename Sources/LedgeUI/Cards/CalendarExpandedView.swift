@@ -23,6 +23,11 @@ public struct CalendarExpandedView: View {
     /// the span the provider ships data for.
     @State private var monthOffset: Int = 0
 
+    /// How many times the month has been paged. Only the title reads it: it
+    /// is the title's identity, so every page brings a new label in and
+    /// sends every older one out.
+    @State private var pages = 0
+
     /// Which month the selected day belongs to. Browsing used to clear the
     /// selection outright, on the grounds that day 6 of August is not day 6 of
     /// September — true, and the fix is to remember which month was meant
@@ -92,6 +97,16 @@ public struct CalendarExpandedView: View {
 
     private func month(at offset: Int) -> Date {
         Calendar.current.date(byAdding: .month, value: offset, to: now) ?? now
+    }
+
+    /// Today, whichever month the grid is on.
+    ///
+    /// The grid is built around now plus the offset, so its own "today" is
+    /// today's day number in *that* month: a Friday in November for a
+    /// Tuesday in October, or the 28th for the 31st paged into February. The
+    /// day column is about the real today, so it asks the real month.
+    private func today(_ grid: MonthGrid) -> MonthGrid {
+        monthOffset == 0 ? grid : MonthGrid.make(containing: now)
     }
 
     private func window(at offset: Int) -> MonthWindow? {
@@ -213,10 +228,11 @@ public struct CalendarExpandedView: View {
 
     @ViewBuilder
     private func leftColumn(_ grid: MonthGrid) -> some View {
+        let today = today(grid)
         if let day = selectedDay {
-            selectedDayColumn(grid, day: day)
+            selectedDayColumn(grid, today: today, day: day)
         } else {
-            upcomingColumn(grid)
+            upcomingColumn(today)
         }
     }
 
@@ -225,9 +241,9 @@ public struct CalendarExpandedView: View {
     /// Tapping used to set `selectedDay` and stop there — the disc moved and
     /// nothing else did, because this column only ever rendered the *next*
     /// event. The selection had no reader.
-    private func selectedDayColumn(_ grid: MonthGrid, day: Int) -> some View {
+    private func selectedDayColumn(_ grid: MonthGrid, today: MonthGrid, day: Int) -> some View {
         let entries = events(at: selectedOffset).first { $0.day == day }?.entries ?? []
-        let isToday = selectedOffset == 0 && day == grid.todayDay
+        let isToday = selectedOffset == 0 && day == today.todayDay
         // The month is worth naming only when the grid is looking at a
         // different one — beside a grid already titled AUGUST it would just be
         // the word twice.
@@ -237,7 +253,7 @@ public struct CalendarExpandedView: View {
             // of the week this is — and the month, when it is needed at all,
             // is a note beside it rather than a replacement for it.
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(weekdayName(day: day, offset: selectedOffset, grid: grid, isToday: isToday))
+                Text(weekdayName(day: day, offset: selectedOffset, grid: today, isToday: isToday))
                     .font(.cardBadge)
                     .foregroundStyle(.red)
                     .lineLimit(1)
@@ -259,6 +275,11 @@ public struct CalendarExpandedView: View {
             // is for in order to show a button about one of them. The date is
             // 32 points tall and the capsule is shorter, so here it costs
             // nothing at all.
+            // No trailing Spacer: the column already sits the row on its
+            // leading edge, and a Spacer is a third child, so the stack put a
+            // second 8pt gap before it. That gap was taken from the date —
+            // "20" and "30" are 42pt, offered 41 beside Join, and drawn as
+            // "…".
             HStack(alignment: .center, spacing: 8) {
                 // The date opens Calendar.app on this day, the way the weather
                 // card opens Weather. The rows below open their own event; this
@@ -276,10 +297,9 @@ public struct CalendarExpandedView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Open \(day) in Calendar")
-                if selectedOffset == 0 && day == grid.todayDay {
+                if isToday {
                     joinButton
                 }
-                Spacer(minLength: 0)
             }
 
             // A fixed gap, not a Spacer: a Spacer here pinned the events to the
@@ -606,9 +626,20 @@ public struct CalendarExpandedView: View {
     private func monthColumn(_ grid: MonthGrid) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 0) {
-                Text(grid.monthName)
-                    .font(.cardBadge)
-                    .foregroundStyle(.red)
+                // One label per page rather than one label whose text
+                // changes: the same label cross-faded the two names on top of
+                // each other, and for a moment the title read as neither. Per
+                // page, not per month: paging back and forth quickly brought
+                // the month that was still fading out straight back, on top
+                // of the one arriving. Stacked, so the leaving name does not
+                // hold the arriving one's place in the row.
+                ZStack(alignment: .leading) {
+                    Text(grid.monthName)
+                        .font(.cardBadge)
+                        .foregroundStyle(.red)
+                        .id(pages)
+                        .transition(monthNameSwap)
+                }
 
                 Spacer(minLength: 4)
 
@@ -616,10 +647,10 @@ public struct CalendarExpandedView: View {
                 // ships; going further would show a grid with silently missing
                 // dots, which reads as "no events" rather than "no data".
                 monthArrow("chevron.left", enabled: monthOffset > -1) {
-                    monthOffset -= 1
+                    page(by: -1)
                 }
                 monthArrow("chevron.right", enabled: monthOffset < 1) {
-                    monthOffset += 1
+                    page(by: 1)
                 }
             }
 
@@ -642,6 +673,38 @@ public struct CalendarExpandedView: View {
                 }
             }
         }
+    }
+
+    /// The old name is gone before the new one arrives, both inside the
+    /// card's own resize. Each carries its own timing, so a page with no
+    /// change of depth — no spring to ride — changes its name the same way,
+    /// and a burst of clicks only ever has one name on its way in.
+    private var monthNameSwap: AnyTransition {
+        let out = reduceMotion ? 0.07 : 0.1
+        return .asymmetric(
+            insertion: .opacity.animation(.easeOut(duration: reduceMotion ? 0.09 : 0.14).delay(out)),
+            removal: .opacity.animation(.easeIn(duration: out))
+        )
+    }
+
+    /// Moves the grid a month, and tells the shell how deep that month is in
+    /// the same breath.
+    ///
+    /// The depth used to reach the shell only through `onChange`, one update
+    /// after the grid had redrawn: the new row was drawn whole inside the old
+    /// outline, the taller content sat centred in a card not yet grown for
+    /// it, and only the outline sprang. Said here, the grid and the card's
+    /// size change in one update, so the shell's spring on that size carries
+    /// both — the row is uncovered by the edge as it moves, and the way back
+    /// is the same motion reversed.
+    private func page(by step: Int) {
+        let target = monthOffset + step
+        // The arrows dim at the edge, but two clicks can land before the
+        // dimming is drawn.
+        guard (-1...1).contains(target) else { return }
+        onWeekRows(MonthGrid.make(containing: month(at: target)).weeks.count)
+        monthOffset = target
+        pages += 1
     }
 
     @ViewBuilder

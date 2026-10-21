@@ -7,8 +7,12 @@ import SwiftUI
 @MainActor
 @Observable
 public final class NotchPresentation {
-    public var phase: NotchPhase = .idle
-    public var selected: Activity?
+    public var phase: NotchPhase = .idle {
+        didSet { if phase != oldValue { noteWhereTheIslandIsHeading() } }
+    }
+    public var selected: Activity? {
+        didSet { if selected?.id != oldValue?.id { noteWhereTheIslandIsHeading() } }
+    }
     public var companion: Activity?
 
     /// The now-playing activity, whatever else is selected.
@@ -204,27 +208,53 @@ public final class NotchPresentation {
 
     /// A card measuring itself. Filed under that card, whichever card is on
     /// show by the time it arrives.
-    public func reportCardContent(height: CGFloat, from id: ActivityID) {
+    ///
+    /// - Parameter flight: the island's own spring, for a first measurement
+    ///   that has to join it.
+    public func reportCardContent(height: CGFloat, from id: ActivityID, flight: Animation? = nil) {
         guard height > 0, height.isFinite else { return }
         if cardContentHeights[id] == height { return }
-        // A card's *first* measurement is not a change anybody asked to see.
+        // A card measures itself the moment it is first laid out, which is
+        // the moment the island set off towards it — opening, or cycling to
+        // it. So its first measurement lands while that spring is running,
+        // and has to join it rather than be applied around it.
         //
-        // The island opens at the unmeasured floor, the card then says how
-        // tall it really is, and the spring on `expandedSize` animated the
-        // difference — so the card arrived, settled, and sprang again. That
-        // second movement is the glitch: it reads as the opening animation
-        // going wrong rather than as the card growing, because nothing the
-        // user did caused it.
+        // Applied silently, the difference was not a later snap but an offset
+        // to the whole flight: the Focus card's 36 points under the estimate
+        // started the island above the cutout, so the peek's ears blinked out
+        // and the island dropped in from nothing, and the Shelf's extra 16
+        // landed as a jump in the first frame. Joined, a correction that
+        // arrives before the first frame draws what a right estimate would.
+        // Joined explicitly, with the island's spring: left to the shape's
+        // `.animation(value: expandedSize)`, the page dots riding its edge
+        // went straight to the finished height and hung below it.
         //
-        // Every later measurement still animates: a card that grows a row or
-        // a sentence while somebody is looking at it *should* be seen to.
-        if cardContentHeights[id] == nil {
+        // Silent only when nothing is heading for this card: a card the island
+        // was not sent to has no flight to join. Every later measurement
+        // animates — a card that grows a row while somebody is looking at it
+        // should be seen to.
+        let isFirst = cardContentHeights[id] == nil
+        let joinsTheFlight = id == arriving
+        if joinsTheFlight { arriving = nil }
+        if isFirst, !joinsTheFlight {
             var silent = Transaction()
             silent.disablesAnimations = true
             withTransaction(silent) { record(height: height, from: id) }
             return
         }
+        if isFirst, let flight {
+            withAnimation(flight) { record(height: height, from: id) }
+            return
+        }
         record(height: height, from: id)
+    }
+
+    /// The card the island was last sent towards, until it says how tall it
+    /// is. Nothing draws from it, so it is not observed.
+    @ObservationIgnored private var arriving: ActivityID?
+
+    private func noteWhereTheIslandIsHeading() {
+        arriving = phase == .hover || phase == .expanded ? selected?.id : nil
     }
 
     private func record(height: CGFloat, from id: ActivityID) {
@@ -498,6 +528,9 @@ public struct NotchOverlayView: View {
 
     private var isHovering: Bool { isHoveredDisplay && presentation.isHovering }
 
+    /// Whether a card is open on this panel — the phases that show page dots.
+    private var isOpen: Bool { phase == .hover || phase == .expanded }
+
     /// Who holds the media card's drag latch. Lives here rather than in the
     /// card because the card is the thing being replaced — see `DragLatch`.
     @State private var mediaDrag = DragLatch()
@@ -578,6 +611,12 @@ public struct NotchOverlayView: View {
                     reduceMotion ? .easeInOut(duration: 0.2) : .easeInOut(duration: 0.42),
                     value: presentation.greeting
                 )
+                // Above the fill for good, not just by order. A branch on its
+                // way out of the phase switch is otherwise composited *under*
+                // the black, so its fade ran out of sight: the card cut out in
+                // one frame and an empty slab eased shut. Raised, it dissolves
+                // while the island closes around it.
+                .zIndex(1)
         }
         // `alignment: .top` is not cosmetic. `frame` does not clip, and the
         // ZStack sizes to its tallest child — so if the content cannot compress
@@ -643,8 +682,14 @@ public struct NotchOverlayView: View {
         // Anchored to the drawn shape, not the card content: content can run
         // taller than the shape on cards with height floors, and dots pinned
         // to its bottom were half-clipped by the shape on exactly those cards.
+        //
+        // Mounted whenever there is a card, and shown by opacity rather than
+        // by an `if` on the phase: an inserted view takes its final position
+        // at once, so the dots used to appear at the finished card's bottom
+        // edge and wait in mid-air for the island, and on close hung at the
+        // old edge while it retracted. Kept mounted, they ride the edge.
         .overlay(alignment: .bottom) {
-            if (phase == .hover || phase == .expanded), presentation.selected != nil {
+            if presentation.selected != nil {
                 PageDots(
                     count: presentation.count,
                     selectedIndex: presentation.selectedIndex
@@ -655,12 +700,21 @@ public struct NotchOverlayView: View {
                 // discoverable without shouting.
                 .opacity(dotsBright ? 1 : 0.3)
                 .animation(.easeOut(duration: 0.5), value: dotsBright)
-                .onAppear { brightenDots() }
+                // Riding the edge, they would sweep across the card's text
+                // as it grows and shrinks. So they follow the shape in rather
+                // than racing it, and leave before it has moved far. Scoped to
+                // the opacity alone: their position stays on the shape's spring.
+                .animation(isOpen
+                    ? Motion.content(response: preferences.springResponse, reduced: reduceMotion)
+                    : Motion.fast
+                ) { $0.opacity(isOpen ? 1 : 0) }
+                .onChange(of: isOpen, initial: true) { _, open in
+                    if open { brightenDots() }
+                }
                 .onChange(of: presentation.selectedIndex) { brightenDots() }
                 .padding(.bottom, 7)
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
-                .transition(.opacity)
             }
         }
         .overlay {
@@ -671,7 +725,11 @@ public struct NotchOverlayView: View {
             // Centre. A fixed subtle stroke reads the same on dark, vanishes
             // into light backdrops on its own, costs nothing, and needs no
             // permission at all.
-            if preferences.outlineEnabled, phase != .idle {
+            //
+            // Faded by phase rather than inserted, for the same reason as the
+            // page dots: inserted, it was drawn at the finished card's size
+            // around an island still growing into it.
+            if preferences.outlineEnabled {
                 shape.stroke(.white.opacity(0.14), lineWidth: 1)
                     // The top edge is flush with the screen's own edge — the
                     // shape *is* connected there, and outlining it would draw
@@ -679,7 +737,7 @@ public struct NotchOverlayView: View {
                     .mask(alignment: .bottom) {
                         Rectangle().padding(.top, 3)
                     }
-                    .transition(.asymmetric(insertion: .opacity, removal: .identity))
+                    .opacity(phase == .idle ? 0 : 1)
                     .allowsHitTesting(false)
             }
             // A dashed outline while a drag is over the notch, so the shape
@@ -1013,7 +1071,14 @@ public struct NotchOverlayView: View {
                         // cards are sized by the split, not by their content.
                         onTimerHeight: { presentation.timerContentHeight = $0 },
                         onContentHeight: { id, height in
-                            presentation.reportCardContent(height: height, from: id)
+                            presentation.reportCardContent(
+                                height: height, from: id,
+                                flight: Motion.expand(
+                                    response: preferences.springResponse,
+                                    damping: preferences.springDamping,
+                                    reduced: reduceMotion
+                                )
+                            )
                         },
                         swapResponse: preferences.springResponse,
                         swapDamping: preferences.springDamping,
