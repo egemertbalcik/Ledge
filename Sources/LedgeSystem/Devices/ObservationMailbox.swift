@@ -44,12 +44,34 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     /// Well inside the shortest freshness window.
     public static let heartbeat: TimeInterval = 2 * 60
 
+    /// What observations are coalesced by: the device, and whether the air
+    /// or the system said it.
+    ///
+    /// By device alone, a system reading still waiting here was replaced by
+    /// the next advertisement for the same earbuds and never reached the
+    /// catalogue — and that reading is the one witness that knows whose set
+    /// it describes. The catalogue relies on it to keep a neighbour's
+    /// charging AirPods from releasing the user's low alert.
+    struct Key: Hashable {
+        let id: DeviceIdentity
+        let overTheAir: Bool
+
+        init(_ observation: DeviceObservation) {
+            self.init(id: observation.canonicalID, overTheAir: observation.cause == .advertisement)
+        }
+
+        init(id: DeviceIdentity, overTheAir: Bool) {
+            self.id = id
+            self.overTheAir = overTheAir
+        }
+    }
+
     private struct State {
-        /// Latest per device, waiting to be forwarded.
-        var pending: [DeviceIdentity: DeviceObservation] = [:]
+        /// Latest per device and provenance, waiting to be forwarded.
+        var pending: [Key: DeviceObservation] = [:]
         /// What was last forwarded, to tell news from noise.
-        var forwarded: [DeviceIdentity: DeviceObservation] = [:]
-        var lastForwardedAt: [DeviceIdentity: Date] = [:]
+        var forwarded: [Key: DeviceObservation] = [:]
+        var lastForwardedAt: [Key: Date] = [:]
         /// Whether a drain owns the queue. Exactly one may, and it keeps
         /// ownership until it finds the queue empty — including across an
         /// `invalidate()`, which is what guarantees that only one delivery is
@@ -127,7 +149,7 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         // these maps every few minutes and never remove one — the catalogue
         // was fixed to canonicalise, and this was still indexing by the raw
         // UUID, so the leak simply moved here.
-        let key = observation.canonicalID
+        let key = Key(observation)
         let shouldStart: Bool = state.withLock { s in
             // On the way out. Accepting this would queue work behind a
             // shutdown that is already waiting for the queue to empty.
@@ -291,6 +313,24 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
         }
     }
 
+    /// Returns once nothing is queued and nothing is in flight, leaving the
+    /// mailbox open.
+    ///
+    /// For tests. `close()` is the same barrier for the way out; polling
+    /// `isDraining` against a count of short sleeps instead ran out whenever
+    /// the full suite held the main thread for longer than the count allowed.
+    func settled() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = state.withLock { s in
+                guard !s.pending.isEmpty || !s.pendingLiveness.isEmpty || s.isDraining
+                else { return true }
+                s.quiesced.append(continuation)
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
     /// Keeps the bookkeeping bounded, dropping the devices not heard from for
     /// longest. Never drops anything still pending.
     private static func evictOldest(_ s: inout State) {
@@ -330,9 +370,12 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     /// Forgets a device entirely — for a record the user removed.
     public func forget(_ id: DeviceIdentity) {
         state.withLock { s in
-            s.pending[id] = nil
-            s.forwarded[id] = nil
-            s.lastForwardedAt[id] = nil
+            for overTheAir in [false, true] {
+                let key = Key(id: id, overTheAir: overTheAir)
+                s.pending[key] = nil
+                s.forwarded[key] = nil
+                s.lastForwardedAt[key] = nil
+            }
         }
     }
 
@@ -344,7 +387,7 @@ public final class ObservationMailbox: DeviceObservationSink, @unchecked Sendabl
     /// How many devices this mailbox is remembering. The number that must not
     /// grow when an identifier rotates.
     var trackedDeviceCount: Int {
-        state.withLock { Set($0.forwarded.keys).union($0.lastForwardedAt.keys).count }
+        state.withLock { Set(Set($0.forwarded.keys).union($0.lastForwardedAt.keys).map(\.id)).count }
     }
     var isDraining: Bool { state.withLock { $0.isDraining } }
     var isClosed: Bool { state.withLock { $0.isClosed } }

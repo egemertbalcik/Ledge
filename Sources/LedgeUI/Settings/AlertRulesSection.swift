@@ -89,13 +89,14 @@ struct AlertRulesSection: View {
             : DeviceAlertConfiguration(rules: [.defaultLow()], isCustomised: false)
     }
 
+    /// Asked of the record, which remembers: the cell's current reading may
+    /// be the system's, which never says.
     private func supportsCharged(_ component: BatteryComponent?) -> Bool {
-        guard let component else { return supportsAnyCharging }
-        return BatteryAlertEngine.supportsCharged(record.readings, for: component)
+        record.reportsCharging(component)
     }
 
     private var supportsAnyCharging: Bool {
-        record.readings.contains { $0.charging != .unknown }
+        record.reportsCharging(nil)
     }
 
     private func commit(_ rules: [BatteryAlertRule]) {

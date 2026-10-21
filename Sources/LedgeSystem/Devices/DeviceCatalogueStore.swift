@@ -152,6 +152,9 @@ public actor DeviceCatalogueStore {
                 return
             }
             catalogue = migrated
+            for index in catalogue.devices.indices {
+                Self.seedSystemWitness(&catalogue.devices[index])
+            }
             // Tidied on the way in, so a catalogue that sat on disk for weeks
             // does not present retired records until something happens to be
             // observed.
@@ -165,6 +168,27 @@ public actor DeviceCatalogueStore {
             quarantine(reason: "corrupt")
             catalogue = DeviceCatalogue()
         }
+    }
+
+    /// Gives a record from a catalogue written before `systemReportedAt` was
+    /// kept the witness its own readings already prove.
+    ///
+    /// Without it the first launch after the upgrade read every battery as
+    /// unwitnessed, while the low alert's latch on disk was still spent, and a
+    /// neighbour's charging set released it before the first new system
+    /// sample arrived. Only what the record can vouch for: a battery the
+    /// system itself read — never one heard over the air — dated when it was
+    /// read, so a stale one expires at once, and the presence check where the
+    /// witness is used still applies. Per component: a reading of the buds
+    /// says nothing about the case.
+    static func seedSystemWitness(_ record: inout DeviceRecord) {
+        guard record.systemReportedAt == nil, record.id.source == .bluetoothAddress else { return }
+        var witness: [BatteryComponent: Date] = [:]
+        for reading in record.readings
+        where reading.origin != .proximityName && reading.reliability == .fresh {
+            witness[reading.component] = reading.observedAt
+        }
+        if !witness.isEmpty { record.systemReportedAt = witness }
     }
 
     private func quarantine(reason: String) {
@@ -281,9 +305,34 @@ public actor DeviceCatalogueStore {
         // arrived in the meantime. Replacing the lot put a stale level back
         // on screen — and into the history and the alert decision — stamped
         // with its honest old time, which nothing downstream was comparing.
+        //
+        // And while the system is reporting this device, an advertisement
+        // that does not look like it is left out of the display, the history
+        // and the alert alike. See `yieldingToTheSystem`.
+        if observation.presence == .connected {
+            for reading in observation.readings where reading.origin != .proximityName {
+                let held = record.systemReportedAt?[reading.component] ?? .distantPast
+                record.systemReportedAt = (record.systemReportedAt ?? [:])
+                    .merging([reading.component: max(held, reading.observedAt)]) { _, new in new }
+            }
+        }
+        let reported = Self.reportedBySystem(record, at: at)
+        var observation = observation
+        observation.readings = Self.yieldingToTheSystem(
+            observation.readings, on: record, reportedBySystem: reported
+        )
         let previousReadings = record.readings
         if !observation.readings.isEmpty {
             record.readings = Self.freshest(record.readings, observation.readings)
+        }
+        // From what was held as well as what arrived: a catalogue written
+        // before this was remembered has its only evidence in the readings
+        // about to be replaced, and the first system refresh threw it away.
+        let saidCharging = (previousReadings + observation.readings)
+            .filter { $0.charging != .unknown && $0.reliability != .unreliable }
+            .map(\.component)
+        if !saidCharging.isEmpty {
+            record.chargingReported = (record.chargingReported ?? []).union(saidCharging)
         }
 
         // Decide alerts from the state we already hold, and remember what was
@@ -301,7 +350,8 @@ public actor DeviceCatalogueStore {
             state: record.alertState,
             observation: canonicalObservation,
             configuration: record.alerts,
-            isAttaching: isAttaching
+            isAttaching: isAttaching,
+            reportedBySystem: reported
         )
         record.alertState = alertState
 
@@ -682,6 +732,75 @@ public actor DeviceCatalogueStore {
             }
         }
     }
+
+    /// The arriving readings, less any advertisement that is probably not
+    /// this device's.
+    ///
+    /// An advertisement is filed under the paired device by model id, which
+    /// cannot tell the user's set from any same-model set in range. While the
+    /// device is connected the system is reporting its battery — by address,
+    /// about this exact device — and letting every advertisement in beside it
+    /// cost the user twice over: Settings and the chart flipped between their
+    /// 20% and a neighbour's 70%, and every 70% released the low alert to
+    /// announce the same 20% again.
+    ///
+    /// So while the system is reporting, an advertisement has to look like the
+    /// set already on the record: within `sameSetTolerance` of the level held
+    /// for that cell. A neighbour's set is usually far off and is dropped.
+    ///
+    /// And it has to be about charging — saying it is, or arriving while the
+    /// cell is charging, which is how the end of a charge is heard. That is the
+    /// one thing the system cannot say, and the only reason to listen: the pods
+    /// charging in the open case are still connected, and without it a charged
+    /// alert could never fire. A plain discharging advertisement adds nothing
+    /// the system is not already saying, and taking its level was not safe
+    /// even from the user's own set: the air speaks in tens and the system in
+    /// ones, and a system 26% between two advertised 20%s rearmed the low
+    /// alert and fired it a second time.
+    ///
+    /// Per component, and only for a component the system is reporting now
+    /// (`reportedBySystem`). With the device gone to the phone, a battery the
+    /// system has not mentioned — a case it never listed — or nothing heard
+    /// from it for longer than its reading is believed, the advertisement is
+    /// all there is and is kept: the level it would be measured against is
+    /// not the system's, or no longer describes now.
+    public static func yieldingToTheSystem(
+        _ arriving: [BatteryReading],
+        on record: DeviceRecord,
+        reportedBySystem: Set<BatteryComponent>
+    ) -> [BatteryReading] {
+        arriving.filter { reading in
+            guard reading.origin == .proximityName,
+                  reportedBySystem.contains(reading.component),
+                  let held = record.readings.first(where: { $0.component == reading.component })
+            else { return true }
+            return abs(reading.level - held.level) <= sameSetTolerance
+                && (reading.charging == .charging || held.charging == .charging)
+        }
+    }
+
+    /// The components the system is reporting for this device right now.
+    ///
+    /// Connected, and reported within the freshness the system's own reading
+    /// is given. A device-wide "connected recently" was not enough: the buds
+    /// being reported kept yesterday's case level as the baseline, and every
+    /// case advertisement measured against it was refused for the whole
+    /// connection.
+    static func reportedBySystem(_ record: DeviceRecord, at now: Date) -> Set<BatteryComponent> {
+        guard record.presence == .connected, let reports = record.systemReportedAt else { return [] }
+        let interval = DeviceIdentity.Source.bluetoothAddress.freshnessInterval
+        return Set(reports.filter { now.timeIntervalSince($0.value) <= interval }.keys)
+    }
+
+    /// How far an advertisement may sit from the level held for its cell and
+    /// still be taken for the same set.
+    ///
+    /// From the owner's own evening with another AirPods 4 in range: the
+    /// air's 10% steps put their own set up to 12 points from the system's
+    /// reading (an advertised 40% against a measured 52%), and the other set
+    /// never came closer than 23. A charge climbs one step at a time, and each
+    /// accepted step becomes the level the next is measured from.
+    public static let sameSetTolerance = 0.15
 
     /// The readings that say something the record did not already know.
     ///

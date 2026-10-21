@@ -26,6 +26,27 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
     /// Per-component "have I already said this".
     public var alertState: [BatteryComponent: ComponentAlertState]
 
+    /// The components that have ever said whether they are charging.
+    ///
+    /// A capability, remembered apart from the readings that showed it. The
+    /// readings alone could not answer: AirPods say it over the air, the
+    /// system's own reading of a connected set never does, and every ten
+    /// minutes the system's reading takes the cell — so Settings dimmed the
+    /// charged alert for earbuds that report charging perfectly well. Nil in
+    /// a catalogue written before this was kept.
+    public var chargingReported: Set<BatteryComponent>?
+
+    /// When the system itself last reported each battery.
+    ///
+    /// Kept apart from `readings`, which are the merged display: an accepted
+    /// advertisement replaces the cell, and "is the system reporting this
+    /// battery right now" has to survive that — and a relaunch. Held only in
+    /// memory, it started empty after one, while the low alert's latch on
+    /// disk was still spent, and a neighbour's charging set released it.
+    /// Per component, because the system reporting the buds says nothing
+    /// about a case it never mentioned. Nil in an older catalogue.
+    public var systemReportedAt: [BatteryComponent: Date]?
+
     public init(
         id: DeviceIdentity,
         name: String,
@@ -61,6 +82,15 @@ public struct DeviceRecord: Hashable, Sendable, Codable, Identifiable {
     public var lowestInUseLevel: Double? {
         readings.filter { $0.component.isInUse && $0.reliability != .unreliable }
             .map(\.level).min()
+    }
+
+    /// Whether a charged alert could ever fire for this component — or, for
+    /// nil, for any of them.
+    public func reportsCharging(_ component: BatteryComponent?) -> Bool {
+        let shown = readings.filter { $0.charging != .unknown }.map(\.component)
+        let known = (chargingReported ?? []).union(shown)
+        guard let component else { return !known.isEmpty }
+        return known.contains(component)
     }
 
     /// Whether one reading describes *now*.

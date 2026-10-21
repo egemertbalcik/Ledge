@@ -193,6 +193,12 @@ public final class AirPodsProximityProvider: ActivityProvider {
         }
     }
 
+    /// How many paired-list reads this provider has finished acting on.
+    ///
+    /// For tests, which otherwise had to guess when a read's answer had been
+    /// handled — and one that is refused leaves nothing else to look at.
+    private(set) var inventoryReadsHandled = 0
+
     /// Reads the list if nothing fresher exists, and says how long to wait
     /// before asking that question again.
     private func readThePairedListIfStale(_ token: UUID) async -> TimeInterval {
@@ -200,6 +206,7 @@ public final class AirPodsProximityProvider: ActivityProvider {
         let at = Date(timeIntervalSinceReferenceDate: now())
         guard Self.needsAReading(paired.current, now: at) else { return Self.inventoryRefresh }
         let reading = await inventory.pairedDevices()
+        defer { inventoryReadsHandled += 1 }
         // A read that outlived its run must not answer: a stopped provider's
         // stale list would otherwise beat the fresh one its replacement is
         // waiting for, and nothing would ask again.
@@ -214,7 +221,25 @@ public final class AirPodsProximityProvider: ActivityProvider {
         guard Self.needsAReading(paired.current, now: at) else { return Self.inventoryRefresh }
         // Stamped with when the list was read, not with when this returned:
         // the registry decides between a reading and an event by their times.
-        paired.answer(reading.devices.map(\.pairedDevice), at: reading.readAt)
+        let acceptance = paired.answer(reading.devices.map(\.pairedDevice), at: reading.readAt)
+        // And what it says about the user's own AirPods' batteries, which only
+        // the Bluetooth card used to report. The system's reading is the one
+        // witness that knows whose set it means: without it nothing vouched
+        // for these earbuds, and a neighbour's charging set nearby could
+        // release the low alert to say the same thing again. AirPods only —
+        // the rest of the list is that card's business — and nothing from a
+        // reading the registry refused as older.
+        if acceptance.wasAccepted, let observations {
+            for device in reading.devices
+            where device.isConnected && !device.batteryLevels.isEmpty
+                && device.pairedDevice.advertisedModel.map(AirPodsProximity.isKnownModel) == true
+                // Not if the system has said since that it went away.
+                && acceptance.answer.device(for: device.pairedDevice.identity)?.isConnected == true {
+                observations.submit(DeviceObservations.fromBluetooth(
+                    device, at: reading.readAt, cause: .periodicRefresh
+                ))
+            }
+        }
         return Self.inventoryRefresh
     }
 

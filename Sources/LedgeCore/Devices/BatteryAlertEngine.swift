@@ -161,11 +161,15 @@ public enum BatteryAlertEngine {
     ///   its keep, and the shipped app warned there. A passive first sighting
     ///   stays silent, so launching with a low device connected does not
     ///   announce a level the user can already see.
+    /// - Parameter reportedBySystem: components the system itself is
+    ///   currently reporting. For these only the system can say a battery was
+    ///   recharged — see `vouchesForRecharge`.
     public static func evaluate(
         state: [BatteryComponent: ComponentAlertState],
         observation: DeviceObservation,
         configuration: DeviceAlertConfiguration,
-        isAttaching: Bool = false
+        isAttaching: Bool = false,
+        reportedBySystem: Set<BatteryComponent> = []
     ) -> (alerts: [BatteryAlert], state: [BatteryComponent: ComponentAlertState]) {
 
         var state = state
@@ -188,10 +192,17 @@ public enum BatteryAlertEngine {
                     // pass only if the level genuinely went up and back down
                     // between two observations — which it cannot.
                     if reading.level > rule.threshold + BatteryAlertRule.hysteresis {
-                        componentState.firedRuleIDs.remove(rule.id)
+                        if vouchesForRecharge(reading, reportedBySystem: reportedBySystem) {
+                            componentState.firedRuleIDs.remove(rule.id)
+                        }
                         continue
                     }
                     guard reading.level <= rule.threshold else { continue }
+                    // A battery that says it is charging is being looked
+                    // after, not running out: earbuds going into their case at
+                    // 20% read as a fresh crossing whenever the system had
+                    // just said 26%. Skipped, and nothing is spent or released.
+                    guard reading.charging != .charging else { continue }
                     if isAttaching {
                         // An attach is an event in its own right: putting
                         // earbuds in at 12% is worth saying whether or not
@@ -246,6 +257,31 @@ public enum BatteryAlertEngine {
     /// says so rather than offering a switch that would never fire.
     public static func supportsCharged(_ readings: [BatteryReading], for component: BatteryComponent) -> Bool {
         readings.contains { $0.component == component && $0.charging != .unknown }
+    }
+
+    /// Whether a high reading is evidence that *this* device was recharged,
+    /// which is the only thing that should let a spent low alert say it again.
+    ///
+    /// An advertisement is not, on its own. It is attached to the paired
+    /// device by model id, so any same-model set in range wears that identity:
+    /// a neighbour's 70% interleaved with the user's 20% released the latch on
+    /// every alternation, and one low battery was announced thirty-six times
+    /// in half an hour. An advertisement that says it is charging is evidence
+    /// — earbuds charge only in their case — and so is anything the system
+    /// reported about the device itself.
+    ///
+    /// Except where the system is reporting that cell. Charging proves that
+    /// *a* set is charging, not whose: a neighbour's set at 30% in its case
+    /// sits close enough to the user's 20% to be heard, and released the
+    /// latch on every alternation. There the system is the one witness that
+    /// knows which set it means, and its next reading rearms a real recharge
+    /// within ten minutes.
+    static func vouchesForRecharge(
+        _ reading: BatteryReading,
+        reportedBySystem: Set<BatteryComponent> = []
+    ) -> Bool {
+        guard reading.origin == .proximityName else { return true }
+        return reading.charging == .charging && !reportedBySystem.contains(reading.component)
     }
 
     private static func applies(_ rule: BatteryAlertRule, to component: BatteryComponent) -> Bool {

@@ -135,6 +135,56 @@ struct BatteryAlertEngineTests {
         #expect(alerts.count == 1, "a genuine second dip did not alert")
     }
 
+    /// One advertisement, filed under the paired record the way
+    /// `fromProximity` files it.
+    private static func advertised(
+        _ level: Double, charging: ChargingState = .notCharging, at seconds: TimeInterval
+    ) -> DeviceObservation {
+        let when = t0.addingTimeInterval(seconds)
+        return DeviceObservation(
+            deviceID: device, name: "Ege AirPods",
+            readings: [BatteryReading(
+                component: .left, level: level, charging: charging,
+                observedAt: when, origin: .proximityName
+            )],
+            presence: .unknown, observedAt: when, cause: .advertisement
+        )
+    }
+
+    @Test("A high advertisement rearms a low alert only when it says it is charging")
+    func advertisementRearmsOnlyWhenCharging() throws {
+        var state: [BatteryComponent: ComponentAlertState] = [:]
+        var alerts: [BatteryAlert]
+        (_, state) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.3, at: 0), configuration: Self.defaultConfig
+        )
+        (alerts, state) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.2, at: 10), configuration: Self.defaultConfig
+        )
+        try #require(alerts.count == 1, "the fixture's own crossing did not alert")
+
+        // Another same-model set's 70%, filed under this record: well past
+        // the hysteresis, and no evidence that these earbuds were charged.
+        (_, state) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.7, at: 20), configuration: Self.defaultConfig
+        )
+        try #require(state[.left]?.lastLevel == 0.7, "the high reading never reached the engine")
+        (alerts, state) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.2, at: 30), configuration: Self.defaultConfig
+        )
+        #expect(alerts.isEmpty, "a high advertisement released the latch and the same 20% alerted again")
+
+        // In the case and charging: that is a recharge, and the next dip is news.
+        (_, state) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.6, charging: .charging, at: 40),
+            configuration: Self.defaultConfig
+        )
+        (alerts, _) = BatteryAlertEngine.evaluate(
+            state: state, observation: Self.advertised(0.2, at: 50), configuration: Self.defaultConfig
+        )
+        #expect(alerts.count == 1, "a real recharge did not rearm the alert")
+    }
+
     // MARK: - Components
 
     @Test("Each earbud keeps its own state")

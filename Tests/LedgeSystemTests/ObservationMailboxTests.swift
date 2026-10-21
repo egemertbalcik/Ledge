@@ -9,7 +9,7 @@ import os
 /// steady stream of catalogue work. So these count *forwards* — the thing the
 /// earlier "repeats are inert" test never measured, which is why the loop went
 /// unnoticed.
-@Suite("Observation mailbox", .serialized)
+@Suite("Observation mailbox", .serialized, .timeLimit(.minutes(10)))
 struct ObservationMailboxTests {
 
     private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -47,10 +47,10 @@ struct ObservationMailboxTests {
         )
     }
 
+    /// Until the mailbox is idle, however long the suite keeps it waiting:
+    /// a count of short sleeps ran out under a held main thread.
     private func settle(_ mailbox: ObservationMailbox) async {
-        for _ in 0..<200 where mailbox.isDraining || mailbox.pendingCount > 0 {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await mailbox.settled()
         try? await Task.sleep(for: .milliseconds(20))
     }
 
@@ -183,6 +183,10 @@ struct ObservationMailboxTests {
                 Double(round) / 100 + 0.5, id: .bluetooth("bb"), at: Double(round) * 10
             ))
         }
+        // The current drain finished, however long that took; then a chance
+        // for an obsolete one to start alongside a later delivery, which a slow
+        // run can only make this miss.
+        await mailbox.settled()
         try? await Task.sleep(for: .milliseconds(300))
 
         #expect(
@@ -214,10 +218,29 @@ struct ObservationMailboxTests {
         )
         #expect(await store.queuedAlertCount() == 0)
     }
+
+    /// What the tests here wait on, so it has to be true: it returns only once
+    /// a delivery still in flight has finished.
+    @Test("Settling waits for a delivery in flight")
+    func settlingWaitsForDelivery() async {
+        let gate = DeliveryGate()
+        let delivered = OSAllocatedUnfairLock(initialState: 0)
+        let mailbox = ObservationMailbox(deliver: { _ in
+            await gate.hold()
+            delivered.withLock { $0 += 1 }
+        })
+        mailbox.submit(Self.observation(0.5, at: 0))
+        await gate.untilHeld()
+        // Let it go a moment from now, wherever the wait has got to by then.
+        Task { try? await Task.sleep(for: .milliseconds(50)); await gate.release() }
+
+        await mailbox.settled()
+        #expect(delivered.withLock { $0 } == 1, "settled() returned with the delivery still in flight")
+    }
 }
 
 /// The mailbox must not grow for a device whose identifier rotates.
-@Suite("Observation mailbox bookkeeping", .serialized)
+@Suite("Observation mailbox bookkeeping", .serialized, .timeLimit(.minutes(10)))
 struct ObservationMailboxBookkeepingTests {
 
     private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -241,7 +264,7 @@ struct ObservationMailboxBookkeepingTests {
         for step in 0..<200 {
             mailbox.submit(Self.advert(0.8, at: Double(step) * 300))
         }
-        for _ in 0..<100 where mailbox.isDraining { try? await Task.sleep(for: .milliseconds(5)) }
+        await mailbox.settled()
 
         #expect(
             mailbox.trackedDeviceCount == 1,
@@ -258,7 +281,7 @@ struct ObservationMailboxBookkeepingTests {
         for step in 0..<20 {
             mailbox.submit(Self.advert(0.8, at: Double(step)))
         }
-        for _ in 0..<100 where mailbox.isDraining { try? await Task.sleep(for: .milliseconds(5)) }
+        await mailbox.settled()
         try? await Task.sleep(for: .milliseconds(40))
 
         #expect(
@@ -269,7 +292,7 @@ struct ObservationMailboxBookkeepingTests {
 }
 
 /// Forgetting a device must clear what the mailbox remembers about it.
-@Suite("Observation mailbox forgetting", .serialized)
+@Suite("Observation mailbox forgetting", .serialized, .timeLimit(.minutes(10)))
 struct ObservationMailboxForgetTests {
 
     private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -284,10 +307,10 @@ struct ObservationMailboxForgetTests {
         )
     }
 
+    /// Until the mailbox is idle, however long the suite keeps it waiting:
+    /// a count of short sleeps ran out under a held main thread.
     private func settle(_ mailbox: ObservationMailbox) async {
-        for _ in 0..<200 where mailbox.isDraining || mailbox.pendingCount > 0 {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
+        await mailbox.settled()
         try? await Task.sleep(for: .milliseconds(20))
     }
 
@@ -321,7 +344,7 @@ struct ObservationMailboxForgetTests {
 /// reach the catalogue before it is written to disk or never be accepted at
 /// all — an alert latch lost in that window says the same thing again after
 /// the next launch, which is the one thing the latch exists to prevent.
-@Suite("Closing the mailbox")
+@Suite("Closing the mailbox", .timeLimit(.minutes(10)))
 struct MailboxShutdownTests {
 
     private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -470,9 +493,7 @@ struct MailboxShutdownTests {
             mailbox.submit(Self.observation("device-\(index)", at: Double(index)))
             // Let each drain turn complete, so these are forwarded rather than
             // coalesced into one pending entry.
-            for _ in 0..<500 where mailbox.isDraining {
-                try? await Task.sleep(for: .milliseconds(1))
-            }
+            await mailbox.settled()
         }
         #expect(mailbox.trackedDeviceCount <= ObservationMailbox.trackedDeviceLimit)
     }
@@ -511,8 +532,11 @@ private actor EventLog {
 /// Waits for the mailbox to own its queue, without spinning: a hot
 /// `Task.yield()` loop starves everything else on the runtime, which showed up
 /// as unrelated timing tests failing under a full suite run.
+///
+/// For as long as that takes: two thousand short sleeps ran out under a held
+/// main thread. The suite's time limit is what ends a wait that never does.
 private func untilDraining(_ mailbox: ObservationMailbox) async {
-    for _ in 0..<2_000 where !mailbox.isDraining {
+    while !mailbox.isDraining, !Task.isCancelled {
         try? await Task.sleep(for: .milliseconds(1))
     }
 }
@@ -522,10 +546,10 @@ private func briefly() async {
     try? await Task.sleep(for: .milliseconds(20))
 }
 
-/// Waits for a condition rather than for a guessed interval.
+/// Waits for a condition rather than for a guessed interval — or a guessed
+/// count of them, which a held main thread outlasted.
 private func until(_ condition: @escaping () async -> Bool) async {
-    for _ in 0..<2_000 {
-        if await condition() { return }
+    while await !condition(), !Task.isCancelled {
         try? await Task.sleep(for: .milliseconds(1))
     }
 }
@@ -535,7 +559,7 @@ private func until(_ condition: @escaping () async -> Bool) async {
 /// it, which left This Mac marked live after its provider had gone — and a
 /// record claiming a live reading from a provider that is not running is the
 /// staleness the liveness flag exists to prevent.
-@Suite("Ordered provider liveness")
+@Suite("Ordered provider liveness", .timeLimit(.minutes(10)))
 struct LivenessOrderingTests {
 
     private func mailbox(
@@ -621,5 +645,29 @@ struct LivenessOrderingTests {
         await briefly()
         let afterClose = await log.events
         #expect(afterClose.isEmpty)
+    }
+}
+
+/// Holds one delivery open until it is let go.
+private actor DeliveryGate {
+    private var held = false
+    private var holding: CheckedContinuation<Void, Never>?
+    private var watchers: [CheckedContinuation<Void, Never>] = []
+
+    func hold() async {
+        held = true
+        for watcher in watchers { watcher.resume() }
+        watchers.removeAll()
+        await withCheckedContinuation { holding = $0 }
+    }
+
+    func untilHeld() async {
+        if held { return }
+        await withCheckedContinuation { watchers.append($0) }
+    }
+
+    func release() {
+        holding?.resume()
+        holding = nil
     }
 }
