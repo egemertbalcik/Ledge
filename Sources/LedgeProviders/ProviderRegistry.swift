@@ -85,6 +85,11 @@ public enum ProviderRegistry {
         paired: PairedDeviceRegistry = PairedDeviceRegistry(),
         nowPlayingProvider: @escaping @MainActor () -> any ActivityProvider,
         weatherCity: @escaping @MainActor () -> String = { "" },
+        /// Handed out so the shell can tell it when the user switches a
+        /// calendar on or off, and so it reads that choice from preferences.
+        calendarProvider: @escaping @MainActor () -> any ActivityProvider = {
+            CalendarProvider(source: EventKitCalendarSource())
+        },
         timerProvider: @escaping @MainActor () -> any ActivityProvider = { TimerProvider() },
         // Defaults to an ephemeral shelf so callers that do not care — tests,
         // the preview — need not build a store.
@@ -265,7 +270,7 @@ public enum ProviderRegistry {
                 // access is granted, and never prompts on its own — the prompt
                 // belongs to the Permissions tab.
                 permission: .calendars,
-                make: { CalendarProvider(source: EventKitCalendarSource()) }
+                make: calendarProvider
             ),
 
             ProviderRegistration(

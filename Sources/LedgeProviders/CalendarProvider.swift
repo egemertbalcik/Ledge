@@ -114,6 +114,12 @@ public final class CalendarProvider: ActivityProvider {
 
     private let source: any CalendarSource
     private let now: () -> Date
+
+    /// The calendars the user switched off, read at every evaluation. One set
+    /// for all four readers — the card, its peek, the grid's dots and the
+    /// day list — taken once per evaluation, so a single publish never mixes
+    /// two choices.
+    private let hiddenCalendars: @MainActor () -> Set<String>
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
     private var pending: DispatchWorkItem?
     private var evaluateTask: Task<Void, Never>?
@@ -132,11 +138,19 @@ public final class CalendarProvider: ActivityProvider {
     private var monthWindows: [MonthWindow]?
     private var monthWindowsDay: DateComponents?
 
+    /// The hidden calendars the grids were read through. A different choice
+    /// is a reason to read them again, checked here rather than trusted to
+    /// whoever reports the switch: grids from the old choice beside a card
+    /// from the new one would be the two readers disagreeing.
+    private var monthWindowsHidden: Set<String> = []
+
     public init(
         source: any CalendarSource,
+        hiddenCalendars: @escaping @MainActor () -> Set<String> = { [] },
         now: @escaping () -> Date = { Date() }
     ) {
         self.source = source
+        self.hiddenCalendars = hiddenCalendars
         self.now = now
     }
 
@@ -179,6 +193,18 @@ public final class CalendarProvider: ActivityProvider {
         requestEvaluate()
     }
 
+    /// The user switched a calendar on or off.
+    ///
+    /// For this provider that is a store change: everything it has read,
+    /// grids included, was read through the old choice. Re-read now, so the
+    /// open card follows the switch rather than the next minute's tick. The
+    /// grids go because the evaluation sees they were read through another
+    /// choice.
+    public func calendarsChanged() {
+        guard continuation != nil else { return }
+        requestEvaluate()
+    }
+
     /// The periodic countdown tick, by hand. The real one is a 60-second
     /// timer on the main queue, which no test should sit through; this lets a
     /// test check what a tick does and does not query.
@@ -198,8 +224,21 @@ public final class CalendarProvider: ActivityProvider {
         }
     }
 
+    /// Returns once the evaluation in flight has finished, including one that
+    /// replaced it while this waited.
+    ///
+    /// For tests. A count of yields stood in for this, and an off-main store
+    /// query is not finished in any particular number of main-actor turns.
+    func evaluationSettled() async {
+        while let task = evaluateTask {
+            await task.value
+            if evaluateTask == task { return }
+        }
+    }
+
     private func evaluate() async {
-        let events = await source.upcomingEvents(within: Self.queryWindow)
+        let hidden = hiddenCalendars()
+        let events = await source.upcomingEvents(within: Self.queryWindow, hiding: hidden)
         // The provider may have been stopped while the query was in flight.
         guard !Task.isCancelled, continuation != nil else { return }
 
@@ -227,10 +266,11 @@ public final class CalendarProvider: ActivityProvider {
         // without a fresh EventKit round-trip per tap.
         let calendar = Calendar.current
         let today = calendar.dateComponents([.year, .month, .day], from: now())
-        if monthWindows == nil || monthWindowsDay != today {
-            guard let windows = await readMonthWindows(calendar: calendar) else { return }
+        if monthWindows == nil || monthWindowsDay != today || monthWindowsHidden != hidden {
+            guard let windows = await readMonthWindows(calendar: calendar, hiding: hidden) else { return }
             monthWindows = windows
             monthWindowsDay = today
+            monthWindowsHidden = hidden
         }
         let windows = monthWindows ?? []
         let current = windows.first { window in
@@ -252,11 +292,11 @@ public final class CalendarProvider: ActivityProvider {
     /// Reads the previous, current and next month's grids from the store.
     /// Nil if the provider was stopped or superseded while a query was in
     /// flight, in which case the caller must publish nothing.
-    private func readMonthWindows(calendar: Calendar) async -> [MonthWindow]? {
+    private func readMonthWindows(calendar: Calendar, hiding hidden: Set<String>) async -> [MonthWindow]? {
         var windows: [MonthWindow] = []
         for offset in -1...1 {
-            let days = await source.eventDays(monthOffset: offset)
-            let byDay = await source.events(monthOffset: offset)
+            let days = await source.eventDays(monthOffset: offset, hiding: hidden)
+            let byDay = await source.events(monthOffset: offset, hiding: hidden)
             guard !Task.isCancelled, continuation != nil else { return nil }
             guard let month = calendar.date(byAdding: .month, value: offset, to: now()) else { continue }
             let comps = calendar.dateComponents([.year, .month], from: month)

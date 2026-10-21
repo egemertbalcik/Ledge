@@ -53,6 +53,15 @@ struct SettingsSearchTests {
         #expect(keepAwake?.pane == .keepAwake)
     }
 
+    @Test("Choosing calendars lands on the Calendar card's own list")
+    func calendarsLandOnTheirSection() {
+        for query in ["which calendars", "calendar accounts", "hide calendars"] {
+            let hit = find(query).first { $0.card == "calendar" }
+            #expect(hit?.row == "calendarList", "“\(query)” found \(find(query).map(\.title))")
+            #expect(hit?.trail == "Cards › Calendar")
+        }
+    }
+
     @Test("Every word has to match, and only from the start of one")
     func everyWordMatches() {
         // Two words narrow rather than widen.
@@ -148,6 +157,8 @@ struct SettingsSearchDestinationTests {
             ("opens first", .cards),
             ("city", .cards),
             ("units", .cards),
+            ("which calendars", .cards),
+            ("hide calendar", .cards),
             ("timer durations", .cards),
             ("web media", .cards),
             ("web compact", .cards),

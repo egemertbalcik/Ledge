@@ -230,7 +230,7 @@ struct CardRowPresentation: Equatable {
     }
 
     static func hasSettings(_ id: String) -> Bool {
-        ["timer", "nowplaying", "shelf", "weather", "keep-awake", "levels"].contains(id)
+        ["timer", "nowplaying", "shelf", "weather", "keep-awake", "levels", "calendar"].contains(id)
     }
 
     static func summary(for id: String) -> String {

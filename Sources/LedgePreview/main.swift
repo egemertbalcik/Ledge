@@ -201,7 +201,8 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         }
         let only = ProcessInfo.processInfo.environment["LEDGE_GALLERY_ONLY"]
         let size: NSSize = switch only {
-        case "settings": NSSize(width: 700, height: 560)
+        // Built like the app's settings window (`makeSettingsWindow`).
+        case "settings": NSSize(width: 700, height: 626)
         case "onboarding": NSSize(
             width: OnboardingView.contentSize.width,
             height: OnboardingView.contentSize.height
@@ -219,6 +220,10 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         window.title = "Ledge — Card Gallery"
         switch only {
         case "settings":
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.toolbar = NSToolbar(identifier: "LedgeSettings")
+            window.toolbarStyle = .unified
             window.contentView = NSHostingView(rootView: SettingsView(
                 preferences: Preferences(store: MemoryPreferenceStore()),
                 geometry: PreviewShell.geometry,

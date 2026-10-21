@@ -171,28 +171,32 @@ struct CalendarPlanTests {
 /// Wraps the stub and counts month-grid queries, so a test can say how often
 /// the provider went back to the store.
 @MainActor
-private final class CountingCalendarSource: CalendarSource {
+final class CountingCalendarSource: CalendarSource {
     let inner: StubCalendarSource
     var monthQueries = 0
 
-    init(events: [EventSnapshot] = []) {
-        inner = StubCalendarSource(events: events)
+    init(events: [EventSnapshot] = [], calendars: [CalendarInfo] = []) {
+        inner = StubCalendarSource(events: events, calendars: calendars)
     }
 
     var isAuthorized: Bool { inner.isAuthorized }
 
-    func upcomingEvents(within window: TimeInterval) async -> [EventSnapshot] {
-        await inner.upcomingEvents(within: window)
+    func upcomingEvents(within window: TimeInterval, hiding hidden: Set<String>) async -> [EventSnapshot] {
+        await inner.upcomingEvents(within: window, hiding: hidden)
     }
 
-    func eventDays(monthOffset: Int) async -> Set<Int> {
+    func eventDays(monthOffset: Int, hiding hidden: Set<String>) async -> Set<Int> {
         monthQueries += 1
-        return await inner.eventDays(monthOffset: monthOffset)
+        return await inner.eventDays(monthOffset: monthOffset, hiding: hidden)
     }
 
-    func events(monthOffset: Int) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
         monthQueries += 1
-        return await inner.events(monthOffset: monthOffset)
+        return await inner.events(monthOffset: monthOffset, hiding: hidden)
+    }
+
+    func calendars() async -> [CalendarInfo] {
+        await inner.calendars()
     }
 
     func startWatching(_ onChange: @escaping @MainActor () -> Void) {
@@ -215,9 +219,9 @@ struct CalendarProviderTests {
         let stream = provider.start()
         // Evaluation is async now (the store query is off-main), so let the
         // initial read complete before acting or stopping.
-        await settle()
+        await settle(provider)
         await body()
-        await settle()
+        await settle(provider)
         provider.stop()
 
         var events: [ProviderEvent] = []
@@ -225,8 +229,10 @@ struct CalendarProviderTests {
         return events
     }
 
-    private func settle() async {
-        for _ in 0..<40 { await Task.yield() }
+    /// Until the evaluation in flight has finished. Forty yields used to
+    /// stand in for it, which a loaded run's off-main query outlasted.
+    private func settle(_ provider: CalendarProvider) async {
+        await provider.evaluationSettled()
     }
 
     @Test("An imminent event publishes a card with the calendar's colour")
@@ -330,9 +336,9 @@ struct CalendarProviderTests {
         let events = await collect(provider) {
             #expect(source.monthQueries == queriesPerRead, "the first evaluate reads the grids")
             provider.tickForTesting()
-            await settle()
+            await settle(provider)
             provider.tickForTesting()
-            await settle()
+            await settle(provider)
         }
 
         // Every countdown tick used to cost six store queries for grids that
@@ -382,7 +388,7 @@ struct CalendarProviderTests {
 
         _ = await collect(provider) {
             provider.tickForTesting()
-            await settle()
+            await settle(provider)
             #expect(source.monthQueries == queriesPerRead, "a tick on the same day reuses the grids")
 
             // Cross midnight: the three months the grid covers may have

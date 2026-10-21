@@ -137,6 +137,33 @@ struct SettingsPaneRenderTests {
         }
     }
 
+    @Test("The Calendar page renders its calendars in every state")
+    func calendarPage() {
+        // The card list opens this page only for cards it knows have one.
+        #expect(CardRowPresentation.hasSettings("calendar"), "the calendar row would not open its page")
+        let calendars = [
+            CalendarInfo(id: "w", title: "Work", account: "iCloud", accountRank: 2),
+            CalendarInfo(id: "h", title: "Home", account: "iCloud", accountRank: 2),
+            CalendarInfo(id: "b", title: "Birthdays", account: "Other", accountRank: 5),
+        ]
+        for status in [PermissionStatus.granted, .denied, .notDetermined] {
+            for hidden in [[], ["h"], ["w", "h", "b"]] as [[String]] {
+                let model = Self.model()
+                model.permissions = model.permissions.map {
+                    $0.kind == .calendars ? PermissionRow(kind: .calendars, status: status) : $0
+                }
+                model.calendars = status == .granted ? calendars : []
+                let preferences = Self.preferences()
+                for id in hidden { preferences.setCalendar(id, shown: false) }
+                checkRenders(
+                    CardDetailPane(id: "calendar", preferences: preferences, model: model,
+                                   actions: SettingsActions.preview),
+                    "the Calendar page (\(status), \(hidden.count) hidden)"
+                )
+            }
+        }
+    }
+
     /// A card id with no descriptor behind it — which is what a page opened by
     /// the debug switch gets when the provider is not registered at all.
     @Test("A card that does not exist says so instead of drawing nothing")

@@ -417,6 +417,9 @@ public final class LedgeCoordinator {
         let changes = PermissionDiff.changes(from: lastPermissionSnapshot, to: fresh)
         lastPermissionSnapshot = fresh
         lastPermissionRows = rows
+        // After the grants have been acted on, whichever way this returns:
+        // a Calendars grant arriving is when the list first has anything in it.
+        defer { refreshCalendarList() }
         guard !changes.isEmpty else { return refreshSettingsModel() }
 
         for change in changes {
@@ -954,6 +957,9 @@ public final class LedgeCoordinator {
     /// Held so the card can be told which note is being written.
     private weak var notesProviderRef: NotesProvider?
     private weak var levelsProviderRef: LevelsProvider?
+    /// Held so a calendar switched on or off in Settings reaches the open
+    /// card now, not at the next minute's tick.
+    private weak var calendarProviderRef: CalendarProvider?
     /// Held so Ledge's own camera use can be kept out of its own privacy card.
     private weak var privacyProviderRef: PrivacyProvider?
 
@@ -2066,6 +2072,14 @@ public final class LedgeCoordinator {
                 return provider
             },
             weatherCity: { [weak self] in self?.preferences.weatherCity ?? "" },
+            calendarProvider: { [weak self] in
+                let provider = CalendarProvider(
+                    source: EventKitCalendarSource(),
+                    hiddenCalendars: { [weak self] in self?.preferences.hiddenCalendarIDs ?? [] }
+                )
+                self?.calendarProviderRef = provider
+                return provider
+            },
             timerProvider: { [weak self] in
                 guard let self else { return TimerProvider() }
                 // Re-enabling hands back the surviving instance: its session
@@ -3121,6 +3135,56 @@ public final class LedgeCoordinator {
         observeInteractionPreferences()
         observeLiveEffectPreferences()
         observeMediaPreferences()
+        observeCalendarChoice()
+    }
+
+    /// A calendar switched on or off in Settings. The card reads the choice
+    /// itself; this only tells it to read again, now.
+    private func observeCalendarChoice() {
+        withObservationTracking {
+            _ = preferences.hiddenCalendars
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.calendarProviderRef?.calendarsChanged()
+                self.observeCalendarChoice()
+            }
+        }
+    }
+
+    /// The source Settings lists calendars from. Its own, not the card's: the
+    /// card's provider is built and torn down with the card, and the list has
+    /// to be there whether the card is switched on or not. Nil without the
+    /// grant.
+    private var calendarListSource: EventKitCalendarSource?
+    private var calendarListRead: Task<Void, Never>?
+
+    /// Re-reads the calendars Settings lists. On every permission check, and
+    /// whenever the database changes — a calendar added, removed or renamed
+    /// shows in Settings without reopening it. The read goes through the
+    /// source's own query queue, off the main thread.
+    private func refreshCalendarList() {
+        guard lastPermissionSnapshot[.calendars] == .granted else {
+            calendarListRead?.cancel()
+            calendarListSource?.stopWatching()
+            calendarListSource = nil
+            if !settingsModel.calendars.isEmpty { settingsModel.calendars = [] }
+            return
+        }
+        let source: EventKitCalendarSource
+        if let existing = calendarListSource {
+            source = existing
+        } else {
+            source = EventKitCalendarSource()
+            source.startWatching { [weak self] in self?.refreshCalendarList() }
+            calendarListSource = source
+        }
+        calendarListRead?.cancel()
+        calendarListRead = Task { @MainActor [weak self] in
+            let list = await source.calendars()
+            guard !Task.isCancelled, let self else { return }
+            if self.settingsModel.calendars != list { self.settingsModel.calendars = list }
+        }
     }
 
     /// Re-applies interaction settings when they change.
@@ -3289,6 +3353,9 @@ public final class LedgeCoordinator {
     public func stop() {
         notesSelfTest?.cancel()
         notesSelfTest = nil
+        calendarListRead?.cancel()
+        calendarListSource?.stopWatching()
+        calendarListSource = nil
         notesWindow.tearDown()
         greeting?.cancel()
         greeting = nil
@@ -4303,16 +4370,7 @@ public final class LedgeCoordinator {
 
         let actions = makeSettingsActions()
 
-        let window = NSWindow(
-            // Must match the SwiftUI frame in `SettingsView`; seven tabs do not
-            // fit the old 460pt width.
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 560),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Ledge Settings"
-        window.isReleasedWhenClosed = false
+        let window = Self.makeSettingsWindow()
         refreshSettingsModel()
         window.contentView = NSHostingView(
             rootView: SettingsView(
@@ -4326,6 +4384,40 @@ public final class LedgeCoordinator {
         window.center()
         settingsWindow = window
         present(window)
+    }
+
+    /// The settings window, before anything is hosted in it.
+    ///
+    /// Built the way System Settings is: full-size content under a unified,
+    /// transparent toolbar, so the sidebar's glass island runs the whole
+    /// height of the window with the traffic lights inside it, and the search
+    /// field sits below them. In a plain titled window the island started
+    /// under the title bar while the field stayed pinned to the bar, a point
+    /// from the island's top edge.
+    static func makeSettingsWindow() -> NSWindow {
+        let window = NSWindow(
+            // The content now runs under the bar, so this is the whole window.
+            // 34pt taller than the old 592 outer frame, because the unified
+            // bar is 66pt rather than 32 and the panes were laid out for 560
+            // below it. Matches `SettingsView`'s ideal height plus the bar.
+            // Seven panes do not fit the old 460pt width.
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 626),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.titlebarAppearsTransparent = true
+        // Empty, and still needed: only a window with a toolbar gives the
+        // sidebar the full window height, with the traffic lights inside it
+        // and the pane's name over the detail column.
+        window.toolbar = NSToolbar(identifier: "LedgeSettings")
+        window.toolbarStyle = .unified
+        // Only until SwiftUI names the window after the pane, from
+        // `navigationTitle` — which is what the bar, VoiceOver and the Window
+        // menu then say, as in System Settings.
+        window.title = "Ledge Settings"
+        window.isReleasedWhenClosed = false
+        return window
     }
 
     /// The geometry the settings window was last built against.

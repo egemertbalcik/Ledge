@@ -1,5 +1,6 @@
 import EventKit
 import Foundation
+import LedgeCore
 import os
 
 /// One upcoming calendar event, reduced to what the card needs.
@@ -21,6 +22,9 @@ public struct EventSnapshot: Equatable, Sendable {
     /// A video-call link found in the event, so the card can offer to join.
     public var meetingURL: String?
 
+    /// The calendar it is on, by `EKCalendar.calendarIdentifier`.
+    public var calendarID: String
+
     public init(
         title: String,
         location: String = "",
@@ -31,7 +35,8 @@ public struct EventSnapshot: Equatable, Sendable {
         accentGreen: Double = 0.55,
         accentBlue: Double = 0.9,
         eventKey: String,
-        meetingURL: String? = nil
+        meetingURL: String? = nil,
+        calendarID: String = ""
     ) {
         self.title = title
         self.location = location
@@ -43,6 +48,7 @@ public struct EventSnapshot: Equatable, Sendable {
         self.accentBlue = accentBlue
         self.eventKey = eventKey
         self.meetingURL = meetingURL
+        self.calendarID = calendarID
     }
 }
 
@@ -59,16 +65,24 @@ public protocol CalendarSource: AnyObject {
     /// Async because the underlying `EKEventStore` query can be slow and must
     /// not run on the main thread — Apple documents it as potentially
     /// expensive, and it fires on a ~60s cadence while a card is shown.
-    func upcomingEvents(within window: TimeInterval) async -> [EventSnapshot]
+    ///
+    /// Every query takes the calendars the user hid, and reads them through
+    /// `CalendarFilter` — one rule, so the card, the grid and the day list
+    /// cannot disagree about what a hidden calendar is.
+    func upcomingEvents(within window: TimeInterval, hiding hidden: Set<String>) async -> [EventSnapshot]
 
     /// Day numbers in a month that have any event, for the month grid.
     /// `monthOffset` counts whole months from the current one (-1 = previous),
     /// so the grid's arrows can show neighbouring months without a fresh grant.
-    func eventDays(monthOffset: Int) async -> Set<Int>
+    func eventDays(monthOffset: Int, hiding hidden: Set<String>) async -> Set<Int>
 
     /// Every event in a month, grouped by day, so tapping a day in the grid can
     /// say what is on it. Titles and times only — the grid never needs more.
-    func events(monthOffset: Int) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]]
+    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]]
+
+    /// The event calendars that exist, for Settings to list. Empty without
+    /// the grant.
+    func calendars() async -> [CalendarInfo]
 
     /// Fires when the database changes — an event added, moved, or deleted.
     func startWatching(_ onChange: @escaping @MainActor () -> Void)
@@ -118,15 +132,13 @@ public final class EventKitCalendarSource: CalendarSource {
         EKEventStore.authorizationStatus(for: .event) == .fullAccess
     }
 
-    public func upcomingEvents(within window: TimeInterval) async -> [EventSnapshot] {
+    public func upcomingEvents(within window: TimeInterval, hiding hidden: Set<String>) async -> [EventSnapshot] {
         guard isAuthorized else { return [] }
         return await query { store in
             let now = Date()
-            let predicate = store.predicateForEvents(
-                withStart: now,
-                end: now.addingTimeInterval(window),
-                calendars: nil
-            )
+            guard let predicate = Self.predicate(
+                in: store, from: now, to: now.addingTimeInterval(window), hiding: hidden
+            ) else { return [] }
             return store.events(matching: predicate)
                 .filter { !$0.isAllDay }
                 .filter { $0.status != .canceled }
@@ -138,7 +150,7 @@ public final class EventKitCalendarSource: CalendarSource {
         }
     }
 
-    public func eventDays(monthOffset: Int) async -> Set<Int> {
+    public func eventDays(monthOffset: Int, hiding hidden: Set<String>) async -> Set<Int> {
         guard isAuthorized else { return [] }
         return await query { store in
             let calendar = Calendar.current
@@ -148,7 +160,9 @@ public final class EventKitCalendarSource: CalendarSource {
                   let monthEnd = calendar.date(byAdding: .month, value: 1, to: monthStart)
             else { return [] }
 
-            let predicate = store.predicateForEvents(withStart: monthStart, end: monthEnd, calendars: nil)
+            guard let predicate = Self.predicate(
+                in: store, from: monthStart, to: monthEnd, hiding: hidden
+            ) else { return [] }
             var days: Set<Int> = []
             for event in store.events(matching: predicate) where event.status != .canceled && !Self.isDeclined(event) {
                 days.formUnion(Self.days(
@@ -160,7 +174,7 @@ public final class EventKitCalendarSource: CalendarSource {
         }
     }
 
-    public func events(monthOffset: Int) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
         guard isAuthorized else { return [:] }
         return await query { store in
             let calendar = Calendar.current
@@ -176,7 +190,9 @@ public final class EventKitCalendarSource: CalendarSource {
             formatter.timeStyle = .short
             formatter.dateStyle = .none
 
-            let predicate = store.predicateForEvents(withStart: monthStart, end: monthEnd, calendars: nil)
+            guard let predicate = Self.predicate(
+                in: store, from: monthStart, to: monthEnd, hiding: hidden
+            ) else { return [:] }
             var byDay: [Int: [
                 (start: Date, isAllDay: Bool, title: String, time: String,
                  eventID: String, occurrence: Date?)
@@ -218,6 +234,65 @@ public final class EventKitCalendarSource: CalendarSource {
                     }
                     .map { (title: $0.title, time: $0.time, eventID: $0.eventID, occurrence: $0.occurrence) }
             }
+        }
+    }
+
+    /// The query for a span, over the calendars the user has not hidden.
+    ///
+    /// Nil when every calendar is hidden, and the caller then reads nothing.
+    /// It cannot hand EventKit an empty list instead: `calendars: nil` means
+    /// every calendar, and an empty array is not documented to mean none.
+    /// Only ever called on `queryQueue`.
+    private nonisolated static func predicate(
+        in store: EKEventStore, from start: Date, to end: Date, hiding hidden: Set<String>
+    ) -> NSPredicate? {
+        // Nothing hidden is the common case, and needs no calendar list.
+        guard !hidden.isEmpty else {
+            return store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        }
+        let all = store.calendars(for: .event)
+        switch CalendarFilter.scope(calendars: all.map(\.calendarIdentifier), hidden: hidden) {
+        case .all:
+            return store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        case .only(let shown):
+            let calendars = all.filter { shown.contains($0.calendarIdentifier) }
+            return store.predicateForEvents(withStart: start, end: end, calendars: calendars)
+        case .none:
+            return nil
+        }
+    }
+
+    public func calendars() async -> [CalendarInfo] {
+        guard isAuthorized else { return [] }
+        return await query { store in
+            store.calendars(for: .event).map { calendar in
+                var red = 0.36, green = 0.55, blue = 0.9
+                if let parts = calendar.cgColor?.components, parts.count >= 3 {
+                    red = parts[0]; green = parts[1]; blue = parts[2]
+                }
+                return CalendarInfo(
+                    id: calendar.calendarIdentifier,
+                    title: calendar.title,
+                    account: calendar.source?.title ?? "Other",
+                    accountRank: Self.rank(of: calendar.source),
+                    red: red, green: green, blue: blue
+                )
+            }
+        }
+    }
+
+    /// The order Calendar.app's sidebar keeps accounts in, by kind.
+    private nonisolated static func rank(of source: EKSource?) -> Int {
+        switch source?.sourceType {
+        case .local: return 0
+        case .mobileMe: return 1
+        // iCloud is CalDAV to EventKit, and Calendar.app lists it before
+        // the other CalDAV accounts; by name alone Google would lead.
+        case .calDAV: return source?.title == "iCloud" ? 1 : 2
+        case .exchange: return 3
+        case .subscribed: return 4
+        case .birthdays: return 5
+        default: return 6
         }
     }
 
@@ -310,7 +385,8 @@ public final class EventKitCalendarSource: CalendarSource {
             accentGreen: green,
             accentBlue: blue,
             eventKey: "\(identifier)|\(start.timeIntervalSinceReferenceDate)",
-            meetingURL: Self.meetingURL(of: event)
+            meetingURL: Self.meetingURL(of: event),
+            calendarID: event.calendar?.calendarIdentifier ?? ""
         )
     }
 
@@ -379,38 +455,69 @@ public final class StubCalendarSource: CalendarSource {
 
     public var isAuthorized: Bool
     public var events: [EventSnapshot]
+
+    /// The calendars that exist. An event is on the calendar its
+    /// `calendarID` names; one naming a calendar not listed here is still
+    /// read when nothing listed is hidden, the way EventKit's `nil` reads
+    /// every calendar.
+    public var calendarList: [CalendarInfo]
     private var onChange: (() -> Void)?
 
-    public init(events: [EventSnapshot] = [], isAuthorized: Bool = true) {
+    public init(
+        events: [EventSnapshot] = [],
+        calendars: [CalendarInfo] = [],
+        isAuthorized: Bool = true
+    ) {
         self.events = events
+        self.calendarList = calendars
         self.isAuthorized = isAuthorized
     }
 
-    public func upcomingEvents(within window: TimeInterval) async -> [EventSnapshot] {
+    /// The events the user's choice of calendars lets through — by the same
+    /// rule the EventKit source builds its predicate from.
+    private func visible(hiding hidden: Set<String>) -> [EventSnapshot] {
+        switch CalendarFilter.scope(calendars: calendarList.map(\.id), hidden: hidden) {
+        case .all: return events
+        case .only(let shown): return events.filter { shown.contains($0.calendarID) }
+        case .none: return []
+        }
+    }
+
+    public func upcomingEvents(within window: TimeInterval, hiding hidden: Set<String>) async -> [EventSnapshot] {
         guard isAuthorized else { return [] }
         let cutoff = Date().addingTimeInterval(window)
-        return events.filter { $0.start <= cutoff }.sorted { $0.start < $1.start }
+        return visible(hiding: hidden).filter { $0.start <= cutoff }.sorted { $0.start < $1.start }
     }
 
-    public func eventDays(monthOffset: Int) async -> Set<Int> {
+    public func eventDays(monthOffset: Int, hiding hidden: Set<String>) async -> Set<Int> {
         guard isAuthorized else { return [] }
         let calendar = Calendar.current
-        return Set(events.map { calendar.component(.day, from: $0.start) })
+        return Set(visible(hiding: hidden).map { calendar.component(.day, from: $0.start) })
     }
 
-    public func events(monthOffset: Int) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
         guard isAuthorized else { return [:] }
         let calendar = Calendar.current
         var byDay: [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] = [:]
-        for event in events {
+        for event in visible(hiding: hidden) {
             let day = calendar.component(.day, from: event.start)
             byDay[day, default: []].append((title: event.title, time: "", eventID: "", occurrence: nil))
         }
         return byDay
     }
 
+    public func calendars() async -> [CalendarInfo] {
+        isAuthorized ? calendarList : []
+    }
+
     public func set(_ events: [EventSnapshot]) {
         self.events = events
+        onChange?()
+    }
+
+    /// A calendar added or removed: EventKit reports that as a store change.
+    public func set(calendars: [CalendarInfo]) {
+        calendarList = calendars
         onChange?()
     }
 

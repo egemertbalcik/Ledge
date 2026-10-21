@@ -154,6 +154,14 @@ public enum Prefs {
 
     public static let swipeThreshold = PrefKey<Double>("activities.swipeThreshold", default: 28)
     public static let naturalSwipe = PrefKey<Bool>("activities.naturalSwipe", default: true)
+    /// Calendars the user switched off, by `EKCalendar.calendarIdentifier`,
+    /// newline-separated.
+    ///
+    /// The hidden ones rather than the shown ones, on the same grounds as
+    /// `disabledProviders`: a calendar added later — a new account, a shared
+    /// calendar — appears without a visit to Settings. A meeting missed
+    /// because its calendar was never ticked is worse than an extra one.
+    public static let hiddenCalendars = PrefKey<String>("calendar.hiddenCalendars", default: "")
     /// Empty means no weather: the card only exists once a city is chosen.
     public static let weatherCity = PrefKey<String>("weather.city", default: "")
     /// A `WeatherUnits` raw value. "auto" follows the locale; the payloads
@@ -331,6 +339,7 @@ public enum Prefs {
         keepAwakeAgents.name, keepAwakeDisableAppNap.name,
         swipeThreshold.name, naturalSwipe.name,
         disabledProviders.name, enabledProviders.name, weatherCity.name, weatherUnits.name,
+        hiddenCalendars.name,
         quietDuringFocus.name,
         pinnedCard.name,
         outlineEnabled.name, shelfAutoScreenshots.name,
@@ -419,6 +428,7 @@ public final class Preferences {
     public var swipeThreshold: Double { didSet { persist(swipeThreshold, Prefs.swipeThreshold) } }
     public var naturalSwipe: Bool { didSet { persist(naturalSwipe, Prefs.naturalSwipe) } }
     public var weatherCity: String { didSet { persist(weatherCity, Prefs.weatherCity) } }
+    public var hiddenCalendars: String { didSet { persist(hiddenCalendars, Prefs.hiddenCalendars) } }
     public var weatherUnits: String { didSet { persist(weatherUnits, Prefs.weatherUnits) } }
     public var quietDuringFocus: Bool { didSet { persist(quietDuringFocus, Prefs.quietDuringFocus) } }
     public var pinnedCard: String { didSet { persist(pinnedCard, Prefs.pinnedCard) } }
@@ -503,6 +513,7 @@ public final class Preferences {
         swipeThreshold = store.value(for: Prefs.swipeThreshold)
         naturalSwipe = store.value(for: Prefs.naturalSwipe)
         weatherCity = store.value(for: Prefs.weatherCity)
+        hiddenCalendars = store.value(for: Prefs.hiddenCalendars)
         weatherUnits = store.value(for: Prefs.weatherUnits)
         quietDuringFocus = store.value(for: Prefs.quietDuringFocus)
         pinnedCard = store.value(for: Prefs.pinnedCard)
@@ -586,6 +597,7 @@ public final class Preferences {
         swipeThreshold = Prefs.swipeThreshold.defaultValue
         naturalSwipe = Prefs.naturalSwipe.defaultValue
         weatherCity = Prefs.weatherCity.defaultValue
+        hiddenCalendars = Prefs.hiddenCalendars.defaultValue
         weatherUnits = Prefs.weatherUnits.defaultValue
         quietDuringFocus = Prefs.quietDuringFocus.defaultValue
         pinnedCard = Prefs.pinnedCard.defaultValue
@@ -666,6 +678,31 @@ public final class Preferences {
         // every time a toggle is flipped.
         disabledProviders = disabled.sorted().joined(separator: ",")
         enabledProviders = enabledIDs.sorted().joined(separator: ",")
+    }
+
+    // MARK: - Calendars
+
+    /// The calendars switched off, as identifiers.
+    public var hiddenCalendarIDs: Set<String> {
+        Set(
+            hiddenCalendars
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    public func isCalendarShown(_ id: String) -> Bool {
+        !hiddenCalendarIDs.contains(id)
+    }
+
+    public func setCalendar(_ id: String, shown: Bool) {
+        var hidden = hiddenCalendarIDs
+        if shown { hidden.remove(id) } else { hidden.insert(id) }
+        // Sorted, so the same choice is always the same string: a switch set
+        // to what it already was then changes nothing anybody observes, and
+        // the card is not sent back to the store for it.
+        hiddenCalendars = hidden.sorted().joined(separator: "\n")
     }
 
     /// The tuned numbers, in a form that can be pasted back into `Prefs`.

@@ -283,6 +283,7 @@ struct CardDetailPane: View {
                 case "shelf": shelf
                 case "weather": weather
                 case "levels": levels
+                case "calendar": calendars
                 default: EmptyView()
                 }
             } else {
@@ -444,6 +445,96 @@ struct CardDetailPane: View {
         }
     }
 
+    // MARK: - Calendar
+
+    /// Which of the user's calendars the card draws from.
+    ///
+    /// Every calendar is a switch, on unless switched off: what is stored is
+    /// the calendars hidden, so one added later — a new account, a calendar
+    /// somebody shared — shows without a visit here.
+    ///
+    /// No umbrella header: the accounts follow "Needs" the way Calendar.app's
+    /// sidebar lists them. Without the grant there is nothing here at all —
+    /// the Needs row above already says what is missing and has Allow.
+    ///
+    /// The switches stay live while the card itself is off. A choice made
+    /// ahead of time is still a choice, and greying the list would hide what
+    /// it is for.
+    @ViewBuilder
+    private var calendars: some View {
+        switch CalendarListFace(
+            granted: model.status(of: .calendars) == .granted,
+            calendars: model.calendars,
+            isShown: preferences.isCalendarShown
+        ) {
+        case .absent:
+            EmptyView()
+        case .noCalendars:
+            Section {
+            } footer: {
+                SettingsNote("No calendars on this Mac yet.")
+                    .searchRow("calendarList", highlighted: highlighted)
+            }
+        case .list(let accounts, let everyCalendarOff):
+            if everyCalendarOff {
+                // It explains an empty card on the notch, so it is said;
+                // in the page's ordinary voice, with the symbol carrying
+                // the colour, because it is a fact rather than an alarm.
+                Section {
+                    Label {
+                        Text("Every calendar is off, so the card stays empty.")
+                            .fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: SettingsTone.attention.symbol)
+                            .foregroundStyle(SettingsTone.attention.color)
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            }
+            ForEach(accounts) { account in
+                Section {
+                    ForEach(account.calendars) { calendar in
+                        // Search lands on the list's first switch.
+                        if calendar.id == accounts.first?.calendars.first?.id {
+                            calendarSwitch(calendar)
+                                .searchRow("calendarList", highlighted: highlighted)
+                        } else {
+                            calendarSwitch(calendar)
+                        }
+                    }
+                } header: {
+                    Text(account.title)
+                } footer: {
+                    if account.id == accounts.last?.id {
+                        SettingsNote("New calendars are shown until you switch them off.")
+                    }
+                }
+            }
+        }
+    }
+
+    private func calendarSwitch(_ calendar: CalendarInfo) -> some View {
+        Toggle(isOn: Binding(
+            get: { preferences.isCalendarShown(calendar.id) },
+            set: { preferences.setCalendar(calendar.id, shown: $0) }
+        )) {
+            Label {
+                Text(calendar.title)
+            } icon: {
+                // The calendar's own colour, the way Calendar.app marks it,
+                // ringed with a hairline so a grey, white or near-black
+                // calendar does not vanish into the group behind it.
+                Image(systemName: "circle.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(Color(red: calendar.red, green: calendar.green, blue: calendar.blue))
+                    .overlay {
+                        Circle().strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                    }
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
     // MARK: - Weather
 
     @ViewBuilder
@@ -499,4 +590,22 @@ struct CardDetailPane: View {
     /// explained.
     private static let dependentInset: CGFloat = 20
 
+}
+
+/// What the Calendar card's page shows of the user's calendars.
+enum CalendarListFace: Equatable {
+    /// No grant: nothing. The Needs row above has the Allow button.
+    case absent
+    /// Granted, and macOS lists no calendars.
+    case noCalendars
+    /// The accounts, in sidebar order, and whether to say first that every
+    /// one is off — the only reason a granted card would stand empty.
+    case list([CalendarInfo.Account], everyCalendarOff: Bool)
+
+    init(granted: Bool, calendars: [CalendarInfo], isShown: (String) -> Bool) {
+        guard granted else { self = .absent; return }
+        let accounts = CalendarInfo.grouped(calendars)
+        guard !accounts.isEmpty else { self = .noCalendars; return }
+        self = .list(accounts, everyCalendarOff: calendars.allSatisfy { !isShown($0.id) })
+    }
 }

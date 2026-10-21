@@ -328,12 +328,18 @@ public struct SettingsView: View {
             if now != .cards { openCards.removeAll() }
         }
         // The whole window sits on a behind-window material, so the wallpaper
-        // tints the settings the way macOS Tahoe's own panes are tinted.
-        .background(VibrantBackground())
+        // tints the settings the way macOS Tahoe's own panes are tinted. Up
+        // under the toolbar too: stopped at the safe area, the bar was a band
+        // of a different material with a hard edge along its bottom.
+        .background(VibrantBackground().ignoresSafeArea())
         // Wider and taller than it was by a little: the identity row needs
         // the width at the minimum, and Keep Awake's helper and its length
-        // both fit without scrolling at the ideal.
-        .frame(minWidth: 690, idealWidth: 720, minHeight: 520, idealHeight: 600)
+        // both fit without scrolling at the ideal. The heights are what lies
+        // below the toolbar: the ideal is the window's 626 (`makeSettingsWindow`)
+        // less the 66pt bar its full-size content runs under, the same 560
+        // the panes had under the old title bar. A minimum taller than the
+        // window less the bar makes AppKit stretch the window to fit it.
+        .frame(minWidth: 690, idealWidth: 720, minHeight: 520, idealHeight: 560)
     }
 
     // MARK: - Sidebar
@@ -352,6 +358,10 @@ public struct SettingsView: View {
             }
         }
         .listStyle(.sidebar)
+        // The room the first row had under the search field before the
+        // window went full-size. Under the toolbar the list drops its own
+        // top padding (11.5pt to 1.5pt) and the rows crowd the field.
+        .safeAreaPadding(.top, 10)
     }
 
     private func row(_ pane: SettingsPane) -> some View {

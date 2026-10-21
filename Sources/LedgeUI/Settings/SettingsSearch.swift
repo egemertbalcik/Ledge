@@ -52,6 +52,7 @@ enum SettingsSearch {
         "timer": "Timer & Stopwatch",
         "levels": "Sound & Brightness",
         "shelf": "File Shelf",
+        "calendar": "Calendar",
     ]
 
     static func cardName(_ id: String) -> String? { cardNames[id] }
@@ -110,6 +111,8 @@ enum SettingsSearch {
                   pane: .cards, card: "weather", row: "weatherCity"),
             .init(title: "Units", aliases: "weather celsius fahrenheit temperature degrees",
                   pane: .cards, card: "weather", row: "weatherUnits"),
+            .init(title: "Calendars", aliases: "calendar accounts hide show which calendars choose",
+                  pane: .cards, card: "calendar", row: "calendarList"),
 
             .init(title: "\(KeepAwakeCopy.lidClosed) helper",
                   aliases: "lid closed shut helper daemon root install remove awake sleep",

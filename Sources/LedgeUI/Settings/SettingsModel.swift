@@ -254,6 +254,11 @@ public final class SettingsModel {
     /// happened to redraw the pane.
     public var focusFolderGranted = false
 
+    /// The event calendars on this Mac, for the Calendar card's page to
+    /// offer one by one. Filled by the shell, which is the only layer that can
+    /// read them; empty without the Calendars grant.
+    public var calendars: [CalendarInfo] = []
+
     /// Whether the folder exists yet. macOS makes it the first time a Focus
     /// is used, and until then there is nothing to hand over — which the row
     /// now says, instead of opening a panel on a folder that is not there.
