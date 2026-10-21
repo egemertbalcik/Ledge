@@ -115,7 +115,7 @@ private actor FakeJournal: AppNapJournaling {
 /// Turning App Nap off for the agents is the only thing Ledge does that
 /// changes another application's settings. The user has no way of noticing it
 /// was left behind, so every test here is about it never being left behind.
-@Suite("Turning App Nap off for the agents")
+@Suite("Turning App Nap off for the agents", .timeLimit(.minutes(10)))
 struct AppNapSuspensionTests {
 
     private let roster = AgentRoster(["com.a", "com.b"])
@@ -313,7 +313,7 @@ struct AppNapSuspensionTests {
         let admitted = Admissions()
         await suspension.setOnAdmission { admitted.saw($0) }
         let ending = Task { await suspension.end() }
-        for _ in 0 ..< 400 where !admitted.contains("end") {
+        while !admitted.contains("end"), !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(5))
         }
         try #require(admitted.contains("end"), "the end was never asked for")
@@ -348,13 +348,13 @@ struct AppNapSuspensionTests {
         let admitted = Admissions()
         await suspension.setOnAdmission { admitted.saw($0) }
         let stop = Task { await suspension.end() }
-        for _ in 0 ..< 400 where !admitted.contains("end") {
+        while !admitted.contains("end"), !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(5))
         }
         try #require(admitted.contains("end"), "the end was never asked for")
 
         let second = Task { await suspension.begin(AgentRoster(["com.a"])) }
-        for _ in 0 ..< 400 where !admitted.contains("begin") {
+        while !admitted.contains("begin"), !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(5))
         }
         try #require(admitted.contains("begin"), "the replacement was never asked for")

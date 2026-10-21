@@ -81,16 +81,17 @@ private func track(_ title: String, bundleID: String = "com.spotify.client") -> 
 /// Hands the run loop back until the condition holds.
 ///
 /// Every step waited on here is a scheduler step — a main-actor hop, a task
-/// resuming — so yielding is a barrier rather than a guess at a duration. The
-/// bound only exists so a test that will never pass fails instead of hanging.
+/// resuming — but a task on another executor is not done in any number of
+/// yields, and ten thousand of them ran out on a loaded machine. So there is
+/// no count: the suite's time limit is what turns a test that will never pass
+/// into a failure rather than a hang.
 @MainActor
 @discardableResult
 private func settle(until condition: () -> Bool) async -> Bool {
-    for _ in 0..<10_000 {
-        if condition() { return true }
-        await Task.yield()
+    while !condition() {
+        do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
     }
-    return condition()
+    return true
 }
 
 /// How much work a burst of demand for fresh media state is allowed to cost.
@@ -104,7 +105,7 @@ private func settle(until condition: () -> Bool) async -> Bool {
 /// read, so fifty dropped notifications meant fifty `osascript` runs after the
 /// fact: work nobody was waiting for, holding the fresh answer up behind it and
 /// carrying on past `stop`.
-@Suite("What a burst of media refreshes costs", .serialized)
+@Suite("What a burst of media refreshes costs", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct MediaReadQueueTests {
 
@@ -211,7 +212,10 @@ struct MediaReadQueueTests {
         _ = await leaver.value
         // Nothing may be taken away: three callers are still waiting on this
         // very read, and shared work is not cancelled because one of them left.
-        await settle { adapter.cancelledReads > 0 }
+        // A chance for a wrong cancellation to land. Bounded, unlike `settle`,
+        // because the right answer is that none ever does; a slow run can only
+        // make this miss.
+        for _ in 0..<10_000 where adapter.cancelledReads == 0 { await Task.yield() }
         #expect(adapter.cancelledReads == 0, "the read was cancelled out from under the others")
 
         adapter.release(2)

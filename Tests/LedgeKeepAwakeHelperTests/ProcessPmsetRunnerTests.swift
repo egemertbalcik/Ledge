@@ -11,8 +11,18 @@ import Testing
 /// wrote itself a moment earlier. What is being checked is the handling —
 /// timeouts, signals, reaping, draining, what the child inherits — which is
 /// the same whatever the tool at the end of it happens to be.
-@Suite("Running pmset", .serialized)
+@Suite("Running pmset", .serialized, .timeLimit(.minutes(10)))
 struct ProcessPmsetRunnerTests {
+
+    /// The limit for a tool that is expected to finish on its own.
+    ///
+    /// The limit is real time from the spawn, so it measures the machine as
+    /// much as the tool: the production five and ten seconds are right for
+    /// `pmset` on an idle Mac and wrong for a shell script started beside a
+    /// full parallel suite. A minute cannot be reached by a tool that
+    /// finishes, however loaded the run, and is never waited out by one that
+    /// does — the escalation is cancelled the moment the child is reaped.
+    static let ample: TimeInterval = 60
 
     // MARK: Tools that are not pmset
 
@@ -99,7 +109,8 @@ struct ProcessPmsetRunnerTests {
 
     @Test("A reading comes back under the operation it was asked for")
     func reads() async throws {
-        let runner = ProcessPmsetRunner(tool: try tool("cat <<'END'\n\(Self.dump)\nEND"))
+        let runner = ProcessPmsetRunner(tool: try tool("cat <<'END'\n\(Self.dump)\nEND"),
+                                        readLimit: Self.ample, writeLimit: Self.ample)
         let result = await answer(runner, .readSleepDisabled, opID: 41)
         #expect(result.id == 41)
         #expect(result.outcome == .read(1))
@@ -107,7 +118,8 @@ struct ProcessPmsetRunnerTests {
 
     @Test("A write that the tool accepts is a write, and nothing more")
     func writes() async throws {
-        let runner = ProcessPmsetRunner(tool: try tool("exit 0"))
+        let runner = ProcessPmsetRunner(tool: try tool("exit 0"),
+                                        readLimit: Self.ample, writeLimit: Self.ample)
         // `.wrote` says the command ran, not that the setting changed. The
         // core reads it back before it believes anything.
         #expect(await answer(runner, .writeSleepDisabled(true)).outcome == .wrote)
@@ -115,7 +127,8 @@ struct ProcessPmsetRunnerTests {
 
     @Test("A tool that refuses says why")
     func refused() async throws {
-        let runner = ProcessPmsetRunner(tool: try tool("echo 'not permitted' >&2\nexit 3"))
+        let runner = ProcessPmsetRunner(tool: try tool("echo 'not permitted' >&2\nexit 3"),
+                                        readLimit: Self.ample, writeLimit: Self.ample)
         guard case .failed(let message) = await answer(runner, .writeSleepDisabled(true)).outcome else {
             Issue.record("a non-zero exit is a failure")
             return
@@ -132,15 +145,20 @@ struct ProcessPmsetRunnerTests {
         // `exec` so that the process we signal is the one that is sleeping:
         // a shell with a child would hand us a pid whose death tells us
         // nothing about the tool's.
-        let runner = ProcessPmsetRunner(tool: try tool("exec sleep 30"),
-                                        readLimit: 0.2, writeLimit: 0.2, killGrace: 2)
+        //
+        // The grace is a minute and the threshold half of it, so the two
+        // outcomes are far enough apart that load cannot carry one into the
+        // other: a second-long threshold against a two-second grace failed on
+        // a busy machine with the gentle signal working.
+        let runner = ProcessPmsetRunner(tool: try tool("exec sleep 120"),
+                                        readLimit: 0.2, writeLimit: 0.2, killGrace: 60)
         let started = Date()
         guard case .failed(let message) = await answer(runner, .readSleepDisabled).outcome else {
             Issue.record("a tool that hangs is a failure, not an answer")
             return
         }
         #expect(message.contains("did not finish"))
-        #expect(Date().timeIntervalSince(started) < 1, "it waited for the limit, not for the tool")
+        #expect(Date().timeIntervalSince(started) < 30, "it waited for the kill, not for the tool")
     }
 
     @Test("A child that will not finish is asked to stop, and then made to")
@@ -155,7 +173,13 @@ struct ProcessPmsetRunnerTests {
         _ = Escalation(limit: 0.05, grace: 0.1)
             .schedule(on: DispatchQueue(label: "escalation-test")) { seen.add($0) }
 
-        try? await Task.sleep(for: .milliseconds(400))
+        // Until both have been sent, however late the queue runs them: a
+        // fixed 400 ms was a bet on the machine. The suite's time limit
+        // catches a step that never fires.
+        while seen.all.count < 2 {
+            try? await Task.sleep(for: .milliseconds(10))
+            if Task.isCancelled { break }
+        }
         #expect(seen.all == [SIGTERM, SIGKILL])
     }
 
@@ -166,6 +190,8 @@ struct ProcessPmsetRunnerTests {
             .schedule(on: DispatchQueue(label: "escalation-test")) { seen.add($0) }
         for step in steps { step.cancel() }
 
+        // A chance for a cancelled step to fire anyway; a slow run can only
+        // make this miss.
         try? await Task.sleep(for: .milliseconds(400))
         #expect(seen.all.isEmpty, "the child had already exited")
     }
@@ -186,7 +212,7 @@ struct ProcessPmsetRunnerTests {
         // and turn "said too much" into "died of a signal".
         let runner = ProcessPmsetRunner(
             tool: try tool("echo 'SleepDisabled 1'\nhead -c 2000000 /dev/zero | tr '\\0' 'x'"),
-            readLimit: 10, writeLimit: 10)
+            readLimit: Self.ample, writeLimit: Self.ample)
         #expect(await answer(runner, .readSleepDisabled).outcome == .read(1))
     }
 
@@ -218,7 +244,8 @@ struct ProcessPmsetRunnerTests {
         let runner = ProcessPmsetRunner(tool: try tool("""
             n=$(ls /dev/fd | wc -l)
             if [ "$n" -gt \(threshold) ]; then echo "SleepDisabled 1"; else echo "SleepDisabled 0"; fi
-            """))
+            """),
+            readLimit: Self.ample, writeLimit: Self.ample)
         #expect(await answer(runner, .readSleepDisabled).outcome == .read(0),
                 "the child counted more open descriptors than it was handed")
     }
@@ -237,7 +264,8 @@ struct ProcessPmsetRunnerTests {
             else
                 echo "SleepDisabled 0"
             fi
-            """))
+            """),
+            readLimit: Self.ample, writeLimit: Self.ample)
         #expect(await answer(runner, .readSleepDisabled).outcome == .read(0),
                 "the child saw something it was not given")
     }
@@ -275,7 +303,8 @@ struct ProcessPmsetRunnerTests {
 
     @Test("Operations run one after another, each answered under its own id")
     func severalInARow() async throws {
-        let runner = ProcessPmsetRunner(tool: try tool("echo 'SleepDisabled 0'"))
+        let runner = ProcessPmsetRunner(tool: try tool("echo 'SleepDisabled 0'"),
+                                        readLimit: Self.ample, writeLimit: Self.ample)
         for identifier in [1, 2, 3] {
             #expect(await answer(runner, .readSleepDisabled, opID: identifier).id == identifier)
         }
@@ -817,7 +846,7 @@ struct ConnectionTallyTests {
 /// business producing and a shape this runner must survive anyway: an
 /// unbounded wait there held the queue that owes the restore for as long as
 /// the grandchild lived.
-@Suite("A child whose pipes outlive it", .serialized)
+@Suite("A child whose pipes outlive it", .serialized, .timeLimit(.minutes(10)))
 struct OrphanedPipeTests {
 
     /// Resumes exactly once, whatever the runner does.
@@ -948,7 +977,7 @@ struct OrphanedPipeTests {
         // The fixture really started: it wrote its marker before forking. A
         // run where it never started proves nothing about pipes, and must not
         // be allowed to pass quietly.
-        try await untilTrue(upTo: 20) { FileManager.default.fileExists(atPath: marker) }
+        try await untilTrue { FileManager.default.fileExists(atPath: marker) }
         // Measured against what the orphan actually does, not a round number.
         // The budget here is about five seconds; twelve was meant as headroom
         // and turned out to be none under a full parallel suite, where this
@@ -964,7 +993,7 @@ struct OrphanedPipeTests {
 
         // And the child is still collected, on its own queue. An abandoned
         // exited child is a zombie, and one per failure accumulates.
-        try await collected(marker: marker, upTo: 10)
+        try await collected(marker: marker)
     }
 
     /// What `ps` says about a pid.
@@ -1005,28 +1034,26 @@ struct OrphanedPipeTests {
         return state.hasPrefix("Z") ? .zombie : .alive(state)
     }
 
-    /// Waits for something to become true, and fails if it never does.
-    private func untilTrue(upTo seconds: TimeInterval,
-                           _ condition: @Sendable () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+    /// Waits for something to become true, for as long as that takes.
+    ///
+    /// No deadline: these wait on reaping and salvage queues that a loaded
+    /// run holds back for longer than any fixed number of seconds. The
+    /// suite's time limit is what fails a condition that never comes.
+    private func untilTrue(_ condition: @Sendable () -> Bool) async throws {
+        while !condition() {
             try await Task.sleep(for: .milliseconds(50))
         }
-        #expect(condition())
     }
 
-    /// Waits for `ps` to positively say the pid is gone.
+    /// Waits for `ps` to positively say the pid is gone, for as long as that
+    /// takes, like `untilTrue`.
     ///
     /// `.unknown` is not success and never passes: a diagnostic that could
     /// not establish anything must not read as proof.
-    private func collected(marker: String, upTo seconds: TimeInterval) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        var last = Self.childState(marker: marker)
-        while Date() < deadline, last != .absent {
+    private func collected(marker: String) async throws {
+        while Self.childState(marker: marker) != .absent {
             try await Task.sleep(for: .milliseconds(50))
-            last = Self.childState(marker: marker)
         }
-        #expect(last == .absent, "the child was never collected: \(last)")
     }
 
     /// Everything a stuck operation costs — a child, two blocking reads, two
@@ -1048,7 +1075,7 @@ struct OrphanedPipeTests {
             Issue.record("the fixture did not reach the pipe timeout: \(held)")
             return
         }
-        try await untilTrue(upTo: 5) { fixture.recordedPIDs.count == 1 }
+        try await untilTrue { fixture.recordedPIDs.count == 1 }
 
         // A second operation on the same runner, while that budget is still
         // out. It must not start a child at all.
@@ -1064,7 +1091,7 @@ struct OrphanedPipeTests {
 
         // And the first one is still collected, as it always was.
         for pid in fixture.recordedPIDs {
-            try await untilTrue(upTo: 10) { Self.state(ofPID: pid) == .absent }
+            try await untilTrue { Self.state(ofPID: pid) == .absent }
         }
     }
 
@@ -1091,14 +1118,14 @@ struct OrphanedPipeTests {
             }
         }
 
-        try await untilTrue(upTo: 5) { fixture.recordedPIDs.count == 2 }
+        try await untilTrue { fixture.recordedPIDs.count == 2 }
         let pids = fixture.recordedPIDs
         #expect(pids.count == 2, "two operations did not produce two children: \(pids)")
 
         // Both collected — and neither holder has been let go, so a collector
         // that waited for end of file could not have reached the second.
         for pid in pids {
-            try await untilTrue(upTo: 10) { Self.state(ofPID: pid) == .absent }
+            try await untilTrue { Self.state(ofPID: pid) == .absent }
             #expect(Self.state(ofPID: pid) == .absent,
                     "a child was not collected while its pipe was still held")
         }
@@ -1124,7 +1151,7 @@ struct OrphanedPipeTests {
             collector.watched.collectAll()
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 1,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1169,7 +1196,7 @@ struct OrphanedPipeTests {
         // The timer is pushed out of the way: every sweep in this test is one
         // the test asked for, so what is being shown is the sweep's decision
         // and not a race with a background one.
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 1,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1233,7 +1260,7 @@ struct OrphanedPipeTests {
             Issue.record("the fixture did not reach the pipe timeout: \(first)")
             return
         }
-        try await untilTrue(upTo: 5) { fixture.recordedPIDs.count == 1 }
+        try await untilTrue { fixture.recordedPIDs.count == 1 }
 
         // Let the descendant go, so the drains finish and the collector
         // reaches its decision. Without this the unbounded wait on end of
@@ -1245,7 +1272,7 @@ struct OrphanedPipeTests {
         // the child, and a loaded machine can take as long as it likes to get
         // there. A fixed sleep turns "the collector has not run yet" into
         // "retention works".
-        try await untilTrue(upTo: 20) { runner.unsalvagedCount == 1 }
+        try await untilTrue { runner.unsalvagedCount == 1 }
 
         // The collector could not take the child, so the slot is still out.
         let second = await answerOnce(runner)
@@ -1283,8 +1310,8 @@ struct OrphanedPipeTests {
             Issue.record("the fixture did not reach the pipe timeout")
             return
         }
-        try await untilTrue(upTo: 5) { fixture.recordedPIDs.count == 1 }
-        try await untilTrue(upTo: 20) { runner.unsalvagedCount == 1 }
+        try await untilTrue { fixture.recordedPIDs.count == 1 }
+        try await untilTrue { runner.unsalvagedCount == 1 }
 
         // Still stuck: a sweep now must change nothing.
         #expect(runner.salvageNow() == 0, "a slot came back for a child still uncollectable")
@@ -1301,7 +1328,7 @@ struct OrphanedPipeTests {
         // the drains, and comes back when both are finished — which is why
         // the budget is held past collection and not merely until it.
         fixture.releaseHolder()
-        try await untilTrue(upTo: 20) { runner.availableSlots == 1 }
+        try await untilTrue { runner.availableSlots == 1 }
 
         // And the capacity is real: the next operation starts a child.
         let before = fixture.recordedPIDs.count
@@ -1361,7 +1388,7 @@ struct OrphanedPipeTests {
             kill: { _, _ in 0 },
             pause: { _ in }
         )
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600, syscalls: syscalls)
 
@@ -1391,7 +1418,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 1,
                                         salvageInterval: 0.2,
                                         syscalls: collector.syscalls)
@@ -1400,11 +1427,11 @@ struct OrphanedPipeTests {
             Issue.record("a child that could not be collected was reported as a reading")
             return
         }
-        try await untilTrue(upTo: 10) { runner.unsalvagedCount == 1 }
+        try await untilTrue { runner.unsalvagedCount == 1 }
         #expect(runner.availableSlots == 0)
 
         collector.startWorking()
-        try await untilTrue(upTo: 20) { runner.availableSlots == 1 }
+        try await untilTrue { runner.availableSlots == 1 }
         #expect(runner.unsalvagedCount == 0, "the timer freed a slot it had not collected")
     }
 
@@ -1507,7 +1534,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1544,7 +1571,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1582,7 +1609,7 @@ struct OrphanedPipeTests {
             return
         }
 
-        try await untilTrue(upTo: 20) { settled.all.map(\.opID) == [31] }
+        try await untilTrue { settled.all.map(\.opID) == [31] }
         #expect(settled.all.map(\.opID) == [31],
                 "a child collected after its operation was answered reported nothing")
     }
@@ -1604,7 +1631,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1666,7 +1693,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)
@@ -1699,7 +1726,7 @@ struct OrphanedPipeTests {
             try? FileManager.default.removeItem(atPath: path)
         }
 
-        let runner = ProcessPmsetRunner(tool: path, readLimit: 2, writeLimit: 2,
+        let runner = ProcessPmsetRunner(tool: path, readLimit: ProcessPmsetRunnerTests.ample, writeLimit: ProcessPmsetRunnerTests.ample,
                                         killGrace: 1, outstandingLimit: 2,
                                         salvageInterval: 3600,
                                         syscalls: collector.syscalls)

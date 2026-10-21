@@ -12,7 +12,7 @@ import Testing
 /// runs. An independent review blocked one renewal's save, advanced the
 /// monotonic clock ninety-one seconds, and watched sleep stay disabled with
 /// the expiry never processed. The bound was not a bound.
-@Suite("The lease bound, when the control queue is stuck")
+@Suite("The lease bound, when the control queue is stuck", .timeLimit(.minutes(10)))
 struct LeaseWatchdogTests {
 
     /// A store whose save can be held open, as a disk that has stopped
@@ -567,8 +567,12 @@ struct LeaseWatchdogTests {
             core.hold(session: Daemon.sessionA, generation: 2, deadline: nil,
                       leaseSeconds: 90) { _ in }
         }
-        // Give it long enough to be inside the save.
-        try await Task.sleep(for: .milliseconds(100))
+        // Until it is inside the save, however long the run takes to get it
+        // there: a tenth of a second was a guess. The suite's time limit
+        // catches a save that is never reached.
+        while store.blockedSaves == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         #expect(store.blockedSaves == 1, "the save was not actually blocked")
 
         // Ninety-one seconds pass on the monotonic clock. The lease has

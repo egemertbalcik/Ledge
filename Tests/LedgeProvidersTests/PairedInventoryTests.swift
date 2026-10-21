@@ -38,7 +38,7 @@ private final class InventorySource: BluetoothDeviceSource, @unchecked Sendable 
 /// so a `system_profiler` that timed out deleted every device and its battery
 /// history, permanently.
 @MainActor
-@Suite("The paired list")
+@Suite("The paired list", .timeLimit(.minutes(10)))
 struct PairedInventoryTests {
 
     private static func snapshot(_ address: String, name: String) -> BluetoothDeviceSnapshot {
@@ -51,12 +51,13 @@ struct PairedInventoryTests {
         )
     }
 
-    private func waitUntil(
-        _ condition: @escaping @Sendable () -> Bool,
-        upTo seconds: TimeInterval = 5
-    ) async {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+    /// For as long as it takes. A deadline turned a slow turn into a false
+    /// failure — the full suite holds the main thread for longer than five
+    /// seconds — and the suite's time limit catches a wait that never ends.
+    private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async {
+        // Ends when the time limit cancels it, too: a wait that ignored
+        // cancellation would hang the run rather than fail the test.
+        while !condition(), !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }

@@ -133,7 +133,10 @@ struct CompositeNowPlayingTests {
             identifier: "scripting",
             value: snapshot(bundleID: "com.spotify.client")
         )
-        let composite = makeComposite(adapter: adapter, scripting: scripting)
+        // A clock that stands still. On the wall clock a busy suite could
+        // stall here past the demoted probe's interval, and the probe that
+        // then asks the adapter once more is correct, not a failure.
+        let composite = makeComposite(adapter: adapter, scripting: scripting, now: { 1_000 })
 
         for _ in 0..<CompositeNowPlayingSource.demotionThreshold {
             _ = await composite.snapshot()

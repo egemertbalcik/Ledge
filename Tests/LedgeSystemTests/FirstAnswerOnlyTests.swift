@@ -209,7 +209,7 @@ private final class DeliveryCount: @unchecked Sendable {
 /// enough: the bug was never in the gate, it was in where the link put the
 /// counting relative to it. Moving the decrement back outside left every one
 /// of those tests passing. So these drive the real `once`.
-@Suite("Counting a call the way the link does", .serialized)
+@Suite("Counting a call the way the link does", .serialized, .timeLimit(.minutes(10)))
 struct LinkAccountingTests {
 
     private func link() -> KeepAwakeXPCLink {
@@ -240,7 +240,7 @@ struct LinkAccountingTests {
                 parked.hold(deliver)
             }
         }
-        for _ in 0 ..< 400 where link.callsInFlight < 1 {
+        while link.callsInFlight < 1 {
             try await Task.sleep(for: .milliseconds(5))
         }
         try #require(link.callsInFlight == 1, "the parked call was never admitted")

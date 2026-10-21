@@ -9,7 +9,7 @@ import Testing
 /// in parallel, enough of them at once take every thread the concurrency pool
 /// has and nothing is left to release them.
 @MainActor
-@Suite("Keep Awake provider", .serialized)
+@Suite("Keep Awake provider", .serialized, .timeLimit(.minutes(10)))
 struct KeepAwakeProviderTests {
 
     private let boot = "boot-A"
@@ -90,14 +90,18 @@ struct KeepAwakeProviderTests {
     /// `settle()` says "let the main actor catch up"; this says "let it catch
     /// up *until this is true*", which is what a test needs before it can act
     /// on a write or a read being in flight.
+    ///
+    /// No count in it: two thousand short sleeps ran out under a held main
+    /// thread. The suite's time limit catches a condition that never comes,
+    /// and a cancelled wait records what it was waiting for.
     private func wait(for condition: @MainActor () -> Bool,
                       _ what: Comment, sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0 ..< 2_000 {
-            if condition() { return }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch {
+                Issue.record("gave up waiting for \(what)", sourceLocation: sourceLocation)
+                return
+            }
         }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     /// Lets work the provider posted to the main actor run.
@@ -309,8 +313,15 @@ struct KeepAwakeProviderTests {
         }
 
         // The first retry is due a second out. Wait past it rather than
-        // ticking it by hand — the schedule is the thing being tested.
-        try await Task.sleep(for: .milliseconds(1600))
+        // ticking it by hand — the schedule is the thing being tested. Polled
+        // for as long as it takes: under a loaded machine the work item and
+        // the journal worker can land well after the second, and a fixed
+        // 1.6 s wait, then a ten-second deadline, both failed under a held
+        // main thread without anything being wrong. The suite's time limit
+        // catches a retry that never comes.
+        while journal.stored?.state != .ended {
+            try await Task.sleep(for: .milliseconds(100))
+        }
 
         #expect(journal.stored?.state == .ended,
                 "the retry must record the end even though nothing holds the provider")

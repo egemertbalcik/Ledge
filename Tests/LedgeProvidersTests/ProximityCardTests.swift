@@ -2,7 +2,6 @@ import Foundation
 import LedgeCore
 import LedgeSystem
 import Testing
-import os
 
 @testable import LedgeProviders
 
@@ -50,10 +49,15 @@ struct ProximityCardTests {
 
     /// Drives the provider the way the scanner does, and hands back the first
     /// card it published.
-    private func card(
-        paired devices: [PairedDevice]?,
-        upTo seconds: TimeInterval = 5
-    ) async -> DevicePayload? {
+    ///
+    /// No clock in it. The card is yielded inside the scanner's callback, so
+    /// it is already in the stream when the second advertisement has been
+    /// handed over; stopping finishes the stream, and reading it to the end
+    /// collects what was published. This used to wait for a reader task
+    /// against a five-second wall-clock deadline, which the full suite beat
+    /// whenever it kept the reader from being scheduled for longer than that —
+    /// the main-actor loop ran out of time while the card sat unread.
+    private func card(paired devices: [PairedDevice]?) async -> DevicePayload? {
         let registry = PairedDeviceRegistry()
         if let devices { registry.answer(devices) }
         // A scanner that never touches the radio. The real one only stays
@@ -63,27 +67,17 @@ struct ProximityCardTests {
         let provider = AirPodsProximityProvider(scanner: scanner, paired: registry, now: { 0 })
         let stream = provider.start()
 
-        let published = OSAllocatedUnfairLock(initialState: [DevicePayload]())
-        let reader = Task {
-            for await event in stream {
-                guard case .publish(let activity) = event,
-                      case .device(let payload) = activity.payload
-                else { continue }
-                published.withLock { $0.append(payload) }
-            }
-        }
-
         // The first sighting is a baseline; the second is the lid event.
         scanner.onUpdate(Self.advert(lid: 1))
         scanner.onUpdate(Self.advert(lid: 2))
-
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, published.withLock({ $0.isEmpty }) {
-            try? await Task.sleep(for: .milliseconds(10))
-        }
         provider.stop()
-        reader.cancel()
-        return published.withLock { $0.first }
+
+        for await event in stream {
+            if case .publish(let activity) = event, case .device(let payload) = activity.payload {
+                return payload
+            }
+        }
+        return nil
     }
 
     @Test("It says connected when the system says the device is connected")

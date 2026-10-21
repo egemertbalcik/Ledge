@@ -47,76 +47,103 @@ private final class TestProvider: ActivityProvider {
     }
 }
 
-@Suite("Provider hub")
+/// Counts the hub's change notifications, one per applied event.
+@MainActor
+private final class Changes {
+    var count = 0
+    init(_ hub: ProviderHub) {
+        hub.onChange = { [weak self] _ in self?.count += 1 }
+    }
+}
+
+@Suite("Provider hub", .timeLimit(.minutes(10)))
 @MainActor
 struct ProviderHubTests {
 
-    /// Lets the hub's consuming task drain what a provider yielded.
-    private func settle() async {
-        for _ in 0..<10 { await Task.yield() }
+    /// Until something holds, for as long as that takes.
+    ///
+    /// A count of yields stood in for the hub's consume loop catching up, and
+    /// a held main thread outlasted it — the positive tests then failed, and
+    /// the negative ones passed without the in-flight event ever having been
+    /// looked at. The suite's time limit catches a condition that never comes.
+    private func until(_ condition: () -> Bool) async throws {
+        while !condition() { try await Task.sleep(for: .milliseconds(1)) }
+    }
+
+    /// Until the consume loop is waiting on `provider`'s stream: one event in
+    /// and back out, so the next one resumes a loop that is already listening.
+    /// Leaves the queue as it found it.
+    private func listening(_ provider: TestProvider, _ changes: Changes) async throws {
+        let before = changes.count
+        provider.publish("probe")
+        try await until { changes.count == before + 1 }
+        provider.retract("probe")
+        try await until { changes.count == before + 2 }
     }
 
     @Test("Removal rejects an event that already resumed the consumer")
-    func removalRejectsInFlightEvent() async {
+    func removalRejectsInFlightEvent() async throws {
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let provider = TestProvider(identifier: "a")
         hub.add(provider)
         hub.start()
-        await settle()
+        try await listening(provider, changes)
         provider.publish("stale")
         hub.remove("a")
-        await settle()
+        // The loop has had its last turn, with the stale event in hand.
+        try await until { hub.consumersEnded == 1 }
         #expect(hub.queue.isEmpty)
     }
 
     @Test("Replacement rejects the old instance's in-flight events")
-    func replacementRejectsInFlightEvent() async {
+    func replacementRejectsInFlightEvent() async throws {
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let old = TestProvider(identifier: "a")
         hub.add(old)
         hub.start()
-        await settle()
+        try await listening(old, changes)
         old.publish("stale")
         let replacement = TestProvider(identifier: "a")
         hub.add(replacement)
         hub.start()
         replacement.publish("fresh")
-        await settle()
+        try await until { hub.consumersEnded == 1 && changes.count >= 3 }
         #expect(hub.queue.activities.map(\.id.source) == ["fresh"])
         hub.remove("a")
         #expect(hub.queue.isEmpty)
     }
 
     @Test("Stop and restart reject events from the previous run")
-    func restartRejectsInFlightEvent() async {
+    func restartRejectsInFlightEvent() async throws {
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let provider = TestProvider(identifier: "a")
         hub.add(provider)
         hub.start()
-        await settle()
+        try await listening(provider, changes)
         provider.publish("stale")
         hub.stop()
         hub.start()
         provider.publish("fresh")
-        await settle()
+        try await until { hub.consumersEnded == 1 && changes.count >= 3 }
         #expect(hub.queue.activities.map(\.id.source) == ["fresh"])
         hub.remove("a")
     }
 
     @Test("Events reach the queue and notify")
-    func eventsReachQueue() async {
+    func eventsReachQueue() async throws {
         let hub = ProviderHub()
         let provider = TestProvider(identifier: "a")
-        var notifications = 0
-        hub.onChange = { _ in notifications += 1 }
+        let changes = Changes(hub)
 
         hub.add(provider)
         hub.start()
         provider.publish("one")
-        await settle()
+        try await until { changes.count >= 1 }
 
         #expect(hub.queue.count == 1)
-        #expect(notifications >= 1)
     }
 
     @Test("Starting twice does not double-subscribe a provider")
@@ -151,11 +178,12 @@ struct ProviderHubTests {
     }
 
     @Test("Removing a provider takes its activities off screen")
-    func removeRetractsActivities() async {
+    func removeRetractsActivities() async throws {
         // The whole reason the hub tracks attribution. Cancelling the stream
         // stops new events, but anything already published would sit in the
         // queue with nothing left able to update or retract it.
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let keep = TestProvider(identifier: "keep")
         let drop = TestProvider(identifier: "drop")
         hub.add(keep)
@@ -165,7 +193,7 @@ struct ProviderHubTests {
         keep.publish("kept")
         drop.publish("dropped-one", kind: .device)
         drop.publish("dropped-two", kind: .power)
-        await settle()
+        try await until { changes.count == 3 }
         #expect(hub.queue.count == 3)
 
         hub.remove("drop")
@@ -177,8 +205,9 @@ struct ProviderHubTests {
     }
 
     @Test("Removing leaves the selection on something that still exists")
-    func removeKeepsSelectionValid() async {
+    func removeKeepsSelectionValid() async throws {
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let keep = TestProvider(identifier: "keep")
         let drop = TestProvider(identifier: "drop")
         hub.add(keep)
@@ -187,7 +216,7 @@ struct ProviderHubTests {
 
         keep.publish("kept")
         drop.publish("dropped")
-        await settle()
+        try await until { changes.count == 2 }
 
         hub.remove("drop")
 
@@ -199,13 +228,14 @@ struct ProviderHubTests {
     }
 
     @Test("Removing an unknown provider is a no-op")
-    func removeUnknownIsSafe() async {
+    func removeUnknownIsSafe() async throws {
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let provider = TestProvider(identifier: "a")
         hub.add(provider)
         hub.start()
         provider.publish("one")
-        await settle()
+        try await until { changes.count == 1 }
 
         hub.remove("nonexistent")
         #expect(hub.queue.count == 1)
@@ -242,11 +272,12 @@ struct ProviderHubTests {
     }
 
     @Test("An id another provider still publishes survives a removal")
-    func removeKeepsSharedIDs() async {
+    func removeKeepsSharedIDs() async throws {
         // Two providers can legitimately own the same id — a fixture scenario
         // and the real provider for the same kind. Disabling one must not take
         // down a card the other is still standing behind.
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let real = TestProvider(identifier: "real")
         let fixture = TestProvider(identifier: "fixture")
         hub.add(real)
@@ -255,7 +286,9 @@ struct ProviderHubTests {
 
         real.publish("internal", kind: .power)
         fixture.publish("internal", kind: .power)
-        await settle()
+        // Both applied, not just the first: removing the fixture before the
+        // real provider's copy was recorded would rightly retract the card.
+        try await until { changes.count == 2 }
         #expect(hub.queue.count == 1, "same id dedupes to one activity")
 
         hub.remove("fixture")
@@ -266,18 +299,19 @@ struct ProviderHubTests {
     }
 
     @Test("Attribution is tracked per provider, not asked of it")
-    func attributionFollowsRetraction() async {
+    func attributionFollowsRetraction() async throws {
         // The hub watches the event stream, so a provider that retracts its own
         // activity is not later credited with it.
         let hub = ProviderHub()
+        let changes = Changes(hub)
         let provider = TestProvider(identifier: "a")
         hub.add(provider)
         hub.start()
 
         provider.publish("gone")
-        await settle()
+        try await until { changes.count == 1 }
         provider.retract("gone")
-        await settle()
+        try await until { changes.count == 2 }
         #expect(hub.queue.isEmpty)
 
         // Removing must not resurrect or misbehave over an id already gone.

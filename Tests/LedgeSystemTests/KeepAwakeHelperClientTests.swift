@@ -289,7 +289,7 @@ private final class Sleeper: @unchecked Sendable {
     }
 }
 
-@Suite("Keep Awake helper client")
+@Suite("Keep Awake helper client", .timeLimit(.minutes(10)))
 struct KeepAwakeHelperClientTests {
 
     private static let t0 = Date(timeIntervalSince1970: 1_000_000)
@@ -298,13 +298,13 @@ struct KeepAwakeHelperClientTests {
         KeepAwakeHelperClient(link: link, now: { t0 }, sleep: sleeper.sleep)
     }
 
-    private func waitUntil(upTo seconds: TimeInterval = 5,
-                           _ condition: @Sendable () -> Bool) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+    /// For as long as it takes. A five-second deadline turned a held main
+    /// thread into a failure with nothing wrong; the suite's time limit
+    /// catches a condition that never comes.
+    private func waitUntil(_ condition: @Sendable () -> Bool) async throws {
+        while !condition() {
             try await Task.sleep(for: .milliseconds(5))
         }
-        try #require(condition(), "waited \(seconds)s and it never came true")
     }
 
     /// Waits on the client itself rather than on the fake.
@@ -313,16 +313,13 @@ struct KeepAwakeHelperClientTests {
     /// test that waits for the call count and then reads the state is reading
     /// it one step early — the client has not seen the answer yet. Under the
     /// full suite that is the difference between passing and not.
+    ///
+    /// For as long as it takes, like `waitUntil`.
     private func waitForState(_ client: KeepAwakeHelperClient,
-                              _ wanted: KeepAwakeHelperState,
-                              upTo seconds: TimeInterval = 5) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        var seen = await client.currentState
-        while Date() < deadline, seen != wanted {
+                              _ wanted: KeepAwakeHelperState) async throws {
+        while await client.currentState != wanted {
             try await Task.sleep(for: .milliseconds(5))
-            seen = await client.currentState
         }
-        try #require(seen == wanted, "state settled at \(seen), not \(wanted)")
     }
 
     /// These three numbers only mean anything in relation to each other, and
@@ -505,16 +502,19 @@ struct KeepAwakeHelperClientTests {
         sleeper.timeOutCalls()
         let began = Task { await client.begin(session: "s1") }
 
-        // Bounded on purpose, and bounded without a task group.
+        // Bounded by the suite's time limit, and without a task group.
         //
         // A regression here does not make this assertion false — it makes it
-        // never arrive, and an unbounded wait turns a failing test into a hung
-        // test run, which is worse than no test. A task group is no good for
-        // the bound either, for exactly the reason this test exists: a group
-        // waits for its children, including the one that never finishes.
+        // never arrive, and a wait that ignored cancellation would turn a
+        // failing test into a hung test run, which is worse than no test. So
+        // the wait gives up when the time limit cancels it. A count of short
+        // sleeps bounded it before, and a held main thread outlasted that with
+        // nothing wrong. A task group is no good for the bound either, for
+        // exactly the reason this test exists: a group waits for its children,
+        // including the one that never finishes.
         let answer = Answer()
         Task { answer.set(await began.value) }
-        for _ in 0 ..< 1_000 where answer.value == nil {
+        while answer.value == nil, !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(5))
         }
         // Not `temporarilyUnavailable`, which would say the hold almost
@@ -1132,7 +1132,7 @@ private final class Answer: @unchecked Sendable {
 /// to reach it. A daemon that has never answered at all is holding nothing.
 /// These were one state, and the card said "it almost certainly still stands"
 /// to somebody whose Mac nothing was holding, who then shut the lid on it.
-@Suite("Silence before a hold, and silence after one")
+@Suite("Silence before a hold, and silence after one", .timeLimit(.minutes(10)))
 struct KeepAwakeSilenceTests {
 
     private static let t0 = Date(timeIntervalSince1970: 1_000_000)
@@ -1171,13 +1171,13 @@ struct KeepAwakeSilenceTests {
 
         link.goSilent()
         sleeper.timeOutCalls()
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
 
         var seen = await client.currentState
-        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+        while seen != .temporarilyUnavailable {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
         }
@@ -1206,13 +1206,13 @@ struct KeepAwakeSilenceTests {
         _ = await client.begin(session: "s1")
         link.goSilent()
         sleeper.timeOutCalls()
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
 
         var seen = await client.currentState
-        for _ in 0 ..< 400 where seen == .pending || seen == .holding {
+        while seen == .pending || seen == .holding {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
         }
@@ -1306,11 +1306,14 @@ struct KeepAwakeSilenceTests {
         _ = await straggler.value
 
         // A beat, so B asks again and gets nothing again.
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
         var seen = await client.currentState
+        // Bounded on purpose: the right answer is that nothing changes, so
+        // this is a chance for the wrong one to show, and a slow run can only
+        // make it miss.
         for _ in 0 ..< 200 where seen == .unknownWhetherHeld {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
@@ -1345,12 +1348,15 @@ struct KeepAwakeSilenceTests {
         // Then it stops answering altogether.
         link.goSilent()
         sleeper.timeOutCalls()
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
 
         var seen = await client.currentState
+        // Bounded on purpose: what is asserted is only what the state must not
+        // become, so this is a chance for the wrong answer to show, and a slow
+        // run can only make it miss.
         for _ in 0 ..< 400 where seen == .holding {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
@@ -1375,12 +1381,12 @@ struct KeepAwakeSilenceTests {
         #expect(await client.begin(session: "s1") == .holding)
         link.goSilent()
         sleeper.timeOutCalls()
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
         var seen = await client.currentState
-        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+        while seen != .temporarilyUnavailable {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
         }
@@ -1415,12 +1421,12 @@ struct KeepAwakeSilenceTests {
 
         // Inside the lease: still a warning.
         clock.advance(KeepAwakeHelperClient.confidenceWindow - 1)
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
         var seen = await client.currentState
-        for _ in 0 ..< 400 where seen != .temporarilyUnavailable {
+        while seen != .temporarilyUnavailable {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
         }
@@ -1428,11 +1434,11 @@ struct KeepAwakeSilenceTests {
 
         // Past it: the lease the hold stood on has run out.
         clock.advance(2)
-        for _ in 0 ..< 400 where sleeper.beatsWaiting == 0 {
+        while sleeper.beatsWaiting == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
         sleeper.beat()
-        for _ in 0 ..< 400 where seen != .unknownWhetherHeld {
+        while seen != .unknownWhetherHeld {
             try await Task.sleep(for: .milliseconds(5))
             seen = await client.currentState
         }

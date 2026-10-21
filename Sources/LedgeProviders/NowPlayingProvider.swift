@@ -45,6 +45,12 @@ public final class NowPlayingProvider: ActivityProvider {
     /// turn carries the run it belongs to and gives up when that run is over.
     private var run = 0
 
+    /// How many ended streams have had their termination handled here.
+    ///
+    /// For tests, which otherwise yielded a number of turns and hoped the
+    /// handler had run in them.
+    private(set) var terminationsHandled = 0
+
     /// How many reads this run has begun, and the number of the newest one
     /// whose answer reached the card.
     ///
@@ -280,7 +286,10 @@ public final class NowPlayingProvider: ActivityProvider {
         return AsyncStream { continuation in
             self.continuation = continuation
             continuation.onTermination = { _ in
-                Task { @MainActor [weak self] in self?.stop(run: token) }
+                Task { @MainActor [weak self] in
+                    self?.stop(run: token)
+                    self?.terminationsHandled += 1
+                }
             }
             self.task = Task { @MainActor [weak self] in
                 await self?.poll(run: token)

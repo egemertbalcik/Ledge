@@ -16,7 +16,7 @@ private final class Box: @unchecked Sendable {
 /// A fixed instant, outside the main actor so store closures can read it.
 private let t0 = Date(timeIntervalSinceReferenceDate: 0)
 
-@Suite("Device alert provider lifecycle", .serialized)
+@Suite("Device alert provider lifecycle", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct DeviceAlertProviderTests {
 
@@ -41,6 +41,20 @@ struct DeviceAlertProviderTests {
         try? await Task.sleep(for: .milliseconds(60))
     }
 
+    /// Until something has happened, for as long as that takes.
+    ///
+    /// `settle()` is a guess at how long the subscription and the consumer
+    /// need, and a fair one for "nothing more arrives". For "this arrived"
+    /// it was a deadline: the full suite holds the main thread for longer than
+    /// sixty milliseconds, and the card was reported missing before its
+    /// consumer had been given a turn. The suite's time limit catches one
+    /// that never comes.
+    private func until(_ condition: () async -> Bool) async {
+        // Ends when the time limit cancels it, too: a wait that ignored
+        // cancellation would hang the run rather than fail the test.
+        while await !condition(), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
     /// Decided before anyone was listening, then delivered when a provider
     /// starts. Not delivered twice.
     @Test("A backlog reaches the first provider to start, exactly once")
@@ -58,6 +72,8 @@ struct DeviceAlertProviderTests {
                 if case .publish = event { events.add("publish") }
             }
         }
+        await until { !events.all.isEmpty }
+        // And every chance for a second copy.
         await settle()
 
         #expect(events.all.count == 1, "the backlog produced \(events.all.count) cards")
@@ -79,6 +95,10 @@ struct DeviceAlertProviderTests {
         _ = provider.start()
         // Stops before the subscription task can reach the main actor.
         provider.stop()
+        // The return happens on the store's executor, after a hop the full
+        // suite can hold back for longer than a settle; waited for, and then
+        // given every chance for a second copy.
+        await until { await store.queuedAlertCount() > 0 }
         await settle()
 
         #expect(
@@ -109,6 +129,7 @@ struct DeviceAlertProviderTests {
             deviceName: "AirPods", component: .left, level: 0.1, threshold: 0.1,
             delivery: .notch, firedAt: t0
         )])
+        await until { !events.all.isEmpty }
         await settle()
 
         #expect(
@@ -134,6 +155,7 @@ struct DeviceAlertProviderTests {
         await settle()
         await store.record(Self.observation(0.30, at: 0))
         await store.record(Self.observation(0.15, at: 60))
+        await until { !events.all.isEmpty }
         await settle()
         #expect(events.all.count == 1)
 
@@ -261,7 +283,7 @@ final class RecordingNotifier: AlertNotifying, @unchecked Sendable {
 
 /// The provider's own rejection path — the one the store-level token tests
 /// never touched.
-@Suite("Device alert provider rejection path", .serialized)
+@Suite("Device alert provider rejection path", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct DeviceAlertProviderRejectionTests {
 
@@ -274,6 +296,15 @@ struct DeviceAlertProviderRejectionTests {
     private func settle() async {
         for _ in 0..<60 { await Task.yield() }
         try? await Task.sleep(for: .milliseconds(80))
+    }
+
+    /// Until something has happened, for as long as that takes. `settle()`
+    /// is a fair guess for "nothing more arrives" and a deadline for "this
+    /// arrived"; the suite's time limit catches one that never comes.
+    private func until(_ condition: () async -> Bool) async {
+        while await !condition() {
+            do { try await Task.sleep(for: .milliseconds(5)) } catch { return }
+        }
     }
 
     // NOTE: there is deliberately no test here asserting that a provider
@@ -316,6 +347,9 @@ struct DeviceAlertProviderRejectionTests {
         )
         await store.requeueAlerts([alert])
         provider.stop()
+        // Until it has gone one way or the other, then every chance for the
+        // other way too.
+        await until { await store.queuedAlertCount() + presented.all.count > 0 }
         await settle()
 
         // Either it was presented before the stop landed, or it is queued for
@@ -361,6 +395,8 @@ struct DeviceAlertProviderRejectionTests {
         let c2 = Task { @MainActor in
             for await e in s2 { if case .publish = e { presented.add("publish") } }
         }
+        await until { !presented.all.isEmpty }
+        // And every chance for a second copy.
         await settle()
         #expect(presented.all.count == 1, "the queued alert never reached the next provider")
 

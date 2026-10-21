@@ -14,7 +14,7 @@ import Testing
 /// switching it *off* left the Mac unprotected for as long as the disk took —
 /// and, if the replacement was then refused, left both modes off while the
 /// card said "nothing changed".
-@Suite("Changing between the two kinds of hold", .serialized)
+@Suite("Changing between the two kinds of hold", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct KeepAwakeModeChangeTests {
 
@@ -32,15 +32,17 @@ struct KeepAwakeModeChangeTests {
     }
 
     /// Spins until a condition holds, for the work the provider posts to the
-    /// main actor rather than awaits.
+    /// main actor rather than awaits. No count: two thousand short sleeps ran
+    /// out under a held main thread, and the suite's time limit catches a
+    /// condition that never comes.
     private func wait(for condition: @MainActor () -> Bool,
                       _ what: Comment, sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0 ..< 2_000 {
-            if condition() { return }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch {
+                Issue.record("gave up waiting for \(what)", sourceLocation: sourceLocation)
+                return
+            }
         }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     private func rig(ids: [String] = ["A", "B", "C"]) -> Rig {

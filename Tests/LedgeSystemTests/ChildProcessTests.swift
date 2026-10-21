@@ -5,7 +5,7 @@ import os
 @testable import LedgeSystem
 
 /// A child must end, even when it does not want to.
-@Suite("Child process", .serialized)
+@Suite("Child process", .serialized, .timeLimit(.minutes(10)))
 struct ChildProcessTests {
 
     /// Traps SIGTERM and keeps going. This is the case a single `terminate()`
@@ -23,12 +23,14 @@ struct ChildProcessTests {
         "trap '' TERM; : > '\(marker)'; sleep 60"
     }
 
+    /// For as long as `sh` takes to start. Ten seconds of polling ran out on
+    /// a loaded machine; the suite's time limit catches a child that never
+    /// gets there, and a cancelled wait says so.
     private static func waitForMarker(_ path: String) async -> Bool {
-        for _ in 0..<200 {
-            if FileManager.default.fileExists(atPath: path) { return true }
-            try? await Task.sleep(for: .milliseconds(50))
+        while !FileManager.default.fileExists(atPath: path) {
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return false }
         }
-        return false
+        return true
     }
 
     /// A short grace, so the suite does not spend real seconds holding threads
@@ -165,7 +167,7 @@ struct ChildProcessTests {
 }
 
 /// Transport commands: one at a time, in order, bounded.
-@Suite("Serial command runner", .serialized)
+@Suite("Serial command runner", .serialized, .timeLimit(.minutes(10)))
 struct SerialCommandRunnerTests {
 
     @Test("Fifty rapid commands run one at a time, in submission order")
@@ -265,7 +267,10 @@ struct SerialCommandRunnerTests {
         // The first press is picked up and then sits there — the player is not
         // answering.
         #expect(runner.submit { await gate.wait(); ran.withLock { $0.append(0) } })
-        for _ in 0..<10_000 where !gate.isWaiting { await Task.yield() }
+        // However long the runner takes to pick it up: ten thousand yields
+        // ran out on a loaded machine. The suite's time limit catches a
+        // command that is never started.
+        while !gate.isWaiting, !Task.isCancelled { await Task.yield() }
         #expect(gate.isWaiting, "the runner never started the first command")
 
         // Two more presses queue behind it, ten seconds apart.

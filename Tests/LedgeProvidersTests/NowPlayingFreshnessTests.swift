@@ -78,16 +78,16 @@ private final class Publications {
     /// Hands the run loop back until the condition holds.
     ///
     /// Every step being waited on is a scheduler step — a main-actor hop, or
-    /// an image decoded on a utility task — so yielding is a real barrier and
-    /// not a guess at how long something takes. The bound only exists so a
-    /// test that will never pass fails instead of hanging.
+    /// an image decoded on a utility task — but a utility task is not done in
+    /// any number of yields, and ten thousand of them ran out on a loaded
+    /// machine. So there is no count: the suite's time limit is what turns a
+    /// test that will never pass into a failure rather than a hang.
     @discardableResult
     func waiting(for condition: () -> Bool) async -> Bool {
-        for _ in 0..<10_000 {
-            if condition() { return true }
-            await Task.yield()
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
         }
-        return condition()
+        return true
     }
 
     func finish() async {
@@ -97,7 +97,7 @@ private final class Publications {
     var titles: [String] { payloads.map(\.title) }
 }
 
-@Suite("A media reading that arrives late", .serialized)
+@Suite("A media reading that arrives late", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct NowPlayingFreshnessTests {
 
@@ -175,12 +175,12 @@ struct NowPlayingFreshnessTests {
         let fresh = Publications()
         fresh.read(provider.start())
 
-        // The old stream's termination handler hops to the main actor, so it
-        // is already queued there — a task queued behind it runs after it. The
-        // yields that follow are slack, not a wait: with the handler stopping
-        // the wrong run, one turn is all it ever needed.
-        await Task { @MainActor in }.value
-        for _ in 0..<20 { await Task.yield() }
+        // Until the old stream's termination handler has actually run. A task
+        // queued behind it and twenty yields were a guess that it had, and
+        // when the guess was short the test passed without the handler having
+        // had its go at the wrong run.
+        #expect(await fresh.waiting { provider.terminationsHandled >= 1 },
+                "the old stream's termination was never handled")
 
         await provider.refreshNow()
         provider.stop()

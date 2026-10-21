@@ -60,6 +60,13 @@ public final class ProviderHub {
 
     public init() {}
 
+    /// How many consume loops have ended, by their stream finishing or by
+    /// turning away an event from a run that is over.
+    ///
+    /// For tests, which otherwise yielded a number of turns and hoped a
+    /// cancelled loop had been given its last one.
+    private(set) var consumersEnded = 0
+
     public var registeredIdentifiers: Set<String> { Set(entries.keys) }
     public var runningIdentifiers: Set<String> { Set(entries.filter(\.value.isRunning).keys) }
 
@@ -88,6 +95,7 @@ public final class ProviderHub {
         entry.generation = generation
         let stream = entry.provider.start()
         entry.task = Task { @MainActor [weak self] in
+            defer { self?.consumersEnded += 1 }
             for await event in stream {
                 // A yielded value may already have resumed this task before
                 // removal or restart cancelled it. Only the current run owns

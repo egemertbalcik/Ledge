@@ -542,6 +542,12 @@ struct VolumeWatchLifecycleTests {
         let stopped = OSAllocatedUnfairLock(initialState: false)
         let afterStop = OSAllocatedUnfairLock(initialState: 0)
 
+        // The consumer is held until the stop has returned, so whatever the
+        // start managed to hand over is still on its way then — the case that
+        // has to be refused — instead of having landed in time or not,
+        // whichever way the run was scheduled.
+        ui.suspend()
+
         // No settling in between: this is the whole point.
         backend.start { _ in
             if stopped.withLock({ $0 }) { afterStop.withLock { $0 += 1 } }
@@ -549,11 +555,16 @@ struct VolumeWatchLifecycleTests {
         backend.stop()
         backend.settleForTesting()
         stopped.withLock { $0 = true }
+        ui.resume()
 
+        // A chance for a late readout to land, which a slow run can only make
+        // this miss; then the pipeline flushed end to end, so one that did
+        // start is delivered before anything is read.
         for _ in 0..<3 {
             ui.sync {}
             try? await Task.sleep(for: .milliseconds(50))
         }
+        backend.settleForTesting()
         ui.sync {}
 
         #expect(
@@ -579,8 +590,11 @@ struct VolumeWatchLifecycleTests {
         backend.settleForTesting()
 
         backend.start { readout in seen.withLock { $0.append(readout.level) } }
+        // The bind publishes on the backend's queue and hands the readout to
+        // `ui`, so flushing the two in that order delivers it. Three tenth-of-a-
+        // second sleeps stood in for this and were only ever a guess.
         backend.settleForTesting()
-        for _ in 0..<3 { ui.sync {}; Thread.sleep(forTimeInterval: 0.1) }
+        ui.sync {}
 
         #expect(hardware.systemRegistrations.count == 1, "the later start did not arm")
         #expect(!seen.withLock { $0 }.isEmpty, "the later start delivered nothing")

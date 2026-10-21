@@ -11,7 +11,7 @@ import os
 /// launch. An earlier version of this suite started the watcher and waited
 /// three seconds, which never reached the tick and so proved nothing. The poll
 /// interval is injectable now for exactly that reason.
-@Suite("Recording watcher live", .serialized)
+@Suite("Recording watcher live", .serialized, .timeLimit(.minutes(10)))
 struct RecordingWatcherLiveTests {
 
     @Test("The safety poll can fire without tripping an isolation assertion")
@@ -26,8 +26,12 @@ struct RecordingWatcherLiveTests {
         // first tick takes the process down with SIGTRAP — the test crashes
         // rather than fails, which is the loudest possible signal.
         try await Task.sleep(for: .seconds(2))
+        // Delivered to the main actor, which a loaded run can hold for longer
+        // than the ticks took; waited for before the stop can disqualify it.
+        while fired.count == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         source.stopWatching()
-        try await Task.sleep(for: .milliseconds(300))
 
         #expect(
             fired.count > 0,
@@ -118,7 +122,7 @@ struct SystemSpeechExclusionTests {
 ///
 /// Driven by an injected sweep the test holds open, so none of this depends on
 /// real hardware or on timing guesses.
-@Suite("Privacy state across a restart", .serialized)
+@Suite("Privacy state across a restart", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct RecordingRestartTests {
 
@@ -207,7 +211,10 @@ struct RecordingRestartTests {
         let source = watcher(sweep: { RecordingState(microphone: true) })
         source.startWatching { callbacks.bump() }
 
-        for _ in 0..<400 where callbacks.value == 0 {
+        // The announcement hops to the main actor, so it waits for as long as
+        // the suite holds that: a count of short sleeps ran out under load.
+        // The suite's time limit catches one that never comes.
+        while callbacks.value == 0, !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(5))
         }
         #expect(callbacks.value >= 1, "the reading was never announced")
@@ -268,22 +275,26 @@ private final class SweepGate: @unchecked Sendable {
     var entered: Int { state.withLock { $0.entered } }
     var returned: Int { state.withLock { $0.returned } }
 
-    /// - Returns: whether that many sweeps entered before the deadline.
+    /// - Returns: whether that many sweeps entered before the wait was
+    ///   cancelled.
     func waitUntilEntered(_ count: Int) async -> Bool {
         await wait { self.entered >= count }
     }
 
-    /// - Returns: whether that many sweeps returned before the deadline.
+    /// - Returns: whether that many sweeps returned before the wait was
+    ///   cancelled.
     func waitUntilReturned(_ count: Int) async -> Bool {
         await wait { self.returned >= count }
     }
 
+    /// For as long as it takes: five thousand short sleeps ran out on a
+    /// loaded machine. The suite's time limit is what cancels a wait for
+    /// something that never comes.
     private func wait(_ condition: @escaping () -> Bool) async -> Bool {
-        for _ in 0..<5_000 {
-            if condition() { return true }
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
         }
-        return condition()
+        return true
     }
 }
 
@@ -309,7 +320,7 @@ private final class ChangeCount: @unchecked Sendable {
 /// behaviour — under a loaded test run the events spread out, each one lands in
 /// its own window, and the test fails for being right. The minimum gap only
 /// ever grows on a slow machine, so it says the same thing everywhere.
-@Suite("How often the hardware is swept", .serialized)
+@Suite("How often the hardware is swept", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct SweepRateTests {
 
@@ -343,8 +354,12 @@ struct SweepRateTests {
         source.startWatching {}
         defer { source.stopWatching() }
 
-        // Let the opening sweep land, then start counting from clean.
-        try await Task.sleep(for: .milliseconds(250))
+        // Let the opening sweep land, then start counting from clean. Waited
+        // for rather than slept through, so a slow start cannot leave it to be
+        // counted below.
+        while log.stamps.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         log.reset()
 
         // Events at 60ms apart: slower than the old 50ms wait, so each one
@@ -353,6 +368,13 @@ struct SweepRateTests {
         for _ in 0..<25 {
             source.notifyChangedForTesting()
             try await Task.sleep(for: .milliseconds(60))
+        }
+        // At least two sweeps to measure, however long the queue takes to run
+        // them; then the rest of a window for a trailing one to land. That
+        // last part only gives a too-early sweep its chance, so a slow run can
+        // only make it miss.
+        while log.stamps.count < 2 {
+            try await Task.sleep(for: .milliseconds(10))
         }
         try await Task.sleep(for: .milliseconds(700))
 

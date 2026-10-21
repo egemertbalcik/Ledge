@@ -30,7 +30,7 @@ private final class Pump: ActivityProvider {
 /// `ActivityCoordinator` and wires its resting callback to a real
 /// `MediaLinger` with the shell's own branch rule, which is where the wiring
 /// was missing.
-@Suite("A new song becomes a resting fact")
+@Suite("A new song becomes a resting fact", .timeLimit(.minutes(10)))
 @MainActor
 struct RestingTrackTests {
 
@@ -109,15 +109,25 @@ struct RestingTrackTests {
 
         /// The coordinator consumes the provider's stream on its own task, so
         /// a yield alone does not prove delivery. Waits for something the
-        /// delivery actually produces rather than for a guessed interval.
+        /// delivery actually produces rather than for a guessed interval, and
+        /// for as long as that takes: two hundred short sleeps ran out under a
+        /// held main thread. False only when the suite's time limit cancels it.
         @discardableResult
-        func settle(until arrived: () -> Bool = { true }) async -> Bool {
+        func settle(until arrived: () -> Bool) async -> Bool {
+            while !arrived() {
+                do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
+            }
+            return true
+        }
+
+        /// A chance for something that must not happen to show. Bounded,
+        /// because the right answer is that nothing does; a slow run can only
+        /// make this miss.
+        func idle() async {
             for _ in 0 ..< 200 {
-                if arrived() { return true }
                 await Task.yield()
                 try? await Task.sleep(for: .milliseconds(1))
             }
-            return arrived()
         }
 
         /// The shell has been told something it had not been told before.
@@ -176,7 +186,7 @@ struct RestingTrackTests {
         // The same song, republished the way the provider does every second.
         for _ in 0 ..< 5 {
             harness.pump.publish(song("A", playing: true))
-            await harness.settle(until: { false })
+            await harness.idle()
         }
         #expect(afterFirst > 0)
         #expect(harness.callbacks == afterFirst)
@@ -196,7 +206,7 @@ struct RestingTrackTests {
         // Forty seconds later the card is republished while still paused.
         harness.clock += 40
         harness.pump.publish(song("A", playing: false))
-        await harness.settle(until: { false })
+        await harness.idle()
 
         #expect(harness.verdicts.first == .stays(Self.full))
         if harness.verdicts.count > 1 {
@@ -218,7 +228,7 @@ private final class ClockBox {
 /// paused music. Every hold went down the paused-track branch, which asked
 /// the linger about a track that did not exist and was granted two minutes
 /// for it — the island held open with nothing in its ears.
-@Suite("A Keep Awake hold is announced, not rested")
+@Suite("A Keep Awake hold is announced, not rested", .timeLimit(.minutes(10)))
 @MainActor
 struct KeepAwakeWindowTests {
 
@@ -269,15 +279,25 @@ struct KeepAwakeWindowTests {
         }
 
         /// Waits for the queue to have actually taken a publication, proven
-        /// by the presentation reflecting it rather than by an interval.
+        /// by the presentation reflecting it rather than by an interval — and
+        /// for as long as that takes: two hundred short sleeps ran out under a
+        /// held main thread. False only when the suite's time limit cancels it.
         @discardableResult
         func settle(until arrived: () -> Bool) async -> Bool {
+            while !arrived() {
+                do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
+            }
+            return true
+        }
+
+        /// A chance for something that must not happen to show. Bounded,
+        /// because the right answer is that nothing does; a slow run can only
+        /// make this miss.
+        func idle() async {
             for _ in 0 ..< 200 {
-                if arrived() { return true }
                 await Task.yield()
                 try? await Task.sleep(for: .milliseconds(1))
             }
-            return arrived()
         }
 
         var holdIsRunning: Bool { presentation.liveKeepAwake != nil }
@@ -306,7 +326,7 @@ struct KeepAwakeWindowTests {
         // The once-a-second republishes of a running hold are not new starts.
         for left in stride(from: 3_590.0, through: 3_550, by: -10) {
             harness.pump.publish(harness.hold(.running, remaining: left))
-            await harness.settle(until: { false })
+            await harness.idle()
         }
         #expect(harness.starts.count == 1)
     }
@@ -318,7 +338,7 @@ struct KeepAwakeWindowTests {
         let harness = Harness()
         harness.pump.publish(harness.hold(.running))
         #expect(await harness.settle(until: { harness.holdIsRunning }))
-        await harness.settle(until: { false })
+        await harness.idle()
         #expect(harness.starts.isEmpty)
     }
 

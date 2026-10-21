@@ -66,7 +66,7 @@ private final class SlowBluetoothSource: BluetoothDeviceSource, @unchecked Senda
     func stopWatching() {}
 }
 
-@Suite("Device catalogue wiring")
+@Suite("Device catalogue wiring", .timeLimit(.minutes(10)))
 struct DeviceCatalogueWiringTests {
 
     private static let t0 = Date(timeIntervalSinceReferenceDate: 0)
@@ -91,12 +91,13 @@ struct DeviceCatalogueWiringTests {
     /// The startup read is an async task, so sampling straight after `start()`
     /// compared 0 against 0 and passed whatever happened — it proved neither
     /// population nor the absence of extra reads.
-    private func waitUntil(
-        _ condition: @escaping @Sendable () -> Bool,
-        upTo seconds: TimeInterval = 5
-    ) async {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
+    /// For as long as it takes. A deadline turned a slow turn into a false
+    /// failure — the full suite holds the main thread for longer than five
+    /// seconds — and the suite's time limit catches a wait that never ends.
+    private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async {
+        // Ends when the time limit cancels it, too: a wait that ignored
+        // cancellation would hang the run rather than fail the test.
+        while !condition(), !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
@@ -170,8 +171,9 @@ struct DeviceCatalogueWiringTests {
         // nothing: a wait that silently expired left the read never started,
         // and the test then passed because nothing had been reported for
         // entirely the wrong reason. Measured at 5.958s on a loaded machine
-        // against a 5s wait, so the timeout is generous and asserted.
-        await waitUntil({ source.isReading }, upTo: 30)
+        // against a 5s wait, so there is no deadline now, only the suite's
+        // limit on a read that never begins.
+        await waitUntil { source.isReading }
         #expect(source.isReading, "the read never began, so the stop race was never exercised")
 
         provider.stop()
@@ -179,7 +181,7 @@ struct DeviceCatalogueWiringTests {
 
         // Wait for the read to have genuinely finished inside the source,
         // rather than guessing at an interval.
-        await waitUntil({ source.hasFinished }, upTo: 30)
+        await waitUntil { source.hasFinished }
         #expect(source.hasFinished, "the released read never completed")
 
         // And give its result every chance to be applied.

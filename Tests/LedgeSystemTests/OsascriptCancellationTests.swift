@@ -42,13 +42,14 @@ struct ChildProcessLaunchWindowTests {
         try process.run()
         handle.started(pid: process.processIdentifier)
 
-        // `started` is what sends the signal in this ordering.
-        let deadline = Date().addingTimeInterval(5)
-        while process.isRunning, Date() < deadline {
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        #expect(!process.isRunning, "a child cancelled mid-launch was left running")
+        // `started` is what sends the signal in this ordering. How the child
+        // ended is the evidence, not when: a sleep left alone exits normally
+        // after a minute, and one that was signalled says so. A five-second
+        // watch on `isRunning` failed on a loaded machine with the signal long
+        // since delivered.
         process.waitUntilExit()
+        #expect(process.terminationReason == .uncaughtSignal,
+                "a child cancelled mid-launch was left to run out its sleep")
     }
 
     @Test("Completion is claimed exactly once")

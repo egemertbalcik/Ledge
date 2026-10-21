@@ -37,13 +37,15 @@ private func cover(red: UInt8, blue: UInt8) throws -> Data {
     return try #require(NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]))
 }
 
+/// Until the condition holds, for as long as that takes: two thousand yields
+/// ran out on a loaded machine. The suite's time limit is what ends a wait for
+/// something that never comes.
 @MainActor
 private func settle(until condition: () -> Bool) async -> Bool {
-    for _ in 0..<2_000 {
-        if condition() { return true }
-        await Task.yield()
+    while !condition() {
+        do { try await Task.sleep(for: .milliseconds(1)) } catch { return false }
     }
-    return condition()
+    return true
 }
 
 /// A cover is not a song.
@@ -52,7 +54,7 @@ private func settle(until condition: () -> Bool) async -> Bool {
 /// once: a cover arriving a poll late — or being replaced with a better one —
 /// read as a track change, and two songs from one album, sharing a cover, read
 /// as the same song.
-@Suite("Which song, and which cover, are different questions", .serialized)
+@Suite("Which song, and which cover, are different questions", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct MediaIdentityTests {
 

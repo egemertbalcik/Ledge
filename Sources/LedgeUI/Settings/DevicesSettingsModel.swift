@@ -285,6 +285,22 @@ public final class DevicesSettingsModel {
         }
     }
 
+    /// Returns once the reads in flight — the list's and the detail view's —
+    /// have finished, including any detail read a finishing list read starts.
+    ///
+    /// For tests. Polling for their result against a wall-clock deadline lost
+    /// whenever the full suite held the main thread for longer than the
+    /// deadline: the reads were fine, they had not been given a turn yet.
+    func readsSettled() async {
+        while true {
+            let list = listWork
+            let detail = detailWork
+            await list?.value
+            await detail?.value
+            if listWork == list, detailWork == detail { return }
+        }
+    }
+
     public func clearSelection() {
         selectionToken &+= 1
         detailWork?.cancel()
@@ -379,6 +395,7 @@ public final class DevicesSettingsModel {
     /// other — the system shows one and silently denies the rest, which reads
     /// as permission being refused.
     public func requestNotificationAuthorization() async -> Bool {
+        notificationAskers += 1
         let revision = notificationRevision
         if let existing = authorizationWork {
             // Join the request in flight. Waiters never clear it: only the
@@ -403,6 +420,12 @@ public final class DevicesSettingsModel {
     /// prompts behind each other — tagged, so only its owner may retire it.
     private var authorizationWork: (token: Int, task: Task<Bool, Never>)?
     private var authorizationToken = 0
+
+    /// How many calls have asked for permission. Each one is parked on a
+    /// request before it next suspends, so a test that sees the count reach
+    /// its callers knows they are all waiting — which a short sleep guessed.
+    /// Not observed: nothing on screen reads it.
+    @ObservationIgnored private(set) var notificationAskers = 0
 
     /// Whether a permission request is in flight. A test seam.
     var hasAuthorizationRequestInFlight: Bool { authorizationWork != nil }

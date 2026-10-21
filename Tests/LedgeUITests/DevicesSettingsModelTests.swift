@@ -57,29 +57,15 @@ struct DevicesSettingsModelTests {
         )
     }
 
-    /// Waits for the model to finish loading rather than sleeping a guessed
-    /// interval. A fixed sleep is a bet on how fast the machine is, and under
-    /// a parallel suite that bet loses often enough to be useless.
-    private func settle(
-        _ model: DevicesSettingsModel,
-        upTo seconds: TimeInterval = 20
-    ) async throws {
-        try await waitUntil(upTo: seconds) { model.hasLoaded }
-    }
-
-    /// Waits for whatever the test is actually about.
-    private func waitUntil(
-        upTo seconds: TimeInterval = 20,
-        _ condition: @MainActor () -> Bool
-    ) async throws {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline, !condition() {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        // Giving up quietly is worse than failing: the test goes on to compare
-        // whatever the half-built model happens to hold, and reports that
-        // instead of the wait that never finished.
-        try #require(condition(), "waited \(seconds)s and it never came true")
+    /// Waits for the model's reads to finish, then insists the load landed.
+    ///
+    /// No clock. A fixed sleep is a bet on how fast the machine is, and a
+    /// wall-clock deadline is the same bet made larger: the full suite holds
+    /// the main thread for long stretches, and a twenty-second wait ran out on
+    /// a load that had simply not been given a turn.
+    private func settle(_ model: DevicesSettingsModel) async throws {
+        await model.readsSettled()
+        try #require(model.hasLoaded, "the load finished without being applied")
     }
 
     @Test("A new installation shows an empty state, distinct from not-yet-loaded")
@@ -214,7 +200,7 @@ struct DevicesSettingsModelTests {
 
         model.select(id)
         // `hasLoaded` is already true here, so wait for the selection itself.
-        try await waitUntil { model.selected != nil }
+        await model.readsSettled()
         #expect(model.selected?.id == id)
         #expect(model.history.count == 1)
 
@@ -310,7 +296,9 @@ final class OSAllocatedUnfairLockBoxUI: @unchecked Sendable {
 
 /// Rule editing: a slider produces a mutation per frame, and the last value
 /// the user chose must be the one that lands.
-@Suite("Device rule writes", .serialized)
+// A flush that never returns is a hang, not a failure; the limit turns it into
+// one. Ten minutes, so it never mistakes a slow turn for a hang.
+@Suite("Device rule writes", .serialized, .timeLimit(.minutes(10)))
 @MainActor
 struct DeviceRuleWriteTests {
 
@@ -321,24 +309,6 @@ struct DeviceRuleWriteTests {
         private let state = OSAllocatedUnfairLock(initialState: [Double]())
         func record(_ threshold: Double) { state.withLock { $0.append(threshold) } }
         var thresholds: [Double] { state.withLock { $0 } }
-
-        /// Waits for a condition rather than sleeping a guessed interval.
-        ///
-        /// A fixed sleep is a bet on how fast the machine is, and under a
-        /// parallel suite that bet loses: this asserted after 300ms on a write
-        /// that normally takes 30, and failed about one run in six.
-        func wait(
-            upTo seconds: TimeInterval = 20,
-            until condition: @escaping @Sendable ([Double]) -> Bool
-        ) async throws {
-            let deadline = Date().addingTimeInterval(seconds)
-            while Date() < deadline {
-                if condition(thresholds) { return }
-                try? await Task.sleep(for: .milliseconds(10))
-            }
-            try #require(condition(thresholds),
-                         "waited \(seconds)s and the write never landed: \(thresholds)")
-        }
     }
 
     @Test("The newest configuration is what lands, in order")
@@ -368,9 +338,9 @@ struct DeviceRuleWriteTests {
             )
         }
 
-        // The last value of the drag is 0.25; wait for it rather than for a
-        // fixed interval.
-        try await writes.wait { $0.last == 0.25 }
+        // Everything queued, written: the same flush quitting uses, so no
+        // clock decides how long the writes are given.
+        await model.drainPendingWrites()
 
         let landed = writes.thresholds
         #expect(!landed.isEmpty)
@@ -406,7 +376,7 @@ struct DeviceRuleWriteTests {
         // The user closes the window immediately afterwards.
         model.cancel()
 
-        try await writes.wait { $0.contains(0.3) }
+        await model.drainPendingWrites()
         #expect(
             writes.thresholds.contains(0.3),
             "closing the pane threw away a rule change the user had just made"
@@ -441,7 +411,7 @@ struct DeviceRuleWriteTests {
     /// the enabled switch can all be edited while it is up. Writing back a
     /// rule captured before the prompt threw every one of those away.
     @Test("Edits made while the permission prompt is up survive the answer")
-    func editsSurviveThePermissionPrompt() async {
+    func editsSurviveThePermissionPrompt() async throws {
         let id = DeviceIdentity.bluetooth("aa:bb")
         let gate = PromptGate()
         let rule = BatteryAlertRule(kind: .low, component: .left, threshold: 0.2, delivery: .notch)
@@ -466,7 +436,8 @@ struct DeviceRuleWriteTests {
         model.select(id)
         // The selection is a read, not an assignment: wait for it rather than
         // guessing how long it takes.
-        while model.selected == nil { await Task.yield() }
+        await model.readsSettled()
+        try #require(model.selected != nil)
 
         // The box is ticked: the prompt goes up and stays up.
         let asking = Task { @MainActor in
@@ -516,14 +487,14 @@ struct DeviceRuleWriteTests {
         // A and B both join request 1.
         async let a = model.requestNotificationAuthorization()
         async let b = model.requestNotificationAuthorization()
-        await settleTasks()
+        await askers(2, model)
         await firstGate.open()
         _ = await a                      // A resumes and retires request 1.
         await settleTasks()
 
         // Request 2 starts while B is still suspended.
         async let second = model.requestNotificationAuthorization()
-        await settleTasks()
+        await askers(3, model)
         _ = await b                      // B resumes — it must clear nothing.
         await settleTasks()
         #expect(
@@ -533,7 +504,7 @@ struct DeviceRuleWriteTests {
 
         // A fourth caller joins request 2 rather than starting a third.
         async let fourth = model.requestNotificationAuthorization()
-        await settleTasks()
+        await askers(4, model)
         await secondGate.open()
         _ = await second
         _ = await fourth
@@ -563,8 +534,9 @@ struct DeviceRuleWriteTests {
         async let first = model.requestNotificationAuthorization()
         async let second = model.requestNotificationAuthorization()
         async let third = model.requestNotificationAuthorization()
-        // Let all three reach the request before it answers.
-        for _ in 0..<20 { await Task.yield() }
+        // Let all three reach the request before it answers, however long the
+        // run takes to schedule them: twenty yields were a guess.
+        await askers(3, model)
         await gate.open()
 
         let answers = await [first, second, third]
@@ -605,6 +577,17 @@ private actor AskCount {
 /// Lets anything already scheduled run, without spinning the runtime.
 private func settleTasks() async {
     try? await Task.sleep(for: .milliseconds(20))
+}
+
+/// Until that many calls are parked on a permission request, for as long as
+/// that takes. A short sleep stood in for it, and a caller scheduled late
+/// started a second request of its own. The suite's time limit catches one
+/// that never arrives.
+@MainActor
+private func askers(_ count: Int, _ model: DevicesSettingsModel) async {
+    while model.notificationAskers < count, !Task.isCancelled {
+        try? await Task.sleep(for: .milliseconds(1))
+    }
 }
 
 /// Selection, refresh and quit-time draining.
@@ -657,14 +640,10 @@ struct DevicesPaneLifecycleTests {
         // A refresh arrives mid-selection, exactly as the five-second one does.
         model.load(showingProgress: false)
 
-        for _ in 0..<80 where model.selected == nil {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // Both reads to the end, rather than 800ms of polling: the full suite
+        // holds the main thread for longer than that.
+        await model.readsSettled()
         #expect(model.selected?.id == paneID, "the refresh cancelled the selection")
-
-        for _ in 0..<80 where model.history.isEmpty {
-            try await Task.sleep(for: .milliseconds(10))
-        }
         #expect(!model.history.isEmpty, "the selection's history never arrived")
     }
 
@@ -689,17 +668,12 @@ struct DevicesPaneLifecycleTests {
         model.select(paneID)
         model.select(other)                      // the user moves on
 
-        // Waited for, not slept through — and waited for as long as the rest
-        // of this file waits. Five seconds was its own number, smaller than
-        // the twenty every other wait here allows, and on a loaded machine it
-        // was the only one that ran out. The assertion then read as a
-        // selection bug rather than as a machine that had not got round to it.
-        let deadline = Date().addingTimeInterval(20)
-        while model.selected?.id != other, Date() < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        try #require(model.selected?.id == other,
-                     "waited 20s and the selection never moved")
+        // Waited for, not slept through, and not against a deadline either:
+        // five seconds and then twenty both ran out on a loaded machine, and
+        // the assertion read as a selection bug rather than as a machine that
+        // had not got round to it.
+        await model.readsSettled()
+        try #require(model.selected?.id == other, "the selection never moved")
 
         // And give the slow first read every chance to land wrongly.
         try await Task.sleep(for: .milliseconds(250))

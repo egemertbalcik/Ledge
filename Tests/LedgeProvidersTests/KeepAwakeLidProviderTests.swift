@@ -60,7 +60,7 @@ private final class FakeLid: @unchecked Sendable, KeepAwakeLidHolding {
 /// only ever asked for when it was asked for, that a refusal costs the user
 /// nothing they already had, and that letting go is unconditional.
 @MainActor
-@Suite("Keep Awake, the lid-closed seam", .serialized)
+@Suite("Keep Awake, the lid-closed seam", .serialized, .timeLimit(.minutes(10)))
 struct KeepAwakeLidProviderTests {
 
     private struct Rig {
@@ -98,14 +98,17 @@ struct KeepAwakeLidProviderTests {
                    power: power, thermal: thermal)
     }
 
+    /// For as long as it takes: two thousand short sleeps ran out under a
+    /// held main thread. The suite's time limit catches a condition that
+    /// never comes, and a cancelled wait records what it was waiting for.
     private func wait(for condition: @MainActor () -> Bool, _ what: Comment,
                       sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0 ..< 2_000 {
-            if condition() { return }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch {
+                Issue.record("gave up waiting for \(what)", sourceLocation: sourceLocation)
+                return
+            }
         }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     // MARK: - What the payload claims is held
@@ -357,7 +360,7 @@ struct KeepAwakeLidProviderTests {
 /// A relaunch mid-session, which is what a Sparkle update or a crash looks
 /// like from here.
 @MainActor
-@Suite("Keep Awake, resuming a lid-closed session", .serialized)
+@Suite("Keep Awake, resuming a lid-closed session", .serialized, .timeLimit(.minutes(10)))
 struct KeepAwakeLidResumeTests {
 
     private static let start = Date(timeIntervalSince1970: 1_000_000)
@@ -385,14 +388,17 @@ struct KeepAwakeLidResumeTests {
         )
     }
 
+    /// For as long as it takes: two thousand short sleeps ran out under a
+    /// held main thread. The suite's time limit catches a condition that
+    /// never comes, and a cancelled wait records what it was waiting for.
     private func wait(for condition: @MainActor () -> Bool, _ what: Comment,
                       sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0 ..< 2_000 {
-            if condition() { return }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch {
+                Issue.record("gave up waiting for \(what)", sourceLocation: sourceLocation)
+                return
+            }
         }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     /// The daemon never inherits a hold across a restart — not its own, and
@@ -429,10 +435,14 @@ struct KeepAwakeLidResumeTests {
         // Waited out rather than yielded once: proving an absence needs the
         // window in which it could have happened to have actually passed.
         await wait(for: { p.state.isRunning }, "the plain session to resume")
+        // A chance for a stray arm to start, which a late one can only make
+        // this miss; and then every side effect joined, so an arm that did
+        // start has landed before the fake is read.
         for _ in 0 ..< 60 {
             await Task.yield()
             try? await Task.sleep(for: .milliseconds(1))
         }
+        await p.joinSideEffects()
         #expect(lid.arms.isEmpty, "a plain session took a privileged hold on resume")
         withExtendedLifetime(stream) {}
     }
@@ -445,7 +455,7 @@ struct KeepAwakeLidResumeTests {
 /// those were tasks nobody was holding on to, so a quit could return from the
 /// end and exit with all three still outstanding.
 @MainActor
-@Suite("Side effects a quit has to wait for", .serialized)
+@Suite("Side effects a quit has to wait for", .serialized, .timeLimit(.minutes(10)))
 struct KeepAwakeSideEffectTests {
 
     private func built(_ lid: FakeLid,
@@ -603,9 +613,13 @@ struct KeepAwakeSideEffectTests {
 
         // No join: the registry has to empty itself as the work finishes.
         // Removing only *cancelled* handles kept every completed one for the
-        // provider's lifetime, and normal completion does not cancel.
-        for _ in 0..<400 where provider.liveSideEffectCount > 0 {
+        // provider's lifetime, and normal completion does not cancel. Polled
+        // for as long as that takes — a count of short sleeps ran out under
+        // a held main thread — and the suite's time limit catches a registry
+        // that never empties.
+        while provider.liveSideEffectCount > 0 {
             try? await Task.sleep(for: .milliseconds(5))
+            if Task.isCancelled { break }
         }
 
         #expect(provider.liveSideEffectCount == 0,
@@ -641,17 +655,20 @@ struct KeepAwakeSideEffectTests {
 /// helper that was installed, approved and running as root was reported as
 /// missing, with no way out of the loop.
 @MainActor
-@Suite("Keep Awake, knowing about the lid before it is asked for", .serialized)
+@Suite("Keep Awake, knowing about the lid before it is asked for", .serialized, .timeLimit(.minutes(10)))
 struct KeepAwakeLidFirstReadingTests {
 
+    /// For as long as it takes: two thousand short sleeps ran out under a
+    /// held main thread. The suite's time limit catches a condition that
+    /// never comes, and a cancelled wait records what it was waiting for.
     private func wait(for condition: @MainActor () -> Bool, _ what: Comment,
                       sourceLocation: SourceLocation = #_sourceLocation) async {
-        for _ in 0 ..< 2_000 {
-            if condition() { return }
-            await Task.yield()
-            try? await Task.sleep(for: .milliseconds(1))
+        while !condition() {
+            do { try await Task.sleep(for: .milliseconds(1)) } catch {
+                Issue.record("gave up waiting for \(what)", sourceLocation: sourceLocation)
+                return
+            }
         }
-        Issue.record("timed out waiting for \(what)", sourceLocation: sourceLocation)
     }
 
     private func provider(_ lid: FakeLid) -> KeepAwakeProvider {
