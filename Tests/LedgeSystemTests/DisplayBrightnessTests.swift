@@ -53,26 +53,20 @@ struct DisplayBrightnessTests {
     }
 }
 
-/// Reverse geocoding answers with a street address; the card wants a city.
+/// Reverse geocoding answers with a street or a business; the card wants a city.
 @Suite("Place naming")
 struct LocalityTests {
 
-    @Test("A street address reduces to its city")
-    func dropsStreet() {
-        #expect(CoreLocationSource.locality(from: "201 Brookline Ave, Boston") == "Boston")
-        #expect(CoreLocationSource.locality(from: "1 Infinite Loop, Cupertino, CA") == "Cupertino")
+    @Test("The title is the city")
+    func keepsCity() {
+        #expect(CoreLocationSource.placeTitle(city: "İstanbul") == "İstanbul")
+        #expect(CoreLocationSource.placeTitle(city: " Boston\n") == "Boston")
     }
 
-    @Test("An address that is already a place is left alone")
-    func keepsPlace() {
-        #expect(CoreLocationSource.locality(from: "Boston, MA") == "Boston")
-        #expect(CoreLocationSource.locality(from: "İstanbul") == "İstanbul")
-    }
-
-    @Test("An all-numeric address still yields something")
-    func fallsBack() {
-        // Better a wrong-looking label than an empty header.
-        #expect(CoreLocationSource.locality(from: "10115") == "10115")
-        #expect(CoreLocationSource.locality(from: "") == "")
+    @Test("Without a city the title is empty, never a finer place")
+    func noFinerPlace() {
+        // Empty lets the card fall back to the typed city or "Current Location".
+        #expect(CoreLocationSource.placeTitle(city: nil) == "")
+        #expect(CoreLocationSource.placeTitle(city: "  ") == "")
     }
 }

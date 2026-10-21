@@ -76,9 +76,9 @@ struct FocusAuthorizationTests {
         defer { source.stopWatching() }
         focused.withLock { $0 = nil }
         source.refresh()
-        for _ in 0..<100 where notifications == 0 {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        // The probe itself, however long it takes, rather than a count of
+        // short sleeps that a held main thread outlasted.
+        await source.settled()
         #expect(notifications == 1)
         #expect(source.current() == nil)
     }

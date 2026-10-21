@@ -23,6 +23,9 @@ public final class ScreenshotWatcher {
 
     public init() {}
 
+    /// Whether a query is running.
+    public var isWatching: Bool { query != nil }
+
     public func startWatching(_ onNew: @escaping @MainActor (URL) -> Void) {
         stopWatching()
         startedAt = Date()

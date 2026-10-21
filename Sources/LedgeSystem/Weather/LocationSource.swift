@@ -123,7 +123,7 @@ public final class CoreLocationSource: NSObject, LocationProviding, CLLocationMa
                       let items = try? await request.mapItems,
                       let item = items.first
                 else { return "" }
-                return Self.locality(from: item.address?.shortAddress ?? item.name ?? "")
+                return Self.placeTitle(city: item.addressRepresentations?.cityName)
             }
             group.addTask {
                 try? await Task.sleep(for: .seconds(2))
@@ -135,24 +135,17 @@ public final class CoreLocationSource: NSObject, LocationProviding, CLLocationMa
         }
     }
 
-    /// Reduces an address to the place a forecast is about.
+    /// The city a forecast is about, and nothing finer.
     ///
-    /// Reverse geocoding answers with the nearest thing it knows, which is
-    /// usually a street: "201 Brookline Ave, Boston". A forecast is a
-    /// city-scale question, and a street address is both wrong for the card and
-    /// more than anyone wants displayed in their notch.
-    ///
-    /// The rule: drop leading components that carry a house number, keep the
-    /// first that does not. That turns "201 Brookline Ave, Boston" into
-    /// "Boston" while leaving an already-clean "Boston, MA" as "Boston".
-    nonisolated static func locality(from address: String) -> String {
-        let parts = address
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        guard !parts.isEmpty else { return "" }
-        let named = parts.first { !$0.contains(where: \.isNumber) }
-        return named ?? parts[0]
+    /// Reverse geocoding answers with the nearest thing it knows: a street, or
+    /// a business. The item's own `name` is often the restaurant the Mac is
+    /// sitting in, and its short address leads with the street. A forecast is
+    /// a city-scale question, and either is more than anyone wants displayed
+    /// in their notch. So only the structured city is taken; without one the
+    /// card reads "Current Location", never the typed city and never a
+    /// finer place.
+    nonisolated static func placeTitle(city: String?) -> String {
+        city?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     // MARK: - CLLocationManagerDelegate

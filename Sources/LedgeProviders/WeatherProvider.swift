@@ -97,11 +97,15 @@ public final class WeatherProvider: ActivityProvider {
         task = Task { @MainActor [weak self] in
             guard let self else { return }
 
-            let snapshot = await self.fetch()
+            let reading = await self.fetch()
             guard !Task.isCancelled else { return }
 
-            if let snapshot {
+            if let (snapshot, fromLocation) = reading {
+                // The reading and where it came from are kept together, and
+                // only once it has arrived: a failed attempt must not restamp
+                // the forecast already on the card with a source it never had.
                 self.lastGood = snapshot
+                self.lastGoodFromLocation = fromLocation
                 self.lastGoodAt = self.now()
                 self.publish(snapshot, fetchedAt: self.lastGoodAt)
                 // Refresh at the half-hour cadence — but never coast across an
@@ -131,34 +135,46 @@ public final class WeatherProvider: ActivityProvider {
         }
     }
 
+    /// Returns once the fetch in flight has finished, including one that
+    /// replaced it while this waited.
+    ///
+    /// For tests. A count of yields stood in for this, and a fetch is not
+    /// finished in any particular number of main-actor turns.
+    func fetchSettled() async {
+        while let current = task {
+            await current.value
+            if task == current { return }
+        }
+    }
+
     /// Location first, typed city second.
     ///
     /// A location fix means the card follows the user to a new city on its own;
     /// the typed city stays as the fallback for a machine that will not give up
     /// a fix, or a user who would rather not grant it. When location supplies a
-    /// fix but no place *name*, the typed city labels it — the coordinates are
-    /// still the ones the forecast came from.
+    /// fix but no place *name*, the label stays empty and the card says
+    /// "Current Location". The typed city never labels a fix: it may be a city
+    /// the user is nowhere near, and the forecast is for where they are.
     /// Whether the last good reading came from a location fix rather than the
     /// typed city. Remembered alongside the snapshot, so a stale republish
     /// keeps making the same claim the reading itself made.
     private var lastGoodFromLocation = false
 
-    private func fetch() async -> WeatherSnapshot? {
+    private func fetch() async -> (snapshot: WeatherSnapshot, fromLocation: Bool)? {
         let cityName = city().trimmingCharacters(in: .whitespacesAndNewlines)
 
         if let fix = await location?.current() {
-            let label = fix.name.isEmpty ? cityName : fix.name
             if let snapshot = await source.current(
-                latitude: fix.latitude, longitude: fix.longitude, name: label
+                latitude: fix.latitude, longitude: fix.longitude, name: fix.name
             ) {
-                lastGoodFromLocation = true
-                return snapshot
+                return (snapshot, true)
             }
         }
 
-        guard !cityName.isEmpty else { return nil }
-        lastGoodFromLocation = false
-        return await source.current(city: cityName)
+        guard !cityName.isEmpty,
+              let snapshot = await source.current(city: cityName)
+        else { return nil }
+        return (snapshot, false)
     }
 
     /// Seconds until the top of the next hour.

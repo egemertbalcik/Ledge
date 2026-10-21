@@ -429,11 +429,18 @@ struct CardDetailPane: View {
     private var shelf: some View {
         Section {
             Toggle("Save screenshots to the Shelf", isOn: $preferences.shelfAutoScreenshots)
+                // Kept, not cleared: with the card off nothing is watched, and
+                // the choice is still there when the card comes back.
+                .disabled(descriptor?.isEnabled == false)
                 .searchRow("shelfAutoScreenshots", highlighted: highlighted)
         } header: {
             Text("Screenshots")
         } footer: {
-            SettingsNote("A screenshot lands in the notch as you take it, ready to drag into a chat or an email, and leaves on its own after a day. The file stays wherever macOS saved it. Files you drop yourself stay until you take them out.")
+            if descriptor?.isEnabled == false {
+                SettingsNote("While the Shelf card is off, screenshots stay where macOS saved them.")
+            } else {
+                SettingsNote("A screenshot lands in the notch as you take it, ready to drag into a chat or an email, and leaves on its own after a day. The file stays wherever macOS saved it. Files you drop yourself stay until you take them out.")
+            }
         }
     }
 

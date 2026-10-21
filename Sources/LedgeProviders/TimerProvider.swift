@@ -128,6 +128,12 @@ public final class TimerProvider: ActivityProvider {
     private var pending: DispatchWorkItem?
     private var streamGeneration: UUID?
 
+    /// How many ended streams have had their termination handled here.
+    ///
+    /// For tests, which otherwise yielded a number of turns and hoped the
+    /// handler had run in them.
+    private(set) var terminationsHandled = 0
+
     /// Nil when no session exists at all.
     public private(set) var session: Session?
 
@@ -160,6 +166,18 @@ public final class TimerProvider: ActivityProvider {
     /// How long the next leg waits while the notch finishes announcing the
     /// last one. Injected so a test need not sit through it.
     private let handOverDelay: TimeInterval
+
+    /// Whether nobody can see the notch: the displays asleep or the session
+    /// locked. A shut lid holds this through every Power Nap dark wake, since
+    /// the displays stay off in those. Fed by the shell.
+    private var screensAreDark = false
+
+    /// A leg that ended while the screens were dark, held so its finish is
+    /// announced when someone can see it rather than spent on a closed lid.
+    /// It belongs to the session it finished: cancelling, replacing, dismissing
+    /// or switching the timer off retires it, so the lid opening never tells a
+    /// new countdown that an old Focus is over.
+    private var unseenFinish: (session: Session, completedSessions: Int)?
 
     /// Recents as stored: distinct, sane minutes, freshest first, three at most.
     nonisolated static func sanitizedRecents(_ minutes: [Int]) -> [Int] {
@@ -198,7 +216,9 @@ public final class TimerProvider: ActivityProvider {
             // after a new start, so its cleanup must stay with its own run.
             continuation.onTermination = { _ in
                 Task { @MainActor [weak self] in
-                    guard let self, self.streamGeneration == generation else { return }
+                    guard let self else { return }
+                    defer { self.terminationsHandled += 1 }
+                    guard self.streamGeneration == generation else { return }
                     self.stop()
                 }
             }
@@ -224,6 +244,9 @@ public final class TimerProvider: ActivityProvider {
         pending = nil
         continuation?.finish()
         continuation = nil
+        // Switched off is not "nobody looking": the summary is not owed to
+        // whoever switches it back on, who finds the waiting leg instead.
+        unseenFinish = nil
         // The session survives deliberately: it is what makes the documented
         // "switched on mid-session keeps showing it" branch of `start()`
         // reachable. Toggling the provider off and on in Settings must not
@@ -236,11 +259,9 @@ public final class TimerProvider: ActivityProvider {
     /// Begins a leg, replacing whatever was running.
     public func begin(_ leg: Leg, completedSessions: Int? = nil) {
         cancelHandOver()
+        unseenFinish = nil
         continuation?.yield(.retract(Self.idleActivityID))
-        let config = durations()
-        // Floored at a minute: a zero-length leg with auto-advance on is a
-        // begin->finish loop that chimes every 20 milliseconds.
-        let total = max(config.length(of: leg), 60)
+        let total = length(of: leg)
         session = Session(
             leg: leg,
             total: total,
@@ -253,6 +274,12 @@ public final class TimerProvider: ActivityProvider {
         scheduleTick()
     }
 
+    /// Floored at a minute: a zero-length leg with auto-advance on is a
+    /// begin->finish loop that chimes every 20 milliseconds.
+    private func length(of leg: Leg) -> TimeInterval {
+        max(durations().length(of: leg), 60)
+    }
+
     /// Starts a fresh cycle from a work session.
     public func startFocus() {
         begin(.work, completedSessions: 0)
@@ -263,6 +290,7 @@ public final class TimerProvider: ActivityProvider {
     /// auto-advance preference.
     public func startCustom(minutes: Int) {
         cancelHandOver()
+        unseenFinish = nil
         continuation?.yield(.retract(Self.idleActivityID))
         let total = TimeInterval(max(1, min(minutes, 24 * 60))) * 60
         session = Session(
@@ -310,6 +338,7 @@ public final class TimerProvider: ActivityProvider {
     /// — or the stopwatch face, if the stopwatch is still going.
     public func cancel() {
         cancelHandOver()
+        unseenFinish = nil
         session = nil
         rest()
     }
@@ -321,6 +350,7 @@ public final class TimerProvider: ActivityProvider {
     /// have an end the user performs rather than one they wait out.
     public func dismissFinished() {
         cancelHandOver()
+        unseenFinish = nil
         continuation?.yield(.retract(Self.finishedActivityID))
         // What the card was covering comes back: the ready card, or the
         // stopwatch if one is running.
@@ -384,6 +414,61 @@ public final class TimerProvider: ActivityProvider {
     public var isActive: Bool { session != nil }
     public var isRunning: Bool { session?.isRunning ?? false }
 
+    // MARK: - Nobody watching
+
+    /// The policy for time that passes while nobody can see the notch (lid
+    /// shut, a dark wake, displays asleep, the screen locked): a leg still ends
+    /// at its wall-clock deadline, but the cycle stops there. The next leg is
+    /// set up paused at its full length, and the finish is announced once the
+    /// screens light. Advancing on its own chained one leg per dark wake, so a
+    /// night with the lid shut came back to whatever leg the wake cadence had
+    /// landed on, with a session count nobody earned.
+    public func setScreensDark(_ dark: Bool) {
+        guard dark != screensAreDark else { return }
+        if !dark, continuation != nil {
+            // Catch up while still counted as dark. The tick runs on uptime,
+            // so after a sleep it lands whenever it lands, and a leg that ended
+            // in the dark must not take the visible path just because the
+            // screens lit first.
+            tick()
+        }
+        screensAreDark = dark
+        if !dark, let unseen = unseenFinish {
+            unseenFinish = nil
+            publishFinished(unseen.session, completedSessions: unseen.completedSessions)
+            // The announcement retired the session card; the waiting leg (or
+            // the stopwatch) stands beneath it again.
+            publish()
+        }
+    }
+
+    /// The next leg, ready and waiting for the user's play.
+    private func park(_ leg: Leg, completedSessions: Int) {
+        cancelHandOver()
+        let total = length(of: leg)
+        session = Session(
+            leg: leg,
+            total: total,
+            deadline: nil,
+            pausedRemaining: total,
+            completedSessions: completedSessions
+        )
+        Self.log.notice("timer: \(leg.label, privacy: .public) waiting, the screens were dark")
+        publish()
+        // A paused countdown schedules nothing; a running stopwatch keeps going.
+        scheduleTick()
+    }
+
+    /// Announces a finished leg, or holds the announcement for when someone
+    /// can see it.
+    private func announceFinish(_ current: Session, completedSessions: Int) {
+        if screensAreDark {
+            unseenFinish = (current, completedSessions)
+        } else {
+            publishFinished(current, completedSessions: completedSessions)
+        }
+    }
+
     // MARK: - Ticking
 
     private func scheduleTick() {
@@ -394,6 +479,11 @@ public final class TimerProvider: ActivityProvider {
         // Land just after the next whole second — of remaining time for a
         // countdown, of elapsed time for a stopwatch — so the displayed digits
         // change exactly when they should.
+        //
+        // On uptime on purpose: a wall-clock timer stalls for as long as the
+        // clock is set back. Sleep is no problem for it either, because every
+        // decision is made from the wall clock when the tick lands, and
+        // `setScreensDark` catches up the moment the screens light.
         let delay: TimeInterval
         if let current = session, current.isRunning {
             let left = current.remaining(at: now())
@@ -468,7 +558,7 @@ public final class TimerProvider: ActivityProvider {
         // the ready card, whatever the pomodoro auto-advance preference says.
         if current.isCustom {
             if finishedNaturally {
-                publishFinished(current, completedSessions: 0)
+                announceFinish(current, completedSessions: 0)
                 onFinished(current.leg)
             }
             session = nil
@@ -483,7 +573,7 @@ public final class TimerProvider: ActivityProvider {
         if finishedNaturally {
             // Announce the completed leg once, with an expiry so it clears
             // itself even if nothing comes next.
-            publishFinished(current, completedSessions: completed)
+            announceFinish(current, completedSessions: completed)
             onFinished(current.leg)
         }
 
@@ -501,6 +591,11 @@ public final class TimerProvider: ActivityProvider {
                 begin(nextLeg, completedSessions: completed)
                 return
             }
+            // Nobody can be told the next leg has begun, so it does not begin.
+            guard !screensAreDark else {
+                park(nextLeg, completedSessions: completed)
+                return
+            }
             handOver?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 MainActor.assumeIsolated {
@@ -509,7 +604,12 @@ public final class TimerProvider: ActivityProvider {
                     // The user may have started, cancelled or skipped
                     // something in the gap; theirs wins.
                     guard self.session == nil else { return }
-                    self.begin(nextLeg, completedSessions: completed)
+                    // The screens went dark inside the gap: same rule.
+                    if self.screensAreDark {
+                        self.park(nextLeg, completedSessions: completed)
+                    } else {
+                        self.begin(nextLeg, completedSessions: completed)
+                    }
                 }
             }
             handOver = work

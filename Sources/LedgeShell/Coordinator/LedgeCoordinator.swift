@@ -892,6 +892,8 @@ public final class LedgeCoordinator {
     private func setScreensDark(_ reason: ScreenDormancy.Reason, _ active: Bool) {
         guard dormancy.set(reason, active) else { return }
         presentation.screensAreDark = dormancy.isDark
+        // A pomodoro must not start legs nobody can see begin.
+        timerProviderRef?.setScreensDark(dormancy.isDark)
         if dormancy.isDark {
             notesWindow.cancelPendingOpening()
             hoverTracker?.stop()
@@ -929,6 +931,14 @@ public final class LedgeCoordinator {
     private lazy var shelf = ShelfStore(
         load: { [weak self] in self?.preferences.shelfPaths ?? "" },
         save: { [weak self] paths in self?.preferences.shelfPaths = paths }
+    )
+    /// What a drop or a screenshot may change: only a drop switches the
+    /// Shelf back on.
+    private lazy var shelfArrival = ShelfArrival(
+        preferences: preferences,
+        shelf: shelf,
+        enableShelf: { [weak self] in self?.activities.setProvider("shelf", enabled: true) },
+        announce: { [weak self] in self?.announceShelf() }
     )
     /// The user's notes. Owned here, not by the provider, so the editor window
     /// keeps working while the card is switched off — the same reason the shelf
@@ -1350,19 +1360,12 @@ public final class LedgeCoordinator {
     }
 
     private func applyScreenshotWatching() {
-        if preferences.shelfAutoScreenshots {
+        if shelfArrival.watchesScreenshots {
+            // Any card's switch wakes this, not only the Shelf's: restarting a
+            // running query would forget what it had already seen.
+            guard !screenshots.isWatching else { return }
             screenshots.startWatching { [weak self] url in
-                guard let self else { return }
-                // On a clock, unlike a file the user dropped: Ledge put this
-                // here on their behalf and should tidy up after itself.
-                guard self.shelf.add([url], expiresAfter: ShelfStore.screenshotLifetime) > 0 else {
-                    return
-                }
-                // And say so. A screenshot that lands in the notch without a
-                // word is indistinguishable from one that went only to the
-                // desktop, which makes the feature invisible to the person it
-                // is for.
-                self.announceShelf()
+                self?.shelfArrival.screenshotTaken(url)
             }
         } else {
             screenshots.stopWatching()
@@ -1371,7 +1374,7 @@ public final class LedgeCoordinator {
 
     private func observeScreenshotPreference() {
         withObservationTracking {
-            _ = preferences.shelfAutoScreenshots
+            _ = shelfArrival.watchesScreenshots
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.applyScreenshotWatching()
@@ -2089,6 +2092,7 @@ public final class LedgeCoordinator {
                         self?.preferences.timerRecents = TimerProvider.encodeRecents(minutes)
                     }
                 )
+                provider.setScreensDark(self.dormancy.isDark)
                 self.timerProviderRef = provider
                 return provider
             },
@@ -2992,9 +2996,7 @@ public final class LedgeCoordinator {
         // the gesture landing on the notch, which it just did, whether or not
         // the shelf had room for this particular file.
         tellTheTour(.fileDropped)
-        let added = shelf.add(urls)
-        guard added > 0 else { return true }
-        announceShelf()
+        shelfArrival.dropped(urls)
         return true
     }
 
@@ -3012,9 +3014,6 @@ public final class LedgeCoordinator {
     /// to the selected card. The store already holds the items, so the card is
     /// built locally when the queue cannot supply it.
     private func announceShelf() {
-        if !preferences.isProviderEnabled("shelf") {
-            activities.setProvider("shelf", enabled: true)
-        }
         presentation.peeked = activities.activity(withID: ShelfProvider.activityID)
             ?? Activity(
                 id: ShelfProvider.activityID,
@@ -3316,6 +3315,7 @@ public final class LedgeCoordinator {
         focusBaseline = nil
         dormancy.clear()
         presentation.screensAreDark = false
+        timerProviderRef?.setScreensDark(false)
         satelliteDismiss?.cancel()
         satelliteDismiss = nil
         parkedSatellite = nil

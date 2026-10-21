@@ -337,7 +337,7 @@ struct TimerProviderStreamTests {
     }
 }
 
-@Suite("The next leg waits for the notch to sit back down")
+@Suite("The next leg waits for the notch to sit back down", .timeLimit(.minutes(10)))
 @MainActor
 struct TimerHandOverTests {
 
@@ -409,9 +409,13 @@ struct TimerHandOverTests {
         clock += 61
         timer.tickNow()
 
-        // Generous the other way for the same reason: this asserts something
-        // *has* happened, so the wait must outlast a slow moment.
-        try await Task.sleep(for: .milliseconds(800))
+        // Waited for rather than slept through: this asserts something *has*
+        // happened, and a held main thread outlasts any fixed sleep with the
+        // hand-over still queued behind it. The suite's time limit catches a
+        // break that never starts.
+        while timer.session?.leg.isBreak != true {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         timer.stop()
         var events: [ProviderEvent] = []
         for await event in stream { events.append(event) }
@@ -432,6 +436,8 @@ struct TimerHandOverTests {
         timer.tickNow()
 
         timer.cancel()
+        // A chance for the cancelled hand-over to go wrong, sixteen times its
+        // delay. A late one can only make this miss the fault, never invent it.
         try await Task.sleep(for: .milliseconds(800))
         timer.stop()
         var events: [ProviderEvent] = []
@@ -441,16 +447,21 @@ struct TimerHandOverTests {
     }
 }
 
-@Suite("Timer stream lifecycle")
+@Suite("Timer stream lifecycle", .timeLimit(.minutes(10)))
 @MainActor
 struct TimerLifecycleTests {
     @Test("Old stream termination cannot stop an immediate restart")
-    func immediateRestartKeepsFreshStreamAlive() async {
+    func immediateRestartKeepsFreshStreamAlive() async throws {
         let timer = TimerProvider()
         let old = timer.start()
         timer.stop()
         let fresh = timer.start()
-        for _ in 0..<20 { await Task.yield() }
+        // Until the old stream's handler has actually run. A count of yields
+        // was a guess at how many turns it needed, and when the guess was
+        // short the test passed without the handler having had its go.
+        while timer.terminationsHandled == 0 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         timer.startCustom(minutes: 1)
         timer.stop()
         var publications = 0
@@ -465,32 +476,332 @@ struct TimerLifecycleTests {
 
     @Test("Pausing the countdown preserves stopwatch publications")
     func pausedCountdownKeepsStopwatchPublishing() async throws {
-        let timer = TimerProvider()
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(now: { clock })
         let stream = timer.start()
+        defer { timer.stop() }
         timer.stopwatchToggle()
         timer.startCustom(minutes: 1)
         timer.pause()
-        var publications = 0
-        let consumer = Task { @MainActor in
-            for await event in stream {
-                if case .publish = event { publications += 1 }
-            }
-        }
-        defer { timer.stop(); consumer.cancel() }
-        for _ in 0..<20 { await Task.yield() }
-        let before = publications
+        // Everything published so far is stamped before this, so a
+        // publication stamped after it can only have come from a tick. That
+        // tells the scheduler's own publications from the ones the commands
+        // above buffered, which counting them after a number of yields did
+        // not: a consumer that had not caught up saw the buffered ones arrive
+        // late and took them for ticks.
+        clock += 100
         // The regular scheduler fires at least once per second. Test the
         // publications, not the separate TimelineView stopwatch rendering.
-        //
-        // Waited for rather than slept through: a fixed 1.5s was a bet that
-        // the tick would not be delayed past it, and under a parallel suite
-        // that bet lost about one run in four.
-        let deadline = Date().addingTimeInterval(10)
-        while publications <= before, Date() < deadline {
-            try await Task.sleep(for: .milliseconds(50))
+        // Waited for however long that takes; the suite's time limit catches
+        // a tick that never comes.
+        var ticked = false
+        for await event in stream {
+            if case .publish(let activity) = event, activity.createdAt >= 1_100 {
+                ticked = true
+                break
+            }
         }
-        #expect(publications > before)
+        #expect(ticked, "nothing was published after the pause")
         #expect(timer.stopwatch.isRunning)
         #expect(timer.session?.isRunning == false)
+    }
+}
+
+/// A pomodoro left running when the lid closes. The displays stay off through
+/// every Power Nap dark wake, and the main queue runs in each, so the overdue
+/// tick lands there: it used to finish a leg per wake and start the next from
+/// that moment, and the user came back hours later to an arbitrary leg.
+@Suite("A pomodoro nobody can see does not run on", .timeLimit(.minutes(10)))
+@MainActor
+struct TimerScreensDarkTests {
+
+    private func finishes(in events: [ProviderEvent]) -> [(createdAt: TimeInterval, payload: TimerPayload)] {
+        events.compactMap { event in
+            guard case .publish(let activity) = event,
+                  activity.id == TimerProvider.finishedActivityID,
+                  case .timer(let payload) = activity.payload,
+                  payload.isFinished
+            else { return nil }
+            return (activity.createdAt, payload)
+        }
+    }
+
+    /// Waits out a hand-over if one is running. The provider has no session
+    /// only while a hand-over is pending, so this settles either way and
+    /// never bets on a fixed sleep — nor on a deadline, which a held main
+    /// thread outlasts with the hand-over still queued behind it.
+    private func settle(_ timer: TimerProvider) async throws {
+        while timer.session == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    @Test("Twelve dark wakes end one leg, count one session, and start nothing")
+    func darkWakesDoNotChainLegs() async throws {
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(
+            durations: { TimerProvider.Durations() },   // 25/5/15, auto-advance on
+            now: { clock },
+            handOverDelay: 0.05
+        )
+        let stream = timer.start()
+        timer.startFocus()
+        clock += 10 * 60
+        timer.setScreensDark(true)                     // the lid closes ten minutes in
+
+        var legs: [TimerProvider.Session] = []
+        var waitedOnAHandOver = false
+        for _ in 0..<12 {
+            clock += 15 * 60
+            timer.tickNow()                            // the overdue tick, in the dark wake
+            // Checked before anything is awaited: no hand-over is even begun.
+            if timer.session == nil { waitedOnAHandOver = true }
+            try await settle(timer)
+            if let session = timer.session { legs.append(session) }
+        }
+
+        // Reached: the first wake found the work leg over at its wall-clock end.
+        try #require(legs.count == 12)
+        try #require(legs[0].leg == .shortBreak, "the work leg ended while the lid was shut")
+        #expect(waitedOnAHandOver == false)
+
+        for session in legs {
+            #expect(session.leg == .shortBreak)
+            #expect(session.completedSessions == 1)
+            #expect(session.isRunning == false)
+            #expect(session.remaining(at: clock) == 5 * 60)
+        }
+
+        // The lid opens: the finish is told now, and the break waits for play.
+        clock += 60
+        let opened = clock
+        timer.setScreensDark(false)
+        try await Task.sleep(for: .milliseconds(300))   // six hand-overs' worth
+        #expect(timer.session?.leg == .shortBreak)
+        #expect(timer.session?.isRunning == false)
+
+        timer.resume()
+        #expect(timer.session?.deadline == clock + 5 * 60)
+
+        timer.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        let finished = finishes(in: events)
+        #expect(finished.count == 1)
+        #expect(finished.first?.createdAt == opened, "announced when someone could see it")
+        #expect(finished.first?.payload.label == "Focus")
+        #expect(finished.first?.payload.completedSessions == 1)
+
+        // The announcement retires the session card; the waiting break must
+        // stand beneath it again, or it is gone once the finish clears.
+        let announced = try #require(events.firstIndex { event in
+            if case .publish(let a) = event { return a.id == TimerProvider.finishedActivityID }
+            return false
+        })
+        let restored = events[announced...].contains { event in
+            guard case .publish(let a) = event, a.id == TimerProvider.activityID,
+                  case .timer(let p) = a.payload else { return false }
+            return p.isBreak && !p.isRunning
+        }
+        #expect(restored)
+    }
+
+    @Test("A leg that ended in the dark still waits when the lid opens before the tick lands")
+    func revealCatchesUpBeforeTheTick() async throws {
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(
+            durations: {
+                TimerProvider.Durations(work: 60, shortBreak: 120, longBreak: 300, autoAdvance: true)
+            },
+            now: { clock },
+            handOverDelay: 0.05
+        )
+        let stream = timer.start()
+        timer.startFocus()
+        timer.setScreensDark(true)
+        clock += 2 * 60 * 60                           // asleep; no tick ran
+        try #require(timer.session?.leg == .work, "reached: the leg is over but nothing has noticed")
+
+        timer.setScreensDark(false)
+        // Nothing awaited: the uptime tick has had no chance to land first.
+        #expect(timer.session?.leg == .shortBreak)
+        #expect(timer.session?.isRunning == false)
+
+        timer.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        #expect(finishes(in: events).count == 1)
+    }
+
+    @Test("With the screens lit, a pomodoro hands over to the next leg as before")
+    func awakePomodoroStillAdvances() async throws {
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(
+            durations: {
+                TimerProvider.Durations(work: 60, shortBreak: 120, longBreak: 300, autoAdvance: true)
+            },
+            now: { clock },
+            handOverDelay: 0.05
+        )
+        let stream = timer.start()
+        timer.startFocus()
+        // A dark spell that ends before the leg does changes nothing.
+        timer.setScreensDark(true)
+        clock += 20
+        timer.setScreensDark(false)
+
+        clock += 41
+        let ended = clock
+        timer.tickNow()
+        try #require(timer.session == nil, "reached: the leg ended and the hand-over is pending")
+
+        try await settle(timer)
+        #expect(timer.session?.leg == .shortBreak)
+        #expect(timer.session?.isRunning == true)
+        #expect(timer.session?.completedSessions == 1)
+        #expect(timer.session?.deadline == ended + 120)
+
+        timer.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        let finished = finishes(in: events)
+        #expect(finished.count == 1)
+        #expect(finished.first?.createdAt == ended, "announced the moment it ended")
+    }
+
+    /// Switched off in Settings, the provider keeps its session but no tick:
+    /// the screens lighting must not start one behind the user's back.
+    @Test("A switched-off timer is left alone when the screens light")
+    func stoppedProviderIsNotTicked() async throws {
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(
+            durations: {
+                TimerProvider.Durations(work: 60, shortBreak: 120, longBreak: 300, autoAdvance: true)
+            },
+            now: { clock },
+            handOverDelay: 0.05
+        )
+        let stream = timer.start()
+        timer.startFocus()
+        timer.setScreensDark(true)
+        timer.stop()
+        for await _ in stream {}
+        clock += 2 * 60 * 60
+        try #require(timer.session?.isRunning == true, "reached: a stopped provider holding an overdue leg")
+
+        timer.setScreensDark(false)
+        #expect(timer.session?.leg == .work)
+        #expect(timer.session?.isRunning == true)
+    }
+
+    private func darkProvider(now: @escaping () -> TimeInterval) -> TimerProvider {
+        TimerProvider(
+            durations: {
+                TimerProvider.Durations(work: 60, shortBreak: 120, longBreak: 300, autoAdvance: true)
+            },
+            now: now,
+            handOverDelay: 0.05
+        )
+    }
+
+    /// The held finish belongs to the session that finished. A command that
+    /// replaces or ends that session before the lid opens used to leave it
+    /// held, and the reveal then announced "Focus finished" over the new
+    /// countdown.
+    @Test(
+        "A held finish is retired by whatever replaces the session before the lid opens",
+        arguments: ["cancel", "cancel then new timer", "new timer", "new focus", "skip", "done"]
+    )
+    func replacingCommandRetiresTheHeldFinish(command: String) async throws {
+        var clock: TimeInterval = 1_000
+        let timer = darkProvider(now: { clock })
+        let stream = timer.start()
+        timer.startFocus()
+        timer.setScreensDark(true)
+        clock += 61
+        timer.tickNow()
+        try #require(timer.session?.leg == .shortBreak, "reached: the work leg ended in the dark")
+        try #require(timer.session?.isRunning == false, "reached: the break is parked")
+
+        switch command {
+        case "cancel": timer.cancel()
+        case "cancel then new timer": timer.cancel(); timer.startCustom(minutes: 5)
+        case "new timer": timer.startCustom(minutes: 5)
+        case "new focus": timer.startFocus()
+        case "skip": timer.skip()
+        default: timer.dismissFinished()
+        }
+        let after = timer.session
+        clock += 30
+        timer.setScreensDark(false)
+        #expect(timer.session?.deadline == after?.deadline, "the new state survives the reveal")
+
+        timer.stop()
+        var events: [ProviderEvent] = []
+        for await event in stream { events.append(event) }
+        #expect(finishes(in: events).isEmpty)
+    }
+
+    /// Settings switching the timer off while a finish is held, then on again:
+    /// whether the lid opens while it is off or after it is back, what comes
+    /// back is the waiting leg, and no summary of the old one.
+    @Test(
+        "Switching the timer off and on retires a held finish but keeps the waiting leg",
+        arguments: [false, true]
+    )
+    func offAndOnRetiresTheHeldFinish(revealWhileOff: Bool) async throws {
+        var clock: TimeInterval = 1_000
+        let timer = darkProvider(now: { clock })
+        let first = timer.start()
+        timer.startFocus()
+        timer.setScreensDark(true)
+        clock += 61
+        timer.tickNow()
+        try #require(timer.session?.leg == .shortBreak, "reached: the work leg ended in the dark")
+        timer.stop()
+        var before: [ProviderEvent] = []
+        for await event in first { before.append(event) }
+        try #require(finishes(in: before).isEmpty, "reached: the finish was held, not spent")
+
+        if revealWhileOff { timer.setScreensDark(false) }
+        let second = timer.start()
+        if !revealWhileOff { timer.setScreensDark(false) }
+        timer.stop()
+        var events: [ProviderEvent] = []
+        for await event in second { events.append(event) }
+
+        #expect(finishes(in: events).isEmpty)
+        let waiting = events.contains { event in
+            guard case .publish(let a) = event, a.id == TimerProvider.activityID,
+                  case .timer(let p) = a.payload else { return false }
+            return p.isBreak && !p.isRunning && p.remaining == 120
+        }
+        #expect(waiting, "the parked break is what comes back")
+    }
+
+    @Test("Screens that go dark inside the hand-over leave the next leg waiting")
+    func darkDuringHandOverParks() async throws {
+        var clock: TimeInterval = 1_000
+        let timer = TimerProvider(
+            durations: {
+                TimerProvider.Durations(work: 60, shortBreak: 120, longBreak: 300, autoAdvance: true)
+            },
+            now: { clock },
+            handOverDelay: 0.05
+        )
+        let stream = timer.start()
+        timer.startFocus()
+        clock += 61
+        timer.tickNow()
+        try #require(timer.session == nil, "reached: the hand-over is pending")
+        timer.setScreensDark(true)
+
+        try await settle(timer)
+        #expect(timer.session?.leg == .shortBreak)
+        #expect(timer.session?.isRunning == false)
+        #expect(timer.session?.remaining(at: clock) == 120)
+
+        timer.stop()
+        for await _ in stream {}
     }
 }

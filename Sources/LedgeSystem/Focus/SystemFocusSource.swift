@@ -43,6 +43,8 @@ public final class SystemFocusSource: FocusSource {
 
     private let file: any FocusSource
     private let statusAuthorized: @MainActor () -> Bool
+    /// Asks again whether status may be read, and calls back if that moved.
+    private let recheckAuthorization: @MainActor (@escaping @MainActor () -> Void) -> Void
     private let readStatus: @Sendable () -> Bool?
     private let recheckFileAccess: @MainActor () -> Void
 
@@ -50,6 +52,9 @@ public final class SystemFocusSource: FocusSource {
     private var stream: FSEventStreamRef?
     private var backstop: Task<Void, Never>?
     private var probe: Task<Void, Never>?
+    /// The held permission check, when this source owns one. Kept only so
+    /// `settled()` can wait on it.
+    private var authorization: FocusAuthorization?
 
     /// The last usable answer from the system, for the fallback path. An
     /// unknown or unauthorized reading clears it. Without the database
@@ -64,11 +69,30 @@ public final class SystemFocusSource: FocusSource {
         symbolName: "moon.fill"
     )
 
-    public init(file: FileFocusSource = FileFocusSource(), status: FocusStatusReader = FocusStatusReader()) {
+    public convenience init(file: FileFocusSource = FileFocusSource(), status: FocusStatusReader = FocusStatusReader()) {
+        self.init(
+            file: file,
+            checkAuthorization: { status.isAuthorized },
+            readStatus: { status.isFocused() },
+            recheckFileAccess: { file.recheckAccess() }
+        )
+    }
+
+    /// The shipped wiring: the permission check is held, and asked again only
+    /// off the main thread.
+    init(
+        file: any FocusSource,
+        checkAuthorization: @escaping @Sendable () -> Bool,
+        readStatus: @escaping @Sendable () -> Bool?,
+        recheckFileAccess: @escaping @MainActor () -> Void = {}
+    ) {
+        let authorization = FocusAuthorization(check: checkAuthorization)
+        self.authorization = authorization
         self.file = file
-        self.statusAuthorized = { status.isAuthorized }
-        self.readStatus = { status.isFocused() }
-        self.recheckFileAccess = { file.recheckAccess() }
+        self.statusAuthorized = { authorization.isAuthorized }
+        self.recheckAuthorization = { authorization.recheck(then: $0) }
+        self.readStatus = readStatus
+        self.recheckFileAccess = recheckFileAccess
     }
 
     /// Injects readings without requiring a particular macOS permission state.
@@ -79,6 +103,7 @@ public final class SystemFocusSource: FocusSource {
     ) {
         self.file = file
         self.statusAuthorized = statusAuthorized
+        self.recheckAuthorization = { _ in }
         self.readStatus = readStatus
         self.recheckFileAccess = {}
     }
@@ -93,9 +118,13 @@ public final class SystemFocusSource: FocusSource {
     public func current() -> FocusSnapshot? {
         primeIfNeeded()
         return Self.resolve(
-            file: file.isReadable ? file.reading() : .unintelligible,
+            file: fileReading(),
             statusFocused: statusAuthorized() && fallbackFocused
         )
+    }
+
+    private func fileReading() -> FocusReading {
+        file.isReadable ? file.reading() : .unintelligible
     }
 
     public func reading() -> FocusReading {
@@ -227,11 +256,25 @@ public final class SystemFocusSource: FocusSource {
 
     /// Re-asks the system out of band — on wake, and when the screens light.
     public func refresh() {
+        // Answered with what was last known; a change comes back through here.
+        recheckAuthorization { [weak self] in self?.refresh() }
         guard statusAuthorized() else {
             invalidateFallback()
             return
         }
-        guard !file.isReadable, probe == nil else { return }
+        // While the database answers, the fallback is not kept current, so it
+        // is not kept at all. Held, it outlived the Focus it described and
+        // spoke for it again the moment the file stopped answering.
+        guard fileReading() == .unintelligible else {
+            // Quietly: the file's answer is what is showing, so nothing an
+            // observer can see has changed. Unprimed, so a folder that stops
+            // answering takes one fresh reading rather than saying "off" until
+            // the next probe. A probe still out is caught where it stores.
+            hasPrimed = false
+            fallbackFocused = false
+            return
+        }
+        guard probe == nil else { return }
         probe = Task { [weak self] in
             guard let self else { return }
             // Keep this probe registered through confirmation, so another
@@ -257,6 +300,9 @@ public final class SystemFocusSource: FocusSource {
                 return
             }
             guard confirmed == focused else { return }
+            // Asked before the database became readable, answered after: the
+            // file speaks now, and a reading kept from here would go stale.
+            guard self.fileReading() == .unintelligible else { return }
             self.fallbackFocused = focused
             Self.log.debug("focus (system): \(focused ? "on" : "off", privacy: .public)")
             if DebugSwitches.tracing("focus") {
@@ -266,6 +312,22 @@ public final class SystemFocusSource: FocusSource {
                     """)
             }
             self.notifyObservers()
+        }
+    }
+
+    /// Returns once the permission recheck and the status probe in flight have
+    /// finished, including a probe that a finishing recheck starts.
+    ///
+    /// For tests. Polling for their effect against a count of short sleeps ran
+    /// out whenever the full suite held the main thread for longer than the
+    /// count allowed: the probe was fine, it had not been given a turn yet.
+    func settled() async {
+        while true {
+            let check = authorization?.work
+            let probe = self.probe
+            await check?.value
+            await probe?.value
+            if authorization?.work == check, self.probe == probe { return }
         }
     }
 
@@ -330,5 +392,43 @@ public final class SystemFocusSource: FocusSource {
             return
         }
         self.stream = stream
+    }
+}
+
+/// Whether Focus status may be read, as last checked.
+///
+/// The check is itself an XPC round trip to the Focus daemon, as slow as the
+/// reading it guards (~20 ms), and it was asked on the main thread by every
+/// `current()` and every refresh — every four seconds, for everyone. Held
+/// here, it is asked once when the source is built, where the launch baseline
+/// already takes one blocking reading, and from then on only off the main
+/// thread.
+@MainActor
+final class FocusAuthorization {
+
+    private(set) var isAuthorized: Bool
+    private let check: @Sendable () -> Bool
+    private var checking = false
+    /// The latest recheck, for `SystemFocusSource.settled()`.
+    private(set) var work: Task<Void, Never>?
+
+    init(check: @escaping @Sendable () -> Bool) {
+        self.check = check
+        isAuthorized = check()
+    }
+
+    /// Asks again off the main thread. `changed` runs, on the main actor, only
+    /// when the answer moved.
+    func recheck(then changed: @escaping @MainActor () -> Void) {
+        guard !checking else { return }
+        checking = true
+        work = Task { [weak self, check] in
+            let now = await Task.detached(priority: .utility) { check() }.value
+            guard let self else { return }
+            self.checking = false
+            guard now != self.isAuthorized else { return }
+            self.isAuthorized = now
+            changed()
+        }
     }
 }

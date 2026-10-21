@@ -163,8 +163,8 @@ struct WeatherProviderTests {
         let provider = WeatherProvider(source: source, city: { "Istanbul" }, now: { 0 })
 
         let stream = provider.start()
-        // Give the async fetch a moment to complete.
-        for _ in 0..<20 { await Task.yield() }
+        // Until the async fetch has finished, however long that takes.
+        await provider.fetchSettled()
         provider.stop()
 
         var events: [ProviderEvent] = []
@@ -188,7 +188,7 @@ struct WeatherProviderTests {
         let provider = WeatherProvider(source: source, city: { "" }, now: { 0 })
 
         let stream = provider.start()
-        for _ in 0..<20 { await Task.yield() }
+        await provider.fetchSettled()
         provider.stop()
 
         var events: [ProviderEvent] = []
@@ -196,6 +196,107 @@ struct WeatherProviderTests {
         #expect(events.isEmpty)
         #expect(source.requestedCities.isEmpty, "an empty city must not hit the network")
     }
+
+    private func firstPayload(_ provider: WeatherProvider) async -> WeatherPayload? {
+        let stream = provider.start()
+        await provider.fetchSettled()
+        provider.stop()
+        for await event in stream {
+            if case .publish(let activity) = event, case .weather(let payload) = activity.payload {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    @Test("A fix with no place name is not labelled with the typed city")
+    func unnamedFixKeepsTypedCityOff() async throws {
+        let source = StubWeatherSource(value:
+            WeatherSnapshot(temperatureCelsius: 18, conditionCode: 0, isDay: true, city: "X"))
+        let location = FixedLocation(PlaceFix(latitude: 41.0, longitude: 29.0, name: ""))
+        let provider = WeatherProvider(
+            source: source, city: { "Boston" }, location: location, now: { 0 }
+        )
+
+        let payload = try #require(await firstPayload(provider))
+        // Reached the location path, not the typed-city fallback.
+        #expect(source.requestedCoordinates.count == 1)
+        #expect(source.requestedCities.isEmpty)
+        #expect(payload.usesDeviceLocation)
+        #expect(payload.city == "", "empty so the card reads Current Location")
+    }
+
+    @Test("A named fix is labelled with its own place")
+    func namedFixUsesPlace() async throws {
+        let source = StubWeatherSource(value:
+            WeatherSnapshot(temperatureCelsius: 18, conditionCode: 0, isDay: true, city: "X"))
+        let location = FixedLocation(PlaceFix(latitude: 41.0, longitude: 29.0, name: "Kadikoy"))
+        let provider = WeatherProvider(
+            source: source, city: { "Boston" }, location: location, now: { 0 }
+        )
+
+        let payload = try #require(await firstPayload(provider))
+        #expect(source.requestedCoordinates.count == 1)
+        #expect(payload.usesDeviceLocation)
+        #expect(payload.city == "Kadikoy")
+    }
+
+    @Test("Without a fix the typed city is fetched and named")
+    func noFixFallsBackToTypedCity() async throws {
+        let source = StubWeatherSource(value:
+            WeatherSnapshot(temperatureCelsius: 18, conditionCode: 0, isDay: true, city: "Boston"))
+        let provider = WeatherProvider(
+            source: source, city: { "Boston" }, location: FixedLocation(nil), now: { 0 }
+        )
+
+        let payload = try #require(await firstPayload(provider))
+        #expect(source.requestedCities == ["Boston"])
+        #expect(source.requestedCoordinates.isEmpty)
+        #expect(!payload.usesDeviceLocation)
+        #expect(payload.city == "Boston")
+    }
+}
+
+extension WeatherProviderTests {
+
+    @Test("A failed refresh keeps the cached forecast's location arrow")
+    func failedRefreshKeepsProvenance() async throws {
+        let source = StubWeatherSource(value:
+            WeatherSnapshot(temperatureCelsius: 18, conditionCode: 0, isDay: true, city: "X"))
+        let location = FixedLocation(PlaceFix(latitude: 41.0, longitude: 29.0, name: "Kadikoy"))
+        let provider = WeatherProvider(
+            source: source, city: { "Boston" }, location: location, now: { 0 }
+        )
+
+        let stream = provider.start()
+        await provider.fetchSettled()
+        // Both paths now fail, as in a network outage.
+        source.value = nil
+        provider.refresh()
+        await provider.fetchSettled()
+        provider.stop()
+
+        var payloads: [WeatherPayload] = []
+        for await event in stream {
+            if case .publish(let activity) = event, case .weather(let payload) = activity.payload {
+                payloads.append(payload)
+            }
+        }
+        // Reached: a live reading, then the stale republish after the failure,
+        // with the typed-city fallback actually attempted in between.
+        try #require(payloads.count == 2)
+        #expect(source.requestedCities == ["Boston"])
+        #expect(payloads[0].usesDeviceLocation)
+        #expect(payloads[1].city == "Kadikoy")
+        #expect(payloads[1].usesDeviceLocation, "a failed fallback restamped the cached forecast")
+    }
+}
+
+@MainActor
+private final class FixedLocation: LocationProviding {
+    private let fix: PlaceFix?
+    init(_ fix: PlaceFix?) { self.fix = fix }
+    func current() async -> PlaceFix? { fix }
 }
 
 /// Open-Meteo's hourly stamps are wall-clock in the *location's* timezone.

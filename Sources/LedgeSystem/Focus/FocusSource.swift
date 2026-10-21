@@ -63,7 +63,8 @@ public enum FocusReading: Equatable, Sendable {
 ///
 /// Schema verified on macOS 26.4:
 /// `Assertions.json` → `data[0].storeAssertionRecords[].assertionDetails
-/// .assertionDetailsModeIdentifier`; `ModeConfigurations.json` →
+/// .assertionDetailsModeIdentifier`, with `storeAssertionRecords` absent when
+/// no Focus is on; `ModeConfigurations.json` →
 /// `data[0].modeConfigurations[id].mode.{name, symbolImageName}`.
 @MainActor
 public final class FileFocusSource: FocusSource {
@@ -177,9 +178,19 @@ public final class FileFocusSource: FocusSource {
     nonisolated static func assertions(from data: Data?) -> Assertions {
         guard let data,
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let first = (root["data"] as? [[String: Any]])?.first,
-              let records = first["storeAssertionRecords"] as? [[String: Any]]
+              let first = (root["data"] as? [[String: Any]])?.first
         else { return .unintelligible }
+
+        guard let records = first["storeAssertionRecords"] as? [[String: Any]] else {
+            // This is what macOS actually writes when no Focus is on: the
+            // records key is left out, and only the invalidation records of
+            // the Focus that ended remain. Reading that as unknown let a stale
+            // public reading say a Focus was still on. Without either key it
+            // is a shape this version does not know.
+            let isKnownOffShape = first["storeInvalidationRecords"] is [Any]
+                || first["storeInvalidationRequestRecords"] is [Any]
+            return isKnownOffShape ? .inactive : .unintelligible
+        }
 
         for record in records {
             if let details = record["assertionDetails"] as? [String: Any],

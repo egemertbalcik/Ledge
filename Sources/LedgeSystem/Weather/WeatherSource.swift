@@ -320,6 +320,10 @@ public final class StubWeatherSource: WeatherSource {
         name: String
     ) async -> WeatherSnapshot? {
         requestedCoordinates.append((latitude, longitude))
-        return value
+        // Like the real source, the coordinate path is labelled by the name
+        // it was handed, not by whatever the stub was built with.
+        guard var snapshot = value else { return nil }
+        snapshot.city = name
+        return snapshot
     }
 }
