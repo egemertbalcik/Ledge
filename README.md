@@ -13,9 +13,30 @@ Quiet when nothing is happening, there the moment something is.
 
 [ledgeapp.dev](https://ledgeapp.dev) · free · open source · no account, no telemetry
 
+<a href="https://github.com/egemertbalcik/Ledge/releases/latest"><img src="https://img.shields.io/github/v/release/egemertbalcik/Ledge?label=release&color=0071e3" alt="Latest release"></a>
+<img src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white" alt="macOS 26 or later">
+<img src="https://img.shields.io/badge/Developer%20ID-signed%20%26%20notarized-2ea44f" alt="Signed with a Developer ID and notarized by Apple">
+<a href="LICENSE"><img src="https://img.shields.io/github/license/egemertbalcik/Ledge?color=555" alt="License: GPL-3.0"></a>
+
 <img src="docs/media/intro.gif" width="460" alt="Ledge waking up in the notch">
 
+<!-- FILM SLOT: when the film is out, put its poster here linked to YouTube,
+     e.g. [![Watch the Ledge film](docs/media/film-poster.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
+     GitHub strips iframes, so a linked poster is the only way to show it. -->
+
 </div>
+
+**What is Ledge?** Ledge is a free, open-source (GPL-3.0) notch app for
+MacBook. It turns the notch into a live status area, like the iPhone's Dynamic
+Island: now playing, a timer, your next meeting with a camera mirror on the
+Join button, weather, notes, Keep Awake (lid closed too), AirPods, and volume
+and brightness readouts. It needs a MacBook with a notch on macOS 26 or later,
+ships signed and notarized, has no account and no telemetry, and records no
+audio or screen.
+
+<sub>Several other Mac projects are also called Ledge. This one is
+[egemertbalcik/Ledge](https://github.com/egemertbalcik/Ledge), published at
+[ledgeapp.dev](https://ledgeapp.dev).</sub>
 
 ---
 
@@ -39,7 +60,8 @@ there while you work, close enough to glance at, too small to distract you.
 What's next, and the month it belongs to. The weather where you are, and the
 hours coming. When a meeting is about to start, the Join button grows a little
 mirror: one click and your camera opens in the card, so you can fix your hair
-before anyone else sees it.
+before anyone else sees it. Choose which calendars show, account by account, in
+Settings.
 
 <table>
 <tr>
@@ -125,8 +147,7 @@ Keep Awake's lid-shut stop installs a helper that runs as root, because only roo
 can stop a MacBook from sleeping when the lid closes. It holds the Mac awake on a
 90-second lease that Ledge keeps renewing. If Ledge crashes, is force-quit or is
 updated mid-hold, the lease runs out and the Mac is free to sleep again. Nobody
-has to remember to undo it. The details are in
-[docs/keep-awake-lid-closed.md](docs/keep-awake-lid-closed.md).
+has to remember to undo it.
 
 The consequences are real: this is software that can break on any macOS update,
 and it can never be sold on the App Store. The source for all of it is here.
@@ -146,10 +167,19 @@ lid is down the notch is out of reach. Open Ledge again from Finder or Spotlight
 and the copy that's already running brings its Settings up. Quitting is a button
 in there, under General.
 
-**You'll need** a MacBook with a notch — Pro from 2021, Air from 2022 — on macOS
-26 or later. Ledge draws on that display and nowhere else, on purpose: external
-monitors come in every shape, and a silhouette cut for the notch wouldn't be the
-same app on them.
+Not on Homebrew yet; the disk image above is the way in for now.
+<!-- HOMEBREW SLOT: uncomment once egemertbalcik/homebrew-tap exists.
+Or with Homebrew:
+
+```sh
+brew install --cask egemertbalcik/tap/ledge
+```
+-->
+
+**You'll need** a MacBook with a notch — the 14- or 16-inch Pro from 2021, the
+Air from 2022 — on macOS 26 or later. Ledge draws on that display and nowhere
+else, on purpose: external monitors come in every shape, and a silhouette cut
+for the notch wouldn't be the same app on them.
 
 ## Permissions
 
@@ -168,6 +198,18 @@ on without it.
 | The Focus folder *(optional, not a system permission)* | The Focus card follows the switch immediately, and names the mode | Still shown, within a few seconds, as "Focus" |
 | Location | Weather for wherever you are | Weather for a city you type in |
 | Login Items *(Keep Awake's helper)* | Keeping the Mac awake with the lid shut | Awake still works, lid open |
+
+## How it compares
+
+There are other notch apps, and some will suit you better.
+[boring.notch](https://github.com/TheBoredTeam/boring.notch) is free and open
+source too, and runs on macOS 14, on Intel Macs and on external displays.
+[Atoll](https://github.com/Ebullioscopic/Atoll) has system stats and clipboard
+history. Alcove and NotchNook are paid, polished, and work on any display.
+Ledge is the one for a notched MacBook on macOS 26 if you want a signed app
+that asks for nothing until a feature needs it and records nothing. A sourced
+comparison, checked October 2026:
+[free alternatives to Alcove and NotchNook](https://egemertbalcik.com/notes/free-alcove-notchnook-alternatives/).
 
 ## Build it yourself
 
