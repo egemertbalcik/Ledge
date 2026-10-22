@@ -34,10 +34,6 @@ and brightness readouts. It needs a MacBook with a notch on macOS 26 or later,
 ships signed and notarized, has no account and no telemetry, and records no
 audio or screen.
 
-<sub>Several other Mac projects are also called Ledge. This one is
-[egemertbalcik/Ledge](https://github.com/egemertbalcik/Ledge), published at
-[ledgeapp.dev](https://ledgeapp.dev).</sub>
-
 ---
 
 ## Skip a track without losing your place
