@@ -21,10 +21,13 @@ public enum SatelliteContent: Equatable, Sendable {
     /// card's own lifetime instead of a peek.
     case device(symbolName: String, tint: DeviceTint)
 
-    /// A running Keep Awake session. It takes the timer blob exactly as it
-    /// is — same disc, same digits, same seat — because it is the same kind
-    /// of standing fact with a time left on it, and a second shape for it
-    /// would be a new thing to learn for no new meaning.
+    /// A Keep Awake session just started, said beside the island for the
+    /// peek's dwell and then gone. It takes the timer blob exactly as it is —
+    /// same disc, same digits, same seat — because it is the same kind of
+    /// fact with a time left on it, and a second shape for it would be a new
+    /// thing to learn for no new meaning. It is never a standing tenant: a
+    /// hold runs for hours, and a cup beside the music for all of them was
+    /// noise nobody read.
     ///
     /// `nil` is a hold with no end: the plain switch, which runs until it is
     /// switched off. Optional rather than a sentinel zero because zero is a
@@ -97,30 +100,21 @@ extension SatelliteContent {
 /// holding the microphone for an afternoon would otherwise starve the
 /// countdown the user actually asked to see behind a redundant signal. A
 /// tenant that is also the main island's content never gets the seat (the
-/// timer must not orbit itself). Keep Awake sits between them: it is a
-/// countdown the user set and is waiting out, which is the timer's own claim
-/// on the seat, and it loses to the timer only because two countdowns cannot
-/// share one disc.
+/// timer must not orbit itself). Keep Awake is not a tenant at all: it comes
+/// in only as a transient, when it starts.
 public enum SatelliteArbiter {
 
     /// - Parameters:
     ///   - timerIsMainIsland: the timer is what the ears are showing, so it
     ///     must not also orbit itself.
-    ///   - keepAwakeIsMainIsland: the same rule for Keep Awake. Without it a
-    ///     hold said itself twice at once — the coffee glyph in the leading
-    ///     ear and a separate disc reading "On" beside the island — two
-    ///     shapes for one fact, each hiding half of the other.
     public static func resolve(
         transient: SatelliteContent?,
         privacy: SatelliteContent?,
         timer: SatelliteContent?,
-        keepAwake: SatelliteContent? = nil,
-        timerIsMainIsland: Bool,
-        keepAwakeIsMainIsland: Bool = false
+        timerIsMainIsland: Bool
     ) -> SatelliteContent? {
         if let transient { return transient }
         if let timer, !timerIsMainIsland { return timer }
-        if let keepAwake, !keepAwakeIsMainIsland { return keepAwake }
         if let privacy { return privacy }
         return nil
     }

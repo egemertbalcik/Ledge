@@ -123,11 +123,14 @@ struct MiniWaveformSettleTests {
 
 /// Keep Awake is announced, not resident.
 ///
-/// The owner's report, both halves: the cup stayed in the leading ear for the
+/// The owner's reports. First: the cup stayed in the leading ear for the
 /// whole hold, and a disc with the same cup appeared beside it — one fact said
 /// twice. It came back through the last rung of `CompactRest`, because a hold
-/// that has just been started is the selected card.
-@Suite("Keep Awake is announced, then lives beside the island")
+/// that has just been started is the selected card. Then: the disc beside the
+/// music, on its own, for the hours a hold runs — still there long after
+/// anyone was reading it. The hold is said when it starts, and nowhere in the
+/// notch after that.
+@Suite("Keep Awake is announced, then lets the notch go")
 @MainActor
 struct KeepAwakeRestTests {
 
@@ -162,8 +165,8 @@ struct KeepAwakeRestTests {
         #expect(presentation.restingContent == nil)
     }
 
-    @Test("The side readout carries a running hold")
-    func theReadoutCarriesIt() {
+    @Test("A running hold is known to the presentation")
+    func aRunningHoldIsKnown() {
         let presentation = NotchPresentation()
         presentation.keepAwakeSession = hold(running: true)
         #expect(presentation.liveKeepAwake != nil)
@@ -176,18 +179,48 @@ struct KeepAwakeRestTests {
         #expect(presentation.liveKeepAwake == nil)
     }
 
-    /// The cup beside the music is the case that should show: the island is
-    /// held by something else and the hold is said once, in the readout.
-    @Test("Beside music the hold takes the readout and the ears keep the music")
-    func besideMusic() {
+    /// The case the owner was tired of: music in the ears, a hold running for
+    /// hours, and a cup beside them the whole time.
+    @Test("Beside music a running hold leaves the seat empty")
+    func besideMusicTheSeatIsEmpty() {
         let presentation = NotchPresentation()
         let session = hold(running: true)
         presentation.nowPlaying = song()
         presentation.keepAwakeSession = session
         presentation.selected = session
+        // The setup took: the hold is live and the music has the ears.
+        #expect(presentation.liveKeepAwake != nil)
         #expect(presentation.restingContent?.id.kind == .nowPlaying)
-        let readout = presentation.satellite(phase: .companion)
-        #expect(readout == .keepAwake(remaining: 600))
+        #expect(presentation.satellite(phase: .companion) == nil)
+    }
+
+    /// The start is the one moment it is said, and it still is: the shell
+    /// puts it in the seat as a transient for the peek's dwell.
+    @Test("Beside music the start of a hold is said in the seat")
+    func besideMusicTheStartIsSaid() {
+        let presentation = NotchPresentation()
+        presentation.nowPlaying = song()
+        presentation.keepAwakeSession = hold(running: true)
+        presentation.hudSatellite = .keepAwake(remaining: 600)
+        #expect(presentation.restingContent?.id.kind == .nowPlaying)
+        #expect(presentation.satellite(phase: .companion) == .keepAwake(remaining: 600))
+    }
+
+    /// A hold no longer standing in the seat must not leave it blocked: what
+    /// stands behind it shows as it would without one.
+    @Test("A running hold does not keep the recording dot out")
+    func theRecordingDotStillShows() {
+        let presentation = NotchPresentation()
+        presentation.nowPlaying = song()
+        presentation.keepAwakeSession = hold(running: true)
+        presentation.privacyActive = Activity(
+            id: ActivityID(kind: .privacy, source: "privacy"),
+            createdAt: 0,
+            payload: .privacy(PrivacyPayload(cameraActive: true))
+        )
+        #expect(presentation.liveKeepAwake != nil)
+        #expect(presentation.satellite(phase: .companion)
+            == .privacy(camera: true, microphone: false))
     }
 
     /// The one time the ears do show a hold in the companion phase: the brief

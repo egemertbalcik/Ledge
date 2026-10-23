@@ -291,11 +291,13 @@ public final class NotchPresentation {
         return session
     }
 
-    /// The running Keep Awake session, for the side readout.
+    /// The running Keep Awake session, if one is running.
     ///
-    /// The ears announce a hold when it starts and then let it go; this is
-    /// where it lives afterwards — a cup beside whatever else is resting, for
-    /// as long as the Mac is being held awake.
+    /// The notch says a hold once, when it starts, and then lets it go: no
+    /// ear and no side readout carries it afterwards. A hold runs for hours,
+    /// and a cup that sat beside the music for all of them was the same
+    /// unchanging fact repeated until it stopped being read. The menu bar
+    /// item and the card in the stack are where it lives after that.
     public var liveKeepAwake: Activity? {
         guard let session = keepAwakeSession,
               case .keepAwake(let payload) = session.payload,
@@ -345,12 +347,6 @@ public final class NotchPresentation {
                 isRunning: payload.isRunning
             )
         }()
-        let keepAwakeContent: SatelliteContent? = {
-            guard let session = liveKeepAwake,
-                  case .keepAwake(let payload) = session.payload
-            else { return nil }
-            return .keepAwake(remaining: payload.isIndefinite ? nil : payload.remaining)
-        }()
         let privacyContent: SatelliteContent? = {
             guard let activity = privacyActive,
                   case .privacy(let payload) = activity.payload,
@@ -362,13 +358,7 @@ public final class NotchPresentation {
             transient: hudSatellite,
             privacy: privacyContent,
             timer: timerContent,
-            keepAwake: keepAwakeContent,
-            timerIsMainIsland: playingNowPlaying == nil,
-            // While the hold is what the ears are showing — the few seconds of
-            // a farewell after its card was open — it is already said. A disc
-            // beside the island saying the same thing is the same fact twice,
-            // and it hides the ear that was saying it properly.
-            keepAwakeIsMainIsland: restingContent?.id.kind == .keepAwake
+            timerIsMainIsland: playingNowPlaying == nil
         )
     }
 

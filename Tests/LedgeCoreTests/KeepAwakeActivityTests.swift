@@ -94,37 +94,47 @@ struct KeepAwakeActivityTests {
 
     // MARK: - The satellite seat
 
-    @Test("The satellite ladder: transient, timer, Keep Awake, recording")
+    @Test("The satellite ladder: transient, timer, recording")
     func satelliteRungOrder() {
         let level = SatelliteContent.level(HUDReadout(kind: .volume, level: 0.5))
         let countdown = SatelliteContent.timer(
             remaining: 60, total: 300, isBreak: false, isRunning: true
         )
-        let awake = SatelliteContent.keepAwake(remaining: 3600)
         let privacy = SatelliteContent.privacy(camera: true, microphone: false)
 
         #expect(SatelliteArbiter.resolve(
-            transient: level, privacy: privacy, timer: countdown, keepAwake: awake,
+            transient: level, privacy: privacy, timer: countdown,
             timerIsMainIsland: false
         ) == level)
         #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: privacy, timer: countdown, keepAwake: awake,
+            transient: nil, privacy: privacy, timer: countdown,
             timerIsMainIsland: false
         ) == countdown)
+        // The timer holding the island frees the seat for the recording dot.
         #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: privacy, timer: nil, keepAwake: awake,
-            timerIsMainIsland: false
-        ) == awake)
-        // The timer holding the island frees the seat for Keep Awake, not for
-        // the recording dot behind it.
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: privacy, timer: countdown, keepAwake: awake,
+            transient: nil, privacy: privacy, timer: countdown,
             timerIsMainIsland: true
-        ) == awake)
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: privacy, timer: nil, keepAwake: nil,
-            timerIsMainIsland: false
         ) == privacy)
+        #expect(SatelliteArbiter.resolve(
+            transient: nil, privacy: nil, timer: nil,
+            timerIsMainIsland: false
+        ) == nil)
+    }
+
+    /// The start of a hold comes in the only way it still can: as the
+    /// transient, ahead of everything standing.
+    @Test("A hold's start announcement takes the seat for its dwell")
+    func theStartTakesTheSeat() {
+        let started = SatelliteContent.keepAwake(remaining: 3_600)
+        let countdown = SatelliteContent.timer(
+            remaining: 60, total: 300, isBreak: false, isRunning: true
+        )
+        #expect(SatelliteArbiter.resolve(
+            transient: started,
+            privacy: .privacy(camera: true, microphone: false),
+            timer: countdown,
+            timerIsMainIsland: false
+        ) == started)
     }
 
     @Test("The satellite label drops its seconds at a minute, not at an hour")
@@ -157,58 +167,5 @@ struct KeepAwakeActivityTests {
         // finished one comes ahead of it, because the Mac's power just changed.
         #expect(Urgency.score(of: running) < Urgency.score(of: timer(idle: false)))
         #expect(Urgency.score(of: finished) > Urgency.score(of: timer(idle: false)))
-    }
-}
-
-/// A hold says itself once.
-///
-/// While the ears are showing it — the cup in one, the state in the other —
-/// a disc beside the island saying the same thing is the same fact twice, and
-/// the detached disc hides the ear that was saying it properly.
-@Suite("Keep Awake does not orbit itself")
-struct KeepAwakeSelfOrbitTests {
-
-    private let awake = SatelliteContent.keepAwake(remaining: 3_600)
-    private let privacy = SatelliteContent.privacy(camera: true, microphone: false)
-
-    @Test("While the ears show the hold, the seat stays empty for it")
-    func itYieldsWhileItIsTheIsland() {
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: nil, timer: nil, keepAwake: awake,
-            timerIsMainIsland: false, keepAwakeIsMainIsland: true
-        ) == nil)
-    }
-
-    @Test("Once the ears belong to something else it takes the seat")
-    func itTakesTheSeatWhenItIsNotTheIsland() {
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: nil, timer: nil, keepAwake: awake,
-            timerIsMainIsland: false, keepAwakeIsMainIsland: false
-        ) == awake)
-    }
-
-    /// Yielding is not the same as having nothing: what is behind it still
-    /// gets the seat.
-    @Test("Yielding lets the recording dot through")
-    func whatIsBehindItStillShows() {
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: privacy, timer: nil, keepAwake: awake,
-            timerIsMainIsland: false, keepAwakeIsMainIsland: true
-        ) == privacy)
-    }
-
-    @Test("A timer holding the island is unaffected by the hold's own rule")
-    func theTimerRuleIsSeparate() {
-        let countdown = SatelliteContent.timer(
-            remaining: 60, total: 300, isBreak: false, isRunning: true
-        )
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: nil, timer: countdown, keepAwake: awake,
-            timerIsMainIsland: true, keepAwakeIsMainIsland: true
-        ) == nil)
-        #expect(SatelliteArbiter.resolve(
-            transient: nil, privacy: nil, timer: countdown, keepAwake: awake,
-            timerIsMainIsland: false, keepAwakeIsMainIsland: true
-        ) == countdown)
     }
 }
