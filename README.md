@@ -167,14 +167,11 @@ lid is down the notch is out of reach. Open Ledge again from Finder or Spotlight
 and the copy that's already running brings its Settings up. Quitting is a button
 in there, under General.
 
-Not on Homebrew yet; the disk image above is the way in for now.
-<!-- HOMEBREW SLOT: uncomment once egemertbalcik/homebrew-tap exists.
 Or with Homebrew:
 
 ```sh
 brew install --cask egemertbalcik/tap/ledge
 ```
--->
 
 **You'll need** a MacBook with a notch — the 14- or 16-inch Pro from 2021, the
 Air from 2022 — on macOS 26 or later. Ledge draws on that display and nowhere
