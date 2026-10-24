@@ -19,9 +19,7 @@ Quiet when nothing is happening, there the moment something is.
 
 <img src="docs/media/intro.gif" width="560" alt="Ledge waking up in the notch">
 
-<!-- FILM SLOT: GitHub plays a video inline only when it was uploaded through its
-     own editor. Edit this file on github.com, drag ledge-film-readme.mp4 (under
-     10 MB) onto this spot, and leave the URL it inserts on a line of its own. -->
+https://github.com/user-attachments/assets/b610460d-a424-4dc1-bf8d-4ef967108194
 
 </div>
 
