@@ -100,7 +100,7 @@ to Apple Notes in one click.
 | | |
 |---|---|
 | **Focus timer** | Start a session and the countdown sits at the edge of the notch while you work, close enough to glance at, too small to distract you. |
-| **Volume & brightness** | A readout that replaces the grey square macOS drops in the middle of your screen. Hover it and the bar becomes a slider. |
+| **Volume & brightness** | A readout in the notch that replaces macOS's own volume and brightness pop-up. Hover it and the bar becomes a slider. |
 | **AirPods & Bluetooth** | They connect, you see it — with battery, and the case animation you were promised on the iPhone. |
 | **Battery** | Where it stands, and a nudge while there's still time to do something about it. |
 | **Focus modes** | Tells you which mode just turned on. macOS barely mentions it. |
