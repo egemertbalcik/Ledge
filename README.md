@@ -5,24 +5,23 @@
 **Your MacBook's notch, put to work.**
 
 You already look up there. Ledge puts what you're checking anyway — the song,
-the timer, the next meeting — in the black bar you've been ignoring since 2021.
+the timer, the next meeting — in the black bar you've been ignoring so far.
 Quiet when nothing is happening, there the moment something is.
 
 <a href="https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download Ledge for macOS"></a>
 <a href="https://buymeacoffee.com/egebalcik" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
 
-[ledgeapp.dev](https://ledgeapp.dev) · free · open source · no account, no telemetry
+[ledgeapp.dev](https://ledgeapp.dev) · free · open source
 
 <a href="https://github.com/egemertbalcik/Ledge/releases/latest"><img src="https://img.shields.io/github/v/release/egemertbalcik/Ledge?label=release&color=0071e3" alt="Latest release"></a>
 <img src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white" alt="macOS 26 or later">
-<img src="https://img.shields.io/badge/Developer%20ID-signed%20%26%20notarized-2ea44f" alt="Signed with a Developer ID and notarized by Apple">
 <a href="LICENSE"><img src="https://img.shields.io/github/license/egemertbalcik/Ledge?color=555" alt="License: GPL-3.0"></a>
 
-<img src="docs/media/intro.gif" width="460" alt="Ledge waking up in the notch">
+<img src="docs/media/intro.gif" width="560" alt="Ledge waking up in the notch">
 
-<!-- FILM SLOT: when the film is out, put its poster here linked to YouTube,
-     e.g. [![Watch the Ledge film](docs/media/film-poster.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
-     GitHub strips iframes, so a linked poster is the only way to show it. -->
+<!-- FILM SLOT: GitHub plays a video inline only when it was uploaded through its
+     own editor. Edit this file on github.com, drag ledge-film-readme.mp4 (under
+     10 MB) onto this spot, and leave the URL it inserts on a line of its own. -->
 
 </div>
 
@@ -42,14 +41,7 @@ Cover art, the title, the scrub bar, the buttons. Send the sound to your AirPods
 from the same card. Works with Music, with Spotify, and with whatever tab is
 playing in your browser.
 
-<img src="docs/media/media.gif" width="520" alt="The Now Playing card: transport, scrub bar and the AirPlay output list">
-
-## Keep an eye on the timer without watching it
-
-Start a focus session and the countdown moves to the edge of the notch. It sits
-there while you work, close enough to glance at, too small to distract you.
-
-<img src="docs/media/timer.gif" width="520" alt="The timer card, and a countdown resting beside the notch">
+<img src="docs/media/music.gif" width="560" alt="Music resting in the notch, the card opening under the pointer and skipping to the next song, then the volume going up in place of the right ear">
 
 ## Your day, one glance up
 
@@ -61,8 +53,8 @@ Settings.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/media/calendar.gif" width="100%" alt="The calendar card: the day's events beside the month grid"></td>
-<td width="50%"><img src="docs/media/weather.gif" width="100%" alt="The weather card: current conditions and the hourly forecast"></td>
+<td width="50%"><img src="docs/media/calendar.gif" width="100%" alt="A meeting four minutes away in the notch, the calendar card opening, Join with the camera, and the mirror going live"></td>
+<td width="50%"><img src="docs/media/tour.gif" width="100%" alt="Swiping through the cards that open from the notch: calendar, timer, weather, levels, AirPods and notes"></td>
 </tr>
 </table>
 
@@ -71,6 +63,8 @@ Settings.
 Running a build, a long download, or an agent that needs another hour? Keep
 Awake holds the Mac and the screen on until you say stop. It's what
 `caffeinate` does, minus the terminal.
+
+<img src="docs/media/keepawake.gif" width="560" alt="The Keep Awake card: Coffee, then Espresso, the dial set to two hours, and Keep awake pressed">
 
 Move it one stop further and the Mac keeps going with the lid shut. The screen,
 the keyboard light and the speakers go quiet so the battery goes to the work,
@@ -86,10 +80,28 @@ your five most recent on a card, and opens each one in its own window when
 there's more to say. They're plain files on your Mac, and any of them can go
 to Apple Notes in one click.
 
+<img src="docs/media/notes.gif" width="560" alt="Opening Notes from the notch, a new note in its own window, typing with Caps Lock on, then closing it">
+
 ## And the rest
+
+<table>
+<tr>
+<td width="50%"><img src="docs/media/brightness.gif" width="100%" alt="Brightness changing, the readout in place of the right ear"></td>
+<td width="50%"><img src="docs/media/capslock.gif" width="100%" alt="Caps Lock turning on and off over the music"></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/timer.gif" width="100%" alt="A twenty-five minute countdown starting beside the music in the notch"></td>
+<td width="50%"><img src="docs/media/peeks-airpods-focus.gif" width="100%" alt="AirPods connecting, then a Focus mode turning on"></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/media/peeks-layout-battery.gif" width="100%" alt="The keyboard layout changing, then a low battery"></td>
+<td width="50%"><img src="docs/media/peeks-charging-privacy.gif" width="100%" alt="The charger plugged in, then the camera and microphone in use"></td>
+</tr>
+</table>
 
 | | |
 |---|---|
+| **Focus timer** | Start a session and the countdown sits at the edge of the notch while you work, close enough to glance at, too small to distract you. |
 | **Volume & brightness** | A readout that replaces the grey square macOS drops in the middle of your screen. Hover it and the bar becomes a slider. |
 | **AirPods & Bluetooth** | They connect, you see it — with battery, and the case animation you were promised on the iPhone. |
 | **Battery** | Where it stands, and a nudge while there's still time to do something about it. |
@@ -104,21 +116,15 @@ never even built, so it does no work and asks for nothing.
 
 ## What it will never do
 
-Ledge **records nothing**. No screen capture, no audio capture, nothing saved
-from the camera. The camera opens only when you press the mirror, shows only
-you, and closes when the card does. The equalizer that dances along with your
-music never hears a note of it: it's an animation seeded from the track,
-reading zero bytes of audio. There was an early
-version that sampled system audio, and it was deleted for exactly this reason.
-Nobody should have to trust a notch app with a microphone.
+Ledge **records nothing**: no screen or audio capture, nothing saved from the
+camera. The mirror opens when you press it and closes with the card. The
+equalizer that moves with your music is an animation; it never hears a note.
 
-It also stays **out of your screenshots**, your recordings and the screen you
-share in meetings. There's a switch for when you do want to show it off.
+It stays **out of your screenshots**, recordings and shared screens, unless you
+want it in them.
 
-Four things go over the network and nothing else: the weather (Open-Meteo, with
-your coordinates rounded to about a kilometre), the place name for it (Apple),
-cover art from whatever is playing, and the update check. No account, nothing to
-sign up for, no telemetry.
+Only four things go over the network: the weather (Open-Meteo, location rounded
+to about a kilometre), its place name (Apple), cover art, and the update check.
 
 ## What it reaches for
 
@@ -230,6 +236,7 @@ learn from it, ship your own — as long as what you ship stays open too.
 <div align="center">
 
 Made by <a href="https://github.com/egemertbalcik">Ege Mert Balçık</a> · <a href="https://ledgeapp.dev">ledgeapp.dev</a><br>
-If Ledge earns its place in your notch, <a href="https://buymeacoffee.com/egebalcik" target="_blank" rel="noopener noreferrer">buy me a coffee</a>.
+If Ledge earns its place in your notch, <a href="https://buymeacoffee.com/egebalcik" target="_blank" rel="noopener noreferrer">buy me a coffee</a>.<br>
+<sub>Music in the film: “Ease Back” by <a href="https://freemusicarchive.org/music/Ketsa/cc-by-free-to-use-for-anything/ease-back/">Ketsa</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>; “Dance Robot ACTIVATE”, CC0.</sub>
 
 </div>
