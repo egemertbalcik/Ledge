@@ -199,18 +199,6 @@ on without it.
 | Location | Weather for wherever you are | Weather for a city you type in |
 | Login Items *(Keep Awake's helper)* | Keeping the Mac awake with the lid shut | Awake still works, lid open |
 
-## How it compares
-
-There are other notch apps, and some will suit you better.
-[boring.notch](https://github.com/TheBoredTeam/boring.notch) is free and open
-source too, and runs on macOS 14, on Intel Macs and on external displays.
-[Atoll](https://github.com/Ebullioscopic/Atoll) has system stats and clipboard
-history. Alcove and NotchNook are paid, polished, and work on any display.
-Ledge is the one for a notched MacBook on macOS 26 if you want a signed app
-that asks for nothing until a feature needs it and records nothing. A sourced
-comparison, checked October 2026:
-[free alternatives to Alcove and NotchNook](https://egemertbalcik.com/notes/free-alcove-notchnook-alternatives/).
-
 ## Build it yourself
 
 ```sh
