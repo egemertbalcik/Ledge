@@ -54,6 +54,50 @@ final class NotesPanel: NSPanel {
     /// Never main: this app is an accessory and has no main window of its own.
     override var canBecomeMain: Bool { false }
 
+    override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask,
+                  backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
+        super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
+        // Every text view, not one: SwiftUI builds the note's afresh whenever
+        // the editor comes back from behind a list, so there is no single one
+        // to watch. Selector-based, so it is delivered while the change is
+        // still being made rather than queued after it.
+        NotificationCenter.default.addObserver(self, selector: #selector(textDidChange(_:)),
+                                               name: NSText.didChangeNotification, object: nil)
+    }
+
+    /// Writes a pasted list's tab, bullet, tab as the bullet a person types.
+    ///
+    /// Done to the text view, as an edit of its own, and not to the model.
+    /// Rewriting the model's text from its own change handler reaches the text
+    /// view as a replacement of everything and takes the paste's undo with it
+    /// — measured, ⌘Z then does nothing at all. Made here, inside the change
+    /// the paste or the drop is still making, the rewrite joins that change's
+    /// undo group, so one ⌘Z takes back the paste and the bullets together.
+    @objc private func textDidChange(_ notification: Notification) {
+        guard let textView = notification.object as? NSTextView, textView.window === self,
+              !textView.isFieldEditor, !textView.hasMarkedText(),
+              let storage = textView.textStorage else { return }
+        // Asked after every keystroke, so it looks in the storage's own
+        // string first, without copying it, and almost always stops there.
+        let buffer = storage.mutableString
+        guard NoteText.listBullets.contains(where: { buffer.range(of: "\t\($0)\t").location != NSNotFound })
+        else { return }
+        let string = storage.string
+        let markers = NoteText.listMarkers(in: string)
+        guard !markers.isEmpty else { return }
+        // One change for every marker, so the text view hears of it once;
+        // made from the end back, so every range still means what it did.
+        let ranges = markers.map { NSRange($0.range, in: string) }
+        guard textView.shouldChangeText(inRanges: ranges.map { NSValue(range: $0) },
+                                        replacementStrings: markers.map(\.replacement)) else { return }
+        storage.beginEditing()
+        for (range, marker) in zip(ranges, markers).reversed() {
+            storage.replaceCharacters(in: range, with: marker.replacement)
+        }
+        storage.endEditing()
+        textView.didChangeText()
+    }
+
     /// Command-key equivalents, by hand.
     ///
     /// `NSApplication` dispatches `⌘C`, `⌘V`, `⌘Z` and the rest through
@@ -94,17 +138,13 @@ final class NotesPanel: NSPanel {
             }
         }
 
-        switch event.charactersIgnoringModifiers?.lowercased() {
         // Editing, handed to whatever holds the caret — the note, or a search
         // field when one is open.
-        case "c": return NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
-        case "v": return NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
-        case "x": return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
-        case "a": return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
-        case "z":
-            return NSApp.sendAction(shift ? Selector(("redo:")) : Selector(("undo:")),
-                                    to: nil, from: self)
+        if let action = Self.editingAction(for: event) {
+            return NSApp.sendAction(action, to: nil, from: self)
+        }
 
+        switch event.charactersIgnoringModifiers?.lowercased() {
         // Moving about, which works wherever you are.
         case "n": onCommand?(.newNote); return true
         case "p": onCommand?(.allNotes); return true
@@ -130,6 +170,37 @@ final class NotesPanel: NSPanel {
 
         default:
             return super.performKeyEquivalent(with: event)
+        }
+    }
+
+    /// What an editing key asks of whatever holds the caret, or nil when the
+    /// key is not one.
+    ///
+    /// Apart from `performKeyEquivalent` so it can be tested without a key
+    /// window. ⇧⌘C and ⇧⌘E are the window's own and are taken before this is
+    /// asked.
+    ///
+    /// ⌥⇧⌘V is Paste and Match Style, as everywhere else on the Mac: the
+    /// characters, in the style at the caret, and nothing of the source's —
+    /// not even its bold. It used to fall through to a rich paste, because
+    /// Option was never looked at. ⌥⌘V is Paste Style elsewhere, which a note
+    /// has nothing to do with, so it is left alone rather than pasting. ⇧⌘V
+    /// stays an ordinary paste, which the formatting definition already keeps
+    /// to bold and italic.
+    static func editingAction(for event: NSEvent) -> Selector? {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command), !flags.contains(.control) else { return nil }
+        let shift = flags.contains(.shift)
+        let option = flags.contains(.option)
+        switch event.charactersIgnoringModifiers?.lowercased() {
+        case "c": return #selector(NSText.copy(_:))
+        case "v":
+            guard option else { return #selector(NSText.paste(_:)) }
+            return shift ? #selector(NSTextView.pasteAsPlainText(_:)) : nil
+        case "x": return #selector(NSText.cut(_:))
+        case "a": return #selector(NSText.selectAll(_:))
+        case "z": return shift ? Selector(("redo:")) : Selector(("undo:"))
+        default: return nil
         }
     }
 

@@ -86,7 +86,17 @@ public struct NoteBody: Equatable, Sendable, Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
         id = try c.decode(String.self, forKey: .id)
-        text = try c.decodeIfPresent(AttributedString.self, forKey: .text) ?? AttributedString("")
+        // Text whose attributes this build cannot decode costs the note its
+        // formatting, never its words. A note saved by an earlier build can
+        // hold a pasted colour as SwiftUI's private archive of it, and that
+        // throws for the whole string the day the archive stops being
+        // readable — which used to set the entire note aside as unreadable.
+        do {
+            text = try c.decodeIfPresent(AttributedString.self, forKey: .text) ?? AttributedString("")
+        } catch {
+            guard let salvaged = try? c.decodeIfPresent(SalvagedNoteText.self, forKey: .text) else { throw error }
+            text = salvaged.text
+        }
         createdAt = try c.decodeIfPresent(TimeInterval.self, forKey: .createdAt) ?? 0
         editedAt = try c.decodeIfPresent(TimeInterval.self, forKey: .editedAt) ?? createdAt
     }

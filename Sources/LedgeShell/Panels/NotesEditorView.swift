@@ -242,17 +242,9 @@ final class NotesEditorModel: ObservableObject {
             var current = container.inlinePresentationIntent ?? []
             if turningOn { current.insert(intent) } else { current.remove(intent) }
             container.inlinePresentationIntent = current.isEmpty ? nil : current
-            container.font = Self.font(for: current)
+            container.font = NoteFace.font(for: current)
         }
         edited()
-    }
-
-    /// The face that shows what the intent means.
-    static func font(for intent: InlinePresentationIntent) -> Font {
-        var font = Font.system(size: 13)
-        if intent.contains(.stronglyEmphasized) { font = font.bold() }
-        if intent.contains(.emphasized) { font = font.italic() }
-        return font
     }
 
     /// Gives every run the face its stored intent calls for.
@@ -260,10 +252,20 @@ final class NotesEditorModel: ObservableObject {
     /// Notes are saved carrying intent and nothing else, so a note loaded from
     /// disk would otherwise come back on screen with its bold gone — the
     /// attribute is there, but the editor does not draw from it.
+    ///
+    /// Normalised first. The formatting definition only governs what comes
+    /// into the text view, not text the app hands it, so a note an earlier
+    /// build saved with a pasted highlight in it would otherwise open with the
+    /// highlight still in the model and be saved straight back with it. A list
+    /// an earlier build pasted as tab, bullet, tab is given its bullets for
+    /// the same reason: the panel tidies them as they arrive now, and a note
+    /// should not read differently depending on when it was pasted into.
     static func rendered(_ text: AttributedString) -> AttributedString {
-        var out = text
-        for run in text.runs {
-            out[run.range].font = font(for: run.inlinePresentationIntent ?? [])
+        var clean = NoteText.normalized(text)
+        NoteText.collapseListMarkers(in: &clean)
+        var out = clean
+        for run in clean.runs {
+            out[run.range].font = NoteFace.font(for: run.inlinePresentationIntent ?? [])
         }
         return out
     }
@@ -290,19 +292,100 @@ final class NotesEditorModel: ObservableObject {
         }
     }
 
-    /// The text as it should be stored: intent only, no faces.
+    /// The text as it should be stored: characters and intent, nothing else.
     ///
     /// The font is derived and so is never the truth about a note. Saving it
     /// would put a SwiftUI blob in the JSON that nothing else can read, and
-    /// would go stale the moment the editor's size changed.
+    /// would go stale the moment the editor's size changed. The same goes for
+    /// everything else a paste or an older build can leave in the model —
+    /// colours, links, paragraph styles — so this keeps what Ledge can make
+    /// rather than removing what it happens to know about.
     static func stored(_ text: AttributedString) -> AttributedString {
-        var out = text
-        for run in text.runs {
-            out[run.range].font = nil
-        }
-        return out
+        NoteText.normalized(text)
     }
 
+}
+
+/// The face that shows what the intent means.
+///
+/// Its own home, outside the model, because the formatting definition's
+/// constraints run off the main actor and the model is isolated to it.
+enum NoteFace {
+    static func font(for intent: InlinePresentationIntent) -> Font {
+        var font = Font.system(size: 13)
+        if intent.contains(.stronglyEmphasized) { font = font.bold() }
+        if intent.contains(.emphasized) { font = font.italic() }
+        return font
+    }
+}
+
+/// What the text view will let a note carry: bold and italic, and the face
+/// drawn from them.
+///
+/// Without it the editor took whatever arrived. A paste, a drop, a Service or
+/// the right-click Font menu brought in highlight, colours, fonts, underline
+/// and links, none of which Ledge can show a control for or take away again.
+/// SwiftUI applies this to everything entering the text view by any of those
+/// routes, so they all come out the same.
+///
+/// The order is the point. The intent is read from the face first, so what
+/// arrived as a bold font becomes Ledge's bold — the B chip lights up for it,
+/// it is exported, and it survives a reopen — and only then is the face
+/// replaced with Ledge's own. The other way round, pasted bold would be turned
+/// plain before anything had looked at it.
+///
+/// It also stops the first edit after a load throwing the caret to the end of
+/// the note. `.lineSpacing` made SwiftUI stamp a line height across the whole
+/// text on that edit, which came back through the binding as a replacement of
+/// everything; line height is outside this scope, so it is never written into
+/// the text and the spacing is drawn from the environment alone.
+struct NoteFormatting: AttributedTextFormattingDefinition {
+    struct Scope: AttributeScope {
+        let inlinePresentationIntent: AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute
+        let font: AttributeScopes.SwiftUIAttributes.FontAttribute
+    }
+
+    /// The view's, so a pasted face can be asked whether it is bold.
+    let context: Font.Context
+
+    var body: some AttributedTextFormattingDefinition<Scope> {
+        IntentFollowsFace(context: context)
+        FaceFollowsIntent()
+    }
+}
+
+/// Bold and italic, read off whatever face a run arrived in.
+///
+/// A rich paste has no intent at all, only a font — Helvetica Bold, Times Bold
+/// from an `<h1>`, a heavy face from Word — and the rest of Ledge only knows
+/// bold as intent. A run with no face of its own is left as it is.
+struct IntentFollowsFace: AttributedTextValueConstraint {
+    typealias Scope = NoteFormatting.Scope
+    typealias AttributeKey = AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute
+
+    let context: Font.Context
+
+    func constrain(_ container: inout Attributes) {
+        // Only the two Ledge has controls for. `.code`, `.strikethrough` and
+        // the rest can ride in on SwiftUI's own pasteboard type.
+        var intent = (container.inlinePresentationIntent ?? []).intersection(NoteText.allowedIntent)
+        if let face = container.font {
+            let resolved = face.resolve(in: context)
+            if resolved.isBold { intent.insert(.stronglyEmphasized) } else { intent.remove(.stronglyEmphasized) }
+            if resolved.isItalic { intent.insert(.emphasized) } else { intent.remove(.emphasized) }
+        }
+        container.inlinePresentationIntent = intent.isEmpty ? nil : intent
+    }
+}
+
+/// The face is only ever Ledge's own, chosen by the intent.
+struct FaceFollowsIntent: AttributedTextValueConstraint {
+    typealias Scope = NoteFormatting.Scope
+    typealias AttributeKey = AttributeScopes.SwiftUIAttributes.FontAttribute
+
+    func constrain(_ container: inout Attributes) {
+        container.font = NoteFace.font(for: container.inlinePresentationIntent ?? [])
+    }
 }
 
 /// One note, in its own window.
@@ -324,6 +407,8 @@ struct NotesEditorView: View {
     /// The window's, which is where ⌘Z goes. One for the whole session,
     /// because the window is.
     @Environment(\.undoManager) private var undoManager
+    /// What the formatting definition resolves a pasted face against.
+    @Environment(\.fontResolutionContext) private var fontContext
     /// Puts the window away. The system's own close button is hidden because
     /// the view draws its own header, so without this there is no way out.
     var onClose: () -> Void = {}
@@ -430,6 +515,7 @@ struct NotesEditorView: View {
             .tint(Color.white.opacity(0.9))
             .lineSpacing(3)
             .foregroundStyle(NoteInk.text)
+            .attributedTextFormattingDefinition(NoteFormatting(context: fontContext))
             .scrollContentBackground(.hidden)
             .background(.clear)
             .padding(.horizontal, 12)
