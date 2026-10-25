@@ -92,7 +92,7 @@ struct ArtworkCarryTests {
     private func line(
         title: String = "Track",
         trackID: String? = "1",
-        artwork: String? = nil,
+        artwork: Data? = nil,
         artworkID: String? = nil
     ) -> AdapterPayload {
         var payload = AdapterPayload()
@@ -118,9 +118,39 @@ struct ArtworkCarryTests {
     /// cover down with it.
     @Test("A line that says nothing about artwork is still the same track")
     func silenceAboutArtworkIsNotAChange() {
-        let withArt = line(artwork: "AAAA", artworkID: "abc")
+        let withArt = line(artwork: Data([0xFF, 0xD8]), artworkID: "abc")
         let without = line()
         #expect(MediaRemoteAdapterSource.isSameTrack(without, withArt))
+    }
+
+    /// Found by review (R3): ids are each player's own.
+    @Test("Equal track ids under different players are different tracks")
+    func idsAreScopedToThePlayer() {
+        var music = line(trackID: "1")
+        music.bundleID = "com.apple.Music"
+        var vlc = line(title: "Other", trackID: "1")
+        vlc.bundleID = "org.videolan.vlc"
+        #expect(MediaRemoteAdapterSource.isSameTrack(vlc, music) == false)
+    }
+
+    @Test("The same helper reporting for two browsers is two players")
+    func helperIsNotTheOwner() {
+        var safari = line(trackID: "7")
+        safari.bundleID = "com.apple.WebKit.GPU"
+        safari.parentBundleID = "com.apple.Safari"
+        var other = safari
+        other.parentBundleID = "com.kagi.kagimacOS"
+        #expect(MediaRemoteAdapterSource.isSameTrack(other, safari) == false)
+        #expect(MediaRemoteAdapterSource.isSameTrack(safari, safari))
+    }
+
+    @Test("With no owner known, nothing is the same track")
+    func unknownOwnerIsNotSame() {
+        var a = line()
+        a.bundleID = nil
+        #expect(MediaRemoteAdapterSource.isSameTrack(a, a) == false)
+        a.pid = 4711
+        #expect(MediaRemoteAdapterSource.isSameTrack(a, a), "the process stands in when no bundle is named")
     }
 
     @Test("A different track does not inherit the last one's cover")

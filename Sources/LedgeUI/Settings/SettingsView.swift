@@ -324,8 +324,9 @@ public struct SettingsView: View {
         // A sidebar row lands on the thing it names. Leaving Cards with a
         // card's page open and coming back to that page instead of the list
         // is the window disagreeing with its own sidebar.
-        .onChange(of: selection) { _, now in
+        .onChange(of: selection, initial: true) { _, now in
             if now != .cards { openCards.removeAll() }
+            model.shownPane = now.rawValue
         }
         // The whole window sits on a behind-window material, so the wallpaper
         // tints the settings the way macOS Tahoe's own panes are tinted. Up

@@ -50,9 +50,14 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
     public var live: Bool?
 
     public var artworkID: String?
+    /// The type of `artwork`'s bytes, read off the bytes by the adapter. Rides
+    /// only on the line that carries them.
     public var artworkMIME: String?
-    /// Base64. Sent only when `artworkID` changes, so most lines omit it.
-    public var artwork: String?
+    /// The cover, at most 512 px on its longest side. Base64 on the wire,
+    /// decoded with the rest of the line — off the main actor, by
+    /// `AdapterLineReader`. Sent only on the first line naming its
+    /// `artworkID`, so most lines omit it.
+    public var artwork: Data?
 
     /// Whether this line carries playable metadata rather than a handshake,
     /// a heartbeat, or an explicit "nothing is loaded".
@@ -119,7 +124,7 @@ public struct AdapterPayload: Decodable, Equatable, Sendable {
             // inherit the previous one's retirement and never appear at all.
             trackKey: trackID.map { TrackKey.identified($0, by: bundle) },
             artworkID: artworkID,
-            artworkData: artwork.flatMap { Data(base64Encoded: $0) },
+            artworkData: artwork,
             // The system's word when it gives one. When it does not, a thing
             // that is playing with no duration at all has no end to show, and
             // whether that is a broadcast or a stream of unknown length makes
@@ -152,24 +157,89 @@ public struct LineBuffer: Sendable {
     public init() {}
 
     /// Appends a chunk and returns whatever complete lines it finished.
+    ///
+    /// Only the bytes that just arrived are searched: what is pending is known
+    /// to hold no newline, or it would already have been a line. Searching the
+    /// whole pending buffer again for every chunk made the cost quadratic in
+    /// the line's length — a browser's five-megabyte video artwork arrives in
+    /// three hundred chunks and took 0.7 to 2.6 seconds of main-thread time,
+    /// long enough for macOS to switch off the media-key tap.
     public mutating func append(_ chunk: Data) -> [Data] {
-        pending.append(chunk)
         var lines: [Data] = []
+        var start = chunk.startIndex
 
-        while let index = pending.firstIndex(of: 0x0A) {
-            let line = pending[pending.startIndex..<index]
-            pending = pending[pending.index(after: index)...]
+        while let newline = Self.firstNewline(in: chunk, from: start) {
             if discarding {
                 discarding = false
-            } else if !line.isEmpty {
-                lines.append(Data(line))
+            } else {
+                pending.append(chunk[start..<newline])
+                if !pending.isEmpty { lines.append(pending) }
             }
+            pending = Data()
+            start = newline + 1
         }
 
+        if !discarding { pending.append(chunk[start...]) }
         if pending.count > Self.maximumLineLength {
-            pending.removeAll(keepingCapacity: false)
+            pending = Data()
             discarding = true
         }
         return lines
+    }
+
+    /// `memchr`, because `Data.firstIndex(of:)` goes through the generic
+    /// collection path one byte at a time — about 3 ns a byte, against a
+    /// fraction of that here.
+    private static func firstNewline(in chunk: Data, from start: Data.Index) -> Data.Index? {
+        chunk.withUnsafeBytes { raw -> Data.Index? in
+            let offset = start - chunk.startIndex
+            guard offset < raw.count, let base = raw.baseAddress else { return nil }
+            guard let hit = memchr(base + offset, 0x0A, raw.count - offset) else { return nil }
+            return chunk.startIndex + (UnsafeRawPointer(hit) - base)
+        }
+    }
+}
+
+/// The covers the adapter has sent, by artwork id.
+///
+/// The adapter sends an image's bytes once and afterwards names it by id
+/// alone, and it remembers several ids, not one: a video in Safari has two
+/// images, a frame and a poster, and flips between them while it plays.
+/// Carrying the last cover forward is not enough for that — a line naming the
+/// poster would have been shown with the frame. So each id's bytes are kept
+/// here, and a line that names an id without bytes is given that id's own.
+///
+/// Holds more entries than the adapter remembers ids
+/// (`LedgeArtworkRecentCapacity`, 4) and ages them the same way — a line
+/// naming an id counts as a use on both sides — so an id the adapter will not
+/// resend is always still here.
+struct AdapterCoverCache: Sendable {
+
+    static let capacity = 8
+
+    private struct Cover: Sendable {
+        let id: String
+        let bytes: Data
+        let mime: String?
+    }
+
+    /// Newest first.
+    private var covers: [Cover] = []
+
+    /// Records the line's cover if it carries one, or fills it in if it names
+    /// one already held. A line naming no id comes back untouched.
+    mutating func fill(_ payload: AdapterPayload) -> AdapterPayload {
+        guard let id = payload.artworkID else { return payload }
+        var filled = payload
+        let held = covers.firstIndex { $0.id == id }.map { covers.remove(at: $0) }
+        if let bytes = payload.artwork {
+            covers.insert(Cover(id: id, bytes: bytes, mime: payload.artworkMIME), at: 0)
+        } else if let held {
+            covers.insert(held, at: 0)
+            filled.artwork = held.bytes
+            filled.artworkMIME = held.mime
+        }
+        if covers.count > Self.capacity { covers.removeLast(covers.count - Self.capacity) }
+        return filled
     }
 }

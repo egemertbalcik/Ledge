@@ -13,9 +13,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let preferences = Preferences(store: UserDefaultsPreferenceStore())
     private lazy var coordinator = LedgeCoordinator(preferences: preferences)
 
-    /// Sparkle. The standard controller owns the whole flow — scheduled checks,
-    /// the update window, install-on-quit — so the app's only job is to expose
-    /// "Check for Updates…" in the menu.
     /// Tells the coordinator when a termination is Sparkle relaunching us.
     ///
     /// Its own object rather than the delegate on this class: `AppDelegate` is
@@ -25,6 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self?.coordinator.willRelaunchForUpdate()
     }
 
+    /// Sparkle. The standard controller owns the whole flow — scheduled checks,
+    /// the update window, install-on-quit — so the app's only job is to build
+    /// it at launch and expose "Check for Updates…" in Settings.
+    ///
+    /// Lazy only so it can capture `updaterDelegate`. Being lazy is also how it
+    /// stopped existing: from 1.1.0 to 1.2.3 nothing touched it but that
+    /// button, so Sparkle never started and no automatic check ever ran.
+    /// `startNormally()` builds it now, on every normal launch.
     private lazy var updater = SPUStandardUpdaterController(
         startingUpdater: true,
         updaterDelegate: updaterDelegate,
@@ -65,6 +70,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Sparkle's updater lives here, beside the bundle it updates, and
         // Settings is the only place that offers a manual check now.
+        //
+        // Built here, not on first use: `startingUpdater: true` is what starts
+        // the scheduled checks, and it only runs when the controller is made.
+        // After the single-instance and move-to-Applications guards, so a
+        // copy that is about to exit never starts a second updater.
+        //
+        // Only in a bundle with a feed. `bundle.sh` takes the feed out of a
+        // development build so it can never update itself into the real app;
+        // started there, Sparkle would ask about automatic checks it then
+        // could not run. A press of the button still builds it, as before.
+        if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
+            _ = updater
+        }
         coordinator.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates(nil) }
         coordinator.canCheckForUpdates = { [weak self] in
             self?.updater.updater.canCheckForUpdates ?? false

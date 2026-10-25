@@ -81,6 +81,9 @@ public final class MediaKeyInterceptor {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isSuppressing = false
+    /// When the callback last answered an event. Only read when the tap is
+    /// switched off, to say how long the main thread had been away.
+    private var lastServed: ContinuousClock.Instant?
 
     public init() {}
 
@@ -212,6 +215,7 @@ public final class MediaKeyInterceptor {
     public func stop() {
         healthCheck?.cancel()
         healthCheck = nil
+        lastServed = nil
         // Invalidate, not merely disable: `start()` calls `stop()` and then
         // creates a fresh tap, and `apply()` re-runs on every HUD preference
         // change — a disabled-but-live mach port per toggle is a slow leak in
@@ -255,10 +259,15 @@ public final class MediaKeyInterceptor {
         // user input. Re-arming here is the difference between a momentary
         // hiccup and the volume keys staying dead until the app is relaunched.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            Self.log.error("event tap disabled (\(type.rawValue, privacy: .public)) — re-arming")
+            // How long since the last answer is the one number that says
+            // whether the main thread was stalled when macOS gave up on us.
+            let since = MainActor.assumeIsolated { lastServed.map { ContinuousClock.now - $0 } }
+            let served = since.map { "last event served \($0) ago" } ?? "no event served yet"
+            Self.log.error("event tap disabled (\(type.rawValue, privacy: .public)), \(served, privacy: .public) — re-arming")
             MainActor.assumeIsolated { reArm() }
             return Unmanaged.passUnretained(event)
         }
+        MainActor.assumeIsolated { lastServed = .now }
 
         guard type == Self.systemDefinedType,
               let nsEvent = NSEvent(cgEvent: event),

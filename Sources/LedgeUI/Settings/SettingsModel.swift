@@ -167,6 +167,11 @@ public final class SettingsModel {
     /// answer.
     public var devices: DevicesSettingsModel?
 
+    /// The pane on screen, by its name. Closing the window takes its content
+    /// down so nothing keeps polling behind it, and this is what the next
+    /// opening uses to come back to the same pane.
+    public var shownPane: String?
+
     /// Waits for anything the Settings panes still owe the disk. Called on
     /// the way out.
     public func drainPendingWrites() async {

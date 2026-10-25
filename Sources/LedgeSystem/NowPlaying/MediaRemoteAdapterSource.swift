@@ -48,7 +48,7 @@ public struct AdapterRestartPolicy: Sendable {
 /// pull-based `NowPlayingSource` protocol fits without modification, and the
 /// 1s poll costs nothing — there is no subprocess in the hot path.
 @MainActor
-public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangePublishing {
+public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangePublishing, SystemOwnerReporting {
 
     /// Told the moment a line changes the answer — see
     /// `NowPlayingChangePublishing`.
@@ -70,7 +70,9 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
 
     private var process: Process?
     private var stdinPipe: Pipe?
-    private var buffer = LineBuffer()
+    /// One per spawn, so a dead helper's half-line can never become the head
+    /// of the next one's first line.
+    private var reader: AdapterLineReader?
     private var policy = AdapterRestartPolicy()
     private var startedAt: TimeInterval = 0
     private var restartTask: Task<Void, Never>?
@@ -80,8 +82,9 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
     /// process that replaced it.
     private var generation = 0
 
-    private var latest: AdapterPayload?
+    private(set) var latest: AdapterPayload?
     private var latestAt: TimeInterval = 0
+    private var covers = AdapterCoverCache()
 
     public init(
         dylibURL: URL,
@@ -116,15 +119,37 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
         return latest.snapshot(at: now(), resolveApp: Self.resolveApp)
     }
 
+    /// The owner `snapshot()` would name, read straight from the held line.
+    /// Under the same rule: nothing once the helper has gone quiet.
+    public var heldSystemOwner: String? {
+        guard let latest, isAvailable else { return nil }
+        return latest.snapshot(at: now(), resolveApp: Self.resolveApp)?.appBundleID
+    }
+
     /// Whether two lines describe the same track.
     ///
-    /// The player's own identifier when there is one; otherwise what is on
-    /// screen, which is all a browser gives for anything else.
+    /// Only within one player. A track identifier is the player's own — VLC
+    /// and Music can both call their current item "1" — so comparing them
+    /// across players handed one player's cover to the other, and kept it
+    /// there for every line after. The player is the one a snapshot is filed
+    /// under: the parent app before the helper process that reports for it,
+    /// so two browsers' WebKit helpers are two players. Not known is not the
+    /// same.
+    ///
+    /// Within it, the player's identifier when there is one; otherwise what
+    /// is on screen, which is all a browser gives for anything else.
     nonisolated static func isSameTrack(_ line: AdapterPayload, _ previous: AdapterPayload) -> Bool {
+        guard let owner = owner(of: line), owner == self.owner(of: previous) else { return false }
         if let a = line.trackID, let b = previous.trackID { return a == b }
         return line.title == previous.title
             && line.artist == previous.artist
-            && line.bundleID == previous.bundleID
+    }
+
+    /// Who a line belongs to, as `AdapterPayload.snapshot` reads it — the
+    /// pid standing in only when the helper named no bundle at all.
+    nonisolated static func owner(of line: AdapterPayload) -> String? {
+        if let bundle = line.parentBundleID ?? line.bundleID, !bundle.isEmpty { return bundle }
+        return line.pid.map { "pid:\($0)" }
     }
 
     /// Whether a new line is worth waking the reader for.
@@ -184,13 +209,18 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
         task.standardError = err
         task.standardInput = input
 
-        out.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        // Generation-tagged: a batch already on its way when stop() runs
+        // would otherwise land after the reset and resurrect the dead
+        // session's track as a fresh-looking snapshot.
+        let reader = AdapterLineReader { [weak self] payloads in
+            await self?.receive(payloads, from: spawned)
+        }
+        self.reader?.finish()
+        self.reader = reader
+        out.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
-            // Generation-tagged: a chunk Task already queued when stop() runs
-            // would otherwise land after the reset and resurrect the dead
-            // session's track as a fresh-looking snapshot.
-            Task { @MainActor [weak self] in self?.consume(chunk, from: spawned) }
+            reader.feed(chunk)
         }
         err.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
@@ -218,6 +248,8 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
             Self.log.notice("adapter started (pid \(task.processIdentifier, privacy: .public))")
         } catch {
             Self.log.error("adapter failed to launch: \(error.localizedDescription, privacy: .public)")
+            reader.finish()
+            self.reader = nil
             scheduleRestart()
         }
     }
@@ -244,9 +276,11 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
         }
         process = nil
         stdinPipe = nil
+        reader?.finish()
+        reader = nil
         latest = nil
         latestAt = 0
-        buffer = LineBuffer()
+        covers = AdapterCoverCache()
     }
 
     private func processEnded(generation ended: Int, status: Int32) {
@@ -259,6 +293,8 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
         (process?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         process = nil
         stdinPipe = nil
+        reader?.finish()
+        reader = nil
         scheduleRestart()
     }
 
@@ -280,26 +316,28 @@ public final class MediaRemoteAdapterSource: NowPlayingSource, NowPlayingChangeP
 
     // MARK: - Reading
 
-    private func consume(_ chunk: Data, from spawned: Int) {
+    /// Takes what `AdapterLineReader` decoded. Internal so the tests can feed
+    /// lines without a helper process.
+    func receive(_ payloads: [AdapterPayload], from spawned: Int) {
         guard spawned == generation else { return }  // straggler from a stopped session
-        for line in buffer.append(chunk) {
-            guard let payload = try? JSONDecoder().decode(AdapterPayload.self, from: line) else {
-                continue
-            }
+        for decoded in payloads {
             latestAt = now()
-            switch payload.kind {
+            switch decoded.kind {
             case .hello, .heartbeat:
                 break  // liveness only
             case .now, .none:
+                // Before anything else, and for every line, track or not: the
+                // adapter counts each line naming an id as a use of it, and the
+                // cache has to age its entries in that same order.
+                let payload = covers.fill(decoded)
                 // Artwork rides only on the line where its id changes; later
                 // status lines for the same track carry none. Replacing
                 // `latest` wholesale therefore dropped the bytes one second
                 // after they arrived — carry them forward while the id holds.
                 if payload.describesTrack {
                     var merged = payload
-                    // Artwork rides only on the line that introduces it, so
-                    // every later line for the same track carries none and the
-                    // bytes have to be carried forward by hand.
+                    // What the cache could not fill — a line that names no
+                    // artwork at all — is carried forward from the held line.
                     //
                     // Carried by *track*, not by artwork id. Keyed on the id,
                     // a line that simply stopped mentioning artwork — which

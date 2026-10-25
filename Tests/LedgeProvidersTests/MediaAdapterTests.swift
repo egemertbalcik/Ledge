@@ -199,6 +199,104 @@ struct LineBufferTests {
     func blankLinesSkipped() {
         #expect(lines(from: [Data("\n\na\n\n".utf8)]) == ["a"])
     }
+
+    /// A line of `count` bytes of "A" and its newline, cut into `size` chunks.
+    private func chunked(lineOf count: Int, into size: Int) -> (line: Data, chunks: [Data]) {
+        var stream = Data(repeating: 0x41, count: count)
+        stream.append(0x0A)
+        let chunks = stride(from: 0, to: stream.count, by: size).map {
+            stream[$0..<min($0 + size, stream.count)]
+        }
+        return (stream.dropLast(), chunks)
+    }
+
+    private func timeToRead(_ chunks: [Data]) -> (seconds: Double, lines: [Data]) {
+        var buffer = LineBuffer()
+        var out: [Data] = []
+        let clock = ContinuousClock()
+        let took = clock.measure {
+            for chunk in chunks { out += buffer.append(chunk) }
+        }
+        let parts = took.components
+        return (Double(parts.seconds) + Double(parts.attoseconds) / 1e18, out)
+    }
+
+    /// The bug: every chunk searched the whole pending buffer again, so a
+    /// browser's five-megabyte artwork line cost 0.7 to 2.6 seconds on the
+    /// main thread. A ratio rather than a bound, so it holds in debug and
+    /// release and on any Mac: linear is a ratio of about 20, quadratic
+    /// about 400.
+    @Test("A multi-megabyte line costs time linear in its length")
+    func longLineIsLinear() throws {
+        let big = chunked(lineOf: 5_000_000, into: 16 * 1024)
+        let small = chunked(lineOf: 250_000, into: 16 * 1024)
+        try #require(big.chunks.count >= 300, "the line must really arrive in hundreds of chunks")
+        try #require(big.chunks.dropLast().allSatisfy { !$0.contains(0x0A) },
+                     "only the last chunk may hold the newline, or nothing is being accumulated")
+
+        // Best of three, so one descheduling cannot decide the ratio.
+        let tBig = (0..<3).map { _ in timeToRead(big.chunks) }
+        let tSmall = (0..<3).map { _ in timeToRead(small.chunks).seconds }.min()!
+        let best = tBig.map(\.seconds).min()!
+
+        #expect(tBig[0].lines == [big.line])
+        #expect(best < max(tSmall, 0.000_1) * 60, "5 MB took \(best)s against \(tSmall)s for 250 KB")
+    }
+
+    /// The number the fix is judged by: the event tap gives up at about a
+    /// second, and this must not come anywhere near it.
+    @Test("A five-megabyte line split into 16 KB chunks reads in well under 50 ms")
+    func longLineIsFast() throws {
+        let big = chunked(lineOf: 5_036_693, into: 16 * 1024)
+        try #require(big.chunks.count >= 300)
+        let best = (0..<3).map { _ in timeToRead(big.chunks) }.min { $0.seconds < $1.seconds }!
+        #expect(best.lines == [big.line])
+        #expect(best.seconds < 0.050, "took \(best.seconds)s")
+    }
+
+    @Test("A newline as the first or the last byte of a chunk")
+    func newlineAtChunkEdges() throws {
+        let stream = Data("first\nsecond\nthird\n".utf8)
+        let firstNewline = try #require(stream.firstIndex(of: 0x0A))
+
+        // Split so the first newline ends one chunk...
+        let endsChunk = [stream[..<(firstNewline + 1)], stream[(firstNewline + 1)...]]
+        try #require(endsChunk[0].last == 0x0A)
+        // ...and so it starts the next.
+        let startsChunk = [stream[..<firstNewline], stream[firstNewline...]]
+        try #require(startsChunk[1].first == 0x0A)
+
+        let whole = lines(from: [stream])
+        #expect(whole == ["first", "second", "third"])
+        #expect(lines(from: endsChunk) == whole)
+        #expect(lines(from: startsChunk) == whole)
+    }
+
+    @Test("An over-long line split across many chunks is still dropped, and the next line survives")
+    func overlongAcrossChunksDropped() throws {
+        var buffer = LineBuffer()
+        let megabyte = Data(repeating: 0x41, count: 1024 * 1024)
+        var sent = 0
+        var early: [Data] = []
+        while sent < LineBuffer.maximumLineLength + 10 {
+            let take = min(megabyte.count, LineBuffer.maximumLineLength + 10 - sent)
+            early += buffer.append(megabyte.prefix(take))
+            sent += take
+        }
+        try #require(sent == LineBuffer.maximumLineLength + 10)
+        try #require(early.isEmpty, "nothing may come out before the newline")
+
+        let after = buffer.append(Data("tail\nnext\n".utf8))
+        #expect(after.map { String(decoding: $0, as: UTF8.self) } == ["next"])
+    }
+
+    @Test("Chunks that are slices of a larger buffer are read from their own bytes")
+    func slicedChunks() throws {
+        let backing = Data("xxone\ntwo\nyy".utf8)
+        let slice = backing[2..<11]
+        try #require(slice.startIndex == 2, "the chunk must not start at index zero")
+        #expect(lines(from: [slice]) == ["one", "two"])
+    }
 }
 
 @Suite("Adapter restart policy")

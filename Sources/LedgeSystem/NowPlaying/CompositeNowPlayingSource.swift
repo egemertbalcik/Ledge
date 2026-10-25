@@ -192,6 +192,9 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
         // back would be a cycle that outlives every source swap.
         (adapter as? any NowPlayingChangePublishing)?.onChange = { [weak self] in
             guard let self else { return }
+            // Who owns the slot may be exactly what changed. A recorded owner
+            // from before this cannot be stood behind, however recent.
+            self.systemOwner = nil
             // The cached scripted answer is about to be wrong too: a browser
             // taking over, or Spotify starting, changes who owns playback.
             self.rescriptUntil = max(self.rescriptUntil, self.now() + Self.rescriptBurst)
@@ -227,11 +230,10 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     private var systemOwner: (bundleID: String?, at: TimeInterval)?
 
     /// How recently the system must have been read for its answer to be worth
-    /// aiming an unaddressed command by.
+    /// aiming an unaddressed command by, when there is no held answer to ask.
     ///
-    /// The card is read every one to four seconds while it is up, so a reading
-    /// older than this means the media machinery is not running — and a guess
-    /// about who owns the slot is exactly what must not be acted on.
+    /// A source that can say what it holds is asked instead, every time — see
+    /// `systemOwnerBundleID`.
     public static let systemOwnerFreshness: TimeInterval = 10
 
     /// Which player the system considers now-playing, as last actually read —
@@ -246,8 +248,25 @@ public final class CompositeNowPlayingSource: NowPlayingSource, NowPlayingChange
     /// Nil means "not known", which covers nothing playing, no adapter, an
     /// adapter set aside, and a reading too old to stand behind.
     public var systemOwnerBundleID: String? {
-        guard let systemOwner, now() - systemOwner.at < Self.systemOwnerFreshness
-        else { return nil }
+        let now = now()
+        // The adapter's held answer first, whenever it can give one. It is
+        // what a read would return, and it is never older than the recorded
+        // one: a takeover the adapter has already heard about was overruled by
+        // a recording a second old, and Play went to the tab that had just
+        // taken the slot. And a recording only ten seconds old was refused
+        // outright, though a paused card is only read every fifteen — a third
+        // of the presses on a paused VLC, web or un-automated Spotify card did
+        // nothing. The held answer lapses on its own once the helper goes
+        // quiet.
+        //
+        // Not while the adapter is set aside: then it is the one source known
+        // to be wrong about who is playing, and only a fresh recording counts.
+        if !isDemoted, let held = adapter as? any SystemOwnerReporting {
+            let owner = held.heldSystemOwner
+            noteSystemOwner(owner, at: now)
+            return owner
+        }
+        guard let systemOwner, now - systemOwner.at < Self.systemOwnerFreshness else { return nil }
         return systemOwner.bundleID
     }
 

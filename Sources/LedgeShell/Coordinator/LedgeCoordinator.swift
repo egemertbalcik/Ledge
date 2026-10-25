@@ -901,6 +901,7 @@ public final class LedgeCoordinator {
             notesWindow.cancelPendingOpening()
             hoverTracker?.stop()
             hud.setDormant(true)
+            readoutHandBack.setDormant(true)
             Self.log.notice("screens dark — pointer and brightness polling paused")
         } else {
             hoverTracker?.start()
@@ -911,6 +912,9 @@ public final class LedgeCoordinator {
             let key = currentDisplayUnderCursor()
             hoverTracker?.resync(to: key)
             if state.isHovering != (key != nil) { send(.hoverChanged(key != nil)) }
+            // After the pointer is re-read: only a readout still held over a
+            // card under it is watched again.
+            readoutHandBack.setDormant(false)
             Self.log.notice("screens lit — polling resumed")
         }
     }
@@ -3351,6 +3355,7 @@ public final class LedgeCoordinator {
     /// simply dropping this object, so there has to be an explicit path — and
     /// something has to call it.
     public func stop() {
+        readoutHandBack.cancel()
         notesSelfTest?.cancel()
         notesSelfTest = nil
         calendarListRead?.cancel()
@@ -3511,6 +3516,9 @@ public final class LedgeCoordinator {
         // widens the entry region, and that entry cancels the HUD timer, so
         // the first path would never fire for it.
         let heldHUD = state.phase == .hud && state.isHovering && !isAdjustingHUD
+        // A readout held over a card is handed back as soon as the pointer is
+        // on the card; a new request retires whatever was watching the old one.
+        readoutHandBack.follow(event)
         switch event {
         case .timerFired(.hud) where heldHUD, .hoverChanged(true) where heldHUD:
             scheduleParkedHUDRelease()
@@ -4043,11 +4051,37 @@ public final class LedgeCoordinator {
     }
 
     /// The grown region of one display's overlay, for the sticky hit test.
+    ///
+    /// With a readout up in front of an open card, the card's region counts
+    /// too: the pointer resting on the card body has not left just because
+    /// the readout drawn over it is smaller. See `ReadoutOverCard`.
     private func openRegion(_ key: CGDirectDisplayID) -> CGRect? {
-        displayPanels.controller(for: key)?.shapeRect(
+        let drawn = displayPanels.controller(for: key)?.shapeRect(
             for: state.phase,
             hudHovered: state.phase == .hud && state.isHovering,
             hudExtraHeight: hudExtraHeight
+        )
+        return ReadoutOverCard.trackingRegion(readout: drawn, card: coveredCardRegion(key))
+    }
+
+    /// Where the card a readout is standing in front of would be drawn, on
+    /// the display that owns the hover. Nil unless the readout covers a card.
+    private func coveredCardRegion(_ key: CGDirectDisplayID? = nil) -> CGRect? {
+        guard ReadoutOverCard.coversCard(state), let card = state.suspended,
+              let key = key ?? presentation.hoveredDisplayID.map({ CGDirectDisplayID($0) })
+        else { return nil }
+        return displayPanels.controller(for: key)?.shapeRect(for: card)
+    }
+
+    /// Whether the pointer is on the covered card and off the readout — the
+    /// one place a held readout has no reason to stay.
+    private func readoutHandsCardBack() -> Bool {
+        guard let key = presentation.hoveredDisplayID.map({ CGDirectDisplayID($0) }) else { return false }
+        let readout = displayPanels.controller(for: key)?.shapeRect(
+            for: .hud, hudHovered: true, hudExtraHeight: hudExtraHeight
+        )
+        return ReadoutOverCard.handsCardBack(
+            pointer: NSEvent.mouseLocation, readout: readout, card: coveredCardRegion(key)
         )
     }
 
@@ -4126,12 +4160,19 @@ public final class LedgeCoordinator {
                 // back). One parked in the ear zone only became "inside" when
                 // the HUD grew under it — an artifact, not a hover: forget it,
                 // or the retire would settle straight into an unasked-for card.
+                //
+                // A pointer parked on the card the readout covers was a hover
+                // too — it was there before the key — and the card comes back.
+                // Judged against the closed notch alone, it was called an
+                // artifact and the card it was resting on was closed.
+                let pointer = NSEvent.mouseLocation
                 let genuine = DisplayHitTest.hit(
-                    point: NSEvent.mouseLocation,
+                    point: pointer,
                     current: nil as CGDirectDisplayID?,
                     currentOpenRegion: nil,
                     closedRegions: self.restingRegions()
                 ) != nil
+                    || ReadoutOverCard.restsOnCard(pointer: pointer, card: self.coveredCardRegion())
                 if !genuine {
                     self.hoverTracker?.resync(to: nil)
                     self.send(.hoverChanged(false))
@@ -4142,6 +4183,14 @@ public final class LedgeCoordinator {
         parkedHUDCheck = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: item)
     }
+
+    /// See `ReadoutHandBack`.
+    private lazy var readoutHandBack = ReadoutHandBack(
+        state: { [weak self] in self?.state ?? NotchState() },
+        isAdjusting: { [weak self] in self?.isAdjustingHUD ?? false },
+        handsBack: { [weak self] in self?.readoutHandsCardBack() ?? false },
+        release: { [weak self] in self?.send(.hudReleased) }
+    )
 
     private func setHUDDragging(_ dragging: Bool) {
         guard dragging != isAdjustingHUD else { return }
@@ -4345,12 +4394,16 @@ public final class LedgeCoordinator {
             ?? .simulated(screenSize: CGSize(width: 1470, height: 956))
 
         if let settingsWindow {
-            // Re-hosted only when the geometry actually changed, or when a
-            // caller asked for a pane: the Appearance sliders' bounds come
-            // from the display, but a rebuild also resets the view's @State —
-            // reopening must not snap the selected pane back to the first tab
-            // every time.
-            if lastSettingsGeometry != geometry || pane != nil {
+            // Re-hosted when the geometry actually changed, when a caller
+            // asked for a pane, or when closing took the content down: the
+            // Appearance sliders' bounds come from the display, but a rebuild
+            // also resets the view's @State — so it opens on the pane it was
+            // closed on, rather than snapping back to the first tab.
+            if Self.settingsNeedContent(
+                settingsWindow,
+                geometryChanged: lastSettingsGeometry != geometry,
+                paneRequested: pane != nil
+            ) {
                 lastSettingsGeometry = geometry
                 settingsWindow.contentView = NSHostingView(
                     rootView: SettingsView(
@@ -4358,7 +4411,7 @@ public final class LedgeCoordinator {
                         geometry: geometry,
                         actions: makeSettingsActions(),
                         model: settingsModel,
-                        startPane: pane
+                        startPane: pane ?? settingsModel.shownPane
                     )
                 )
             }
@@ -4383,7 +4436,47 @@ public final class LedgeCoordinator {
         )
         window.center()
         settingsWindow = window
+        settingsCloseToken = Self.releasingContentOnClose(window) { [weak self] in
+            // The Devices pane stops on its own `onDisappear` as the content
+            // goes; said again here so it cannot depend on SwiftUI's order.
+            self?.settingsModel.devices?.endWatching()
+        }
         present(window)
+    }
+
+    /// Kept for the life of the window, which is the life of the app.
+    private var settingsCloseToken: NSObjectProtocol?
+
+    /// Takes the settings content down when the window closes.
+    ///
+    /// The window is kept and only hidden, and a closed window does not make
+    /// SwiftUI's views disappear: `.task` loops run on and `onDisappear` never
+    /// fires. So after Settings had been opened once, the panes' two-second
+    /// permission re-read — tap probes, TCC reads, a code-signature check, an
+    /// Apple Event to Music every ten seconds — ran on the main thread until
+    /// quit, and the Devices pane reloaded its catalogue every five. Without
+    /// a hosting view there is nothing left to run; `showSettings` hosts a
+    /// fresh one on the pane it was closed on.
+    static func releasingContentOnClose(
+        _ window: NSWindow,
+        then closed: @escaping @MainActor () -> Void = {}
+    ) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak window] _ in
+            MainActor.assumeIsolated {
+                window?.contentView = nil
+                closed()
+            }
+        }
+    }
+
+    /// Whether the settings window needs its content built again before it
+    /// is shown. See `showSettings`.
+    static func settingsNeedContent(
+        _ window: NSWindow, geometryChanged: Bool, paneRequested: Bool
+    ) -> Bool {
+        window.contentView == nil || geometryChanged || paneRequested
     }
 
     /// The settings window, before anything is hosted in it.

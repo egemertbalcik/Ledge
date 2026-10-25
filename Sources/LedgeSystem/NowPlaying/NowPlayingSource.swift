@@ -211,6 +211,20 @@ public extension NowPlayingSource {
     func expectChange() {}
 }
 
+/// A source that can say, from what it already holds, which player the
+/// system is pointing at — without a read.
+///
+/// The adapter is the one that can: its helper reads MediaRemote every one to
+/// three seconds and writes a line whenever the answer changes, so what it
+/// holds is as current as anything a read could return. A read only asks it
+/// for that same answer.
+@MainActor
+public protocol SystemOwnerReporting: AnyObject {
+    /// The bundle the system considers now-playing. Nil means nobody, or not
+    /// known, which a command must treat the same way.
+    var heldSystemOwner: String? { get }
+}
+
 /// A source that can say when something changed, instead of waiting to be
 /// asked again.
 ///

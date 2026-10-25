@@ -11,20 +11,30 @@
 //
 // Deliberately plain Objective-C. It is injected into a process Apple ships, so
 // it must pull in nothing that is not already resident there — libSystem,
-// CoreFoundation and Foundation are; the Swift runtime is not.
+// CoreFoundation and Foundation are; the Swift runtime is not. ImageIO and
+// CoreGraphics come in through LedgeMediaAdapterKit to shrink artwork. perl
+// does not load those on its own, but they are Apple's frameworks from the same
+// shared cache: nothing of ours, and nothing that can clash with perl.
 //
-// Exactly one symbol is exported (see `-fvisibility=hidden` in Package.swift):
-// a stray export could collide with perl's own and crash someone else's process.
+// Exactly one symbol is exported (see `-fvisibility=hidden` and the export list
+// in Package.swift): a stray export could collide with perl's own and crash
+// someone else's process.
 
 #import <Foundation/Foundation.h>
-#import <CommonCrypto/CommonDigest.h>
 #import <dlfcn.h>
 #import <signal.h>
 #import "include/LedgeMediaAdapter.h"
+#import "LedgeMediaAdapterKit.h"
 
 #pragma mark - MediaRemote symbols
 
 typedef void (*MRGetNowPlayingInfo)(dispatch_queue_t, void (^)(NSDictionary *));
+/// `MRMediaRemoteGetNowPlayingInfo` is a wrapper over this with the artwork
+/// switched on: (origin, includeArtwork, queue, reply). Read from the
+/// disassembly on macOS 26.4, and confirmed by calling it with NULL and NO —
+/// the same dictionary comes back, with every key but the artwork bytes.
+typedef void (*MRGetNowPlayingInfoWithOptionalArtwork)(
+    void *, BOOL, dispatch_queue_t, void (^)(CFDictionaryRef, void *));
 typedef void (*MRGetIsPlaying)(dispatch_queue_t, void (^)(BOOL));
 typedef void (*MRGetClient)(dispatch_queue_t, void (^)(void *));
 typedef CFStringRef (*MRClientString)(void *);
@@ -33,6 +43,7 @@ typedef void (*MRRegisterNotifications)(dispatch_queue_t);
 
 static void *gMediaRemote;
 static MRGetNowPlayingInfo gGetInfo;
+static MRGetNowPlayingInfoWithOptionalArtwork gGetInfoWithoutArtwork;
 static MRGetIsPlaying gGetIsPlaying;
 static MRGetClient gGetClient;
 static MRClientString gClientBundleID;
@@ -44,7 +55,7 @@ static MRRegisterNotifications gRegister;
 /// Info-dictionary keys, resolved as *data* symbols: each is a pointer to an
 /// NSString, so it must be dereferenced rather than cast.
 static NSString *gKeyTitle, *gKeyArtist, *gKeyAlbum, *gKeyDuration, *gKeyElapsed,
-    *gKeyTimestamp, *gKeyRate, *gKeyUniqueID, *gKeyArtworkData, *gKeyArtworkMIME,
+    *gKeyTimestamp, *gKeyRate, *gKeyUniqueID, *gKeyArtworkData, *gKeyArtworkIdentifier,
     *gKeyMediaType,
     *gKeyIsAlwaysLive;
 static NSString *gNoteInfoChanged, *gNotePlayingChanged, *gNoteClientChanged;
@@ -68,6 +79,8 @@ static BOOL LoadMediaRemote(NSString **failure) {
 
     // Everything below is optional: the adapter degrades rather than failing if
     // a future macOS drops one.
+    gGetInfoWithoutArtwork = (MRGetNowPlayingInfoWithOptionalArtwork)dlsym(
+        gMediaRemote, "MRMediaRemoteGetNowPlayingInfoWithOptionalArtwork");
     gGetIsPlaying = (MRGetIsPlaying)dlsym(gMediaRemote, "MRMediaRemoteGetNowPlayingApplicationIsPlaying");
     gGetClient = (MRGetClient)dlsym(gMediaRemote, "MRMediaRemoteGetNowPlayingClient");
     gClientBundleID = (MRClientString)dlsym(gMediaRemote, "MRNowPlayingClientGetBundleIdentifier");
@@ -85,7 +98,10 @@ static BOOL LoadMediaRemote(NSString **failure) {
     gKeyRate = MRStringSymbol("kMRMediaRemoteNowPlayingInfoPlaybackRate");
     gKeyUniqueID = MRStringSymbol("kMRMediaRemoteNowPlayingInfoUniqueIdentifier");
     gKeyArtworkData = MRStringSymbol("kMRMediaRemoteNowPlayingInfoArtworkData");
-    gKeyArtworkMIME = MRStringSymbol("kMRMediaRemoteNowPlayingInfoArtworkMIMEType");
+    // The system's own name for the image, present even when the bytes were
+    // not asked for. Only ever used to decide whether to ask for them; the id
+    // Ledge sees is still the digest of the bytes themselves.
+    gKeyArtworkIdentifier = MRStringSymbol("kMRMediaRemoteNowPlayingInfoArtworkIdentifier");
     // Audio or video, straight from the system. It is the only honest way to
     // tell an album from a film — durations and bundle ids are guesswork.
     gKeyMediaType = MRStringSymbol("kMRMediaRemoteNowPlayingInfoMediaType");
@@ -102,15 +118,17 @@ static BOOL LoadMediaRemote(NSString **failure) {
 #pragma mark - Output
 
 static BOOL gIncludeArtwork = YES;
-static NSString *gLastArtworkID = nil;
 
-static void EmitLine(NSDictionary *object) {
-    NSError *error = nil;
-    NSData *json = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
-    if (!json) { return; }
-    fwrite(json.bytes, 1, json.length, stdout);
-    fputc('\n', stdout);
+/// Writes one line, and says whether it went. A line the JSON writer refuses
+/// is dropped rather than allowed to raise: uncaught, that exception aborted
+/// perl, and a player that kept publishing the same bad number killed every
+/// restart until Ledge stopped trying.
+static BOOL EmitLine(NSDictionary *object) {
+    NSData *line = ledge_json_line(object);
+    if (!line) { return NO; }
+    fwrite(line.bytes, 1, line.length, stdout);
     fflush(stdout);
+    return YES;
 }
 
 static double NumberOrZero(id value);
@@ -161,25 +179,97 @@ static BOOL IsNews(NSDictionary *payload) {
     return fabs(is - expected) > 2.5;
 }
 
+#pragma mark - Artwork
+
+/// The artwork the latest reading shows, by the digest of its source bytes.
+static NSString *gArtworkID = nil;
+/// Its bytes, ready for the pipe, until they have been sent. Nil once they
+/// have, or when they never need to be.
+static NSData *gArtworkBytes = nil;
+static NSString *gArtworkMIME = nil;
+
+/// Artwork ids already sent, newest first.
+///
+/// One id used to be enough: a song has one cover. A video in Safari has two,
+/// a frame and a poster, and Safari flips between them for as long as the
+/// video plays. Remembering only the last meant every flip back resent an
+/// image Ledge already had — five megabytes, every few seconds.
+static NSArray<NSString *> *gSentArtwork = nil;
+
+/// An image ImageIO could not read, so it is not decoded again on every poll.
+static NSString *gUnreadableArtworkID = nil;
+
+/// What the last read *with* artwork found, so the polls between can tell
+/// whether they need the bytes again (`ledge_artwork_needs_full_read`).
+static NSString *gHeldSystemArtworkID = nil;
+static NSString *gHeldTrackKey = nil;
+static NSTimeInterval gHeldArtworkSince = 0;
+
+/// Backstops for a player that changes its image without saying so. With a
+/// system identifier to watch, the bytes are re-read every ten seconds; with
+/// none, every three.
+static const NSTimeInterval kArtworkRefreshWithSystemID = 10;
+static const NSTimeInterval kArtworkRefreshWithoutSystemID = 3;
+
+/// Takes in the artwork of a reading that asked for it.
+///
+/// The bytes are only shrunk for an id that has not been sent yet, so a
+/// video's two images cost one hash per poll, not a decode.
+static void TakeArtwork(NSData *art) {
+    if (![art isKindOfClass:[NSData class]] || art.length == 0 || art.length >= 4 * 1024 * 1024) {
+        gArtworkID = nil;
+        gArtworkBytes = nil;
+        return;
+    }
+    NSString *identifier = ledge_artwork_identifier(art);
+    if ([identifier isEqualToString:gArtworkID]) { return; }
+    if ([identifier isEqualToString:gUnreadableArtworkID]) {
+        gArtworkID = nil;
+        gArtworkBytes = nil;
+        return;
+    }
+
+    gArtworkID = identifier;
+    gArtworkBytes = nil;
+    gArtworkMIME = nil;
+    if (!gIncludeArtwork || [gSentArtwork containsObject:identifier]) { return; }
+
+    // A browser's video artwork is the current frame as an uncompressed TIFF
+    // of two to three megabytes, labelled image/jpeg. As base64 that was a
+    // five-megabyte line, for an image the card shows at thumbnail size.
+    NSString *mime = nil;
+    NSData *small = ledge_artwork_for_pipe(art, LedgeArtworkMaximumPixels, &mime);
+    if (!small) {
+        gUnreadableArtworkID = identifier;
+        gArtworkID = nil;
+        return;
+    }
+    gArtworkBytes = small;
+    gArtworkMIME = mime;
+}
+
 /// Emits only when something changed. The poll below runs every second or two;
 /// without this it would push a line — and, on a track change, a cover — down
 /// the pipe on every tick.
 static void EmitIfNews(NSDictionary *payload) {
     if (!IsNews(payload)) { return; }
+    // Recorded only once it is really out: a dropped line that counted as
+    // sent would leave Ledge waiting for news the adapter believes it gave.
+    if (!EmitLine(payload)) { return; }
     gLastSent = payload;
-    EmitLine(payload);
+
+    NSString *identifier = payload[@"artworkID"];
+    if (identifier) {
+        gSentArtwork = ledge_artwork_remember(gSentArtwork ?: @[], identifier, LedgeArtworkRecentCapacity);
+        if (payload[@"artwork"]) { gArtworkBytes = nil; }
+    }
 }
 
-static NSString *SHA256Prefix(NSData *data) {
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-    NSMutableString *hex = [NSMutableString stringWithCapacity:16];
-    for (int i = 0; i < 8; i++) { [hex appendFormat:@"%02x", digest[i]]; }
-    return hex;
-}
-
+/// Finite, always — see `ledge_finite_or_zero`. Every number in a payload
+/// comes through here, so none of them can reach the JSON writer as NaN or
+/// infinity.
 static double NumberOrZero(id value) {
-    return [value isKindOfClass:[NSNumber class]] ? [value doubleValue] : 0;
+    return ledge_finite_or_zero(value);
 }
 
 /// Builds one payload line from the three async answers.
@@ -209,6 +299,11 @@ static NSDictionary *BuildPayload(NSDictionary *info, BOOL playing, NSDictionary
     }
     if (gKeyIsAlwaysLive && info[gKeyIsAlwaysLive]) {
         out[@"live"] = @([info[gKeyIsAlwaysLive] boolValue]);
+    } else if (gKeyDuration && ledge_is_endless(info[gKeyDuration])) {
+        // Chromium's way of saying the same thing: a live stream's duration
+        // is +infinity. The number itself goes out as 0, "no duration", and
+        // this keeps a paused stream from growing a scrub bar it cannot use.
+        out[@"live"] = @YES;
     }
     if (gKeyMediaType && info[gKeyMediaType]) {
         // The values read kMRMediaRemoteNowPlayingInfoTypeAudio / …TypeVideo;
@@ -229,30 +324,41 @@ static NSDictionary *BuildPayload(NSDictionary *info, BOOL playing, NSDictionary
     // moving between updates.
     if (gKeyTimestamp) {
         id stamp = info[gKeyTimestamp];
-        if ([stamp isKindOfClass:[NSDate class]]) {
-            out[@"elapsedAt"] = @([(NSDate *)stamp timeIntervalSince1970]);
-        }
+        double at = [stamp isKindOfClass:[NSDate class]] ? [(NSDate *)stamp timeIntervalSince1970] : NAN;
+        if (isfinite(at)) { out[@"elapsedAt"] = @(at); }
     }
 
     if (client) [out addEntriesFromDictionary:client];
 
-    if (gKeyArtworkData) {
-        NSData *art = info[gKeyArtworkData];
-        if ([art isKindOfClass:[NSData class]] && art.length > 0 && art.length < 4 * 1024 * 1024) {
-            NSString *identifier = SHA256Prefix(art);
-            out[@"artworkID"] = identifier;
-            if (gKeyArtworkMIME && info[gKeyArtworkMIME]) {
-                out[@"artworkMIME"] = info[gKeyArtworkMIME];
-            }
-            // Cover art is hundreds of kilobytes. Sending it on every update
-            // would be absurd; once per track is free.
-            if (gIncludeArtwork && ![identifier isEqualToString:gLastArtworkID]) {
-                out[@"artwork"] = [art base64EncodedStringWithOptions:0];
-                gLastArtworkID = identifier;
-            }
+    // The bytes ride only on the first line that names an id; every later
+    // line names it alone, and Ledge fills it from the covers it holds. The
+    // MIME type travels with the bytes, because it describes them.
+    if (gArtworkID) {
+        out[@"artworkID"] = gArtworkID;
+        if (gArtworkBytes) {
+            out[@"artwork"] = [gArtworkBytes base64EncodedStringWithOptions:0];
+            if (gArtworkMIME) { out[@"artworkMIME"] = gArtworkMIME; }
         }
     }
     return out;
+}
+
+/// The keys that name the item, for `ledge_artwork_same_item`. Only those
+/// this macOS resolved.
+static NSArray<NSString *> *IdentityKeys(void) {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    for (NSString *key in @[ gKeyUniqueID ?: @"", gKeyTitle ?: @"", gKeyArtist ?: @"", gKeyAlbum ?: @"" ]) {
+        if (key.length > 0) { [keys addObject:key]; }
+    }
+    return keys;
+}
+
+/// What identifies the item, for `ledge_artwork_needs_full_read`.
+static NSString *TrackKey(NSDictionary *info, NSDictionary *client) {
+    return [NSString stringWithFormat:@"%@|%@|%@|%@",
+            (gKeyUniqueID ? info[gKeyUniqueID] : nil) ?: @"",
+            (gKeyTitle ? info[gKeyTitle] : nil) ?: @"",
+            client[@"bundleID"] ?: @"", client[@"parentBundleID"] ?: @""];
 }
 
 #pragma mark - Reading
@@ -269,8 +375,66 @@ static dispatch_queue_t gQueue;
 /// here instead, and the wait completes in milliseconds.
 static dispatch_queue_t gReplyQueue;
 
+/// Asks for the now-playing dictionary, with or without the artwork bytes.
+/// `reply` runs on the reply queue.
+static void ReadInfo(BOOL withArtwork, void (^reply)(NSDictionary *)) {
+    if (!withArtwork && gGetInfoWithoutArtwork) {
+        gGetInfoWithoutArtwork(NULL, NO, gReplyQueue, ^(CFDictionaryRef result, void *unused) {
+            reply([(__bridge NSDictionary *)result copy]);
+        });
+    } else {
+        gGetInfo(gReplyQueue, ^(NSDictionary *result) { reply([result copy]); });
+    }
+}
+
+/// The second, artwork-carrying read, when the first one says it is needed.
+/// Returns NO if MediaRemote did not answer in time, or answered about a
+/// different item. Nothing held is updated then, so the next poll asks again.
+static BOOL ReadArtwork(NSDictionary *info, NSDictionary *client) {
+    NSString *systemID = gKeyArtworkIdentifier ? info[gKeyArtworkIdentifier] : nil;
+    if (![systemID isKindOfClass:[NSString class]]) { systemID = nil; }
+    NSString *trackKey = TrackKey(info, client);
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (!ledge_artwork_needs_full_read(
+            systemID, gHeldSystemArtworkID, trackKey, gHeldTrackKey, gArtworkID != nil,
+            now, gHeldArtworkSince, kArtworkRefreshWithSystemID, kArtworkRefreshWithoutSystemID)) {
+        return YES;
+    }
+
+    dispatch_group_t group = dispatch_group_create();
+    __block NSDictionary *full = nil;
+    dispatch_group_enter(group);
+    ReadInfo(YES, ^(NSDictionary *result) {
+        full = result;
+        dispatch_group_leave(group);
+    });
+    // As in Refresh: after a timeout the late reply may still be writing
+    // `full`, so it is not read.
+    if (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) != 0) {
+        return NO;
+    }
+    // The player can move on between the two reads. Bytes from a reply about
+    // another item are not this item's cover, and must not be remembered as
+    // it: withheld, and the next poll asks again.
+    if (!ledge_artwork_same_item(info, full, IdentityKeys(), gKeyArtworkIdentifier)) {
+        return NO;
+    }
+    TakeArtwork(gKeyArtworkData ? full[gKeyArtworkData] : nil);
+    gHeldSystemArtworkID = systemID;
+    gHeldTrackKey = trackKey;
+    gHeldArtworkSince = now;
+    return YES;
+}
+
 /// Fans the three getters out together and joins with a deadline, so one
 /// unanswered callback cannot wedge the helper.
+///
+/// The dictionary is read without its artwork whenever this macOS allows it.
+/// A browser's video frame is megabytes of TIFF, and asking for it on every
+/// one-second poll made `mediaremoted` serialise it, and this helper receive
+/// and hash it, once a second for as long as the video played. The bytes are
+/// asked for separately, and only when `ReadArtwork` says they may have
+/// changed.
 static void Refresh(void) {
     dispatch_group_t group = dispatch_group_create();
     __block NSDictionary *info = nil;
@@ -278,8 +442,8 @@ static void Refresh(void) {
     __block NSMutableDictionary *client = nil;
 
     dispatch_group_enter(group);
-    gGetInfo(gReplyQueue, ^(NSDictionary *result) {
-        info = [result copy];
+    ReadInfo(NO, ^(NSDictionary *result) {
+        info = result;
         dispatch_group_leave(group);
     });
 
@@ -318,6 +482,18 @@ static void Refresh(void) {
     if (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 1500 * NSEC_PER_MSEC)) != 0) {
         EmitIfNews(BuildPayload(nil, NO, nil));
         return;
+    }
+
+    BOOL loaded = info.count > 0 && !(gKeyTitle && !info[gKeyTitle]);
+    if (!gGetInfoWithoutArtwork) {
+        // Nothing to ask separately: the bytes came with the reading.
+        TakeArtwork(gKeyArtworkData ? info[gKeyArtworkData] : nil);
+    } else if (loaded && !ReadArtwork(info, client)) {
+        // The metadata is good; the image could not be confirmed. Say
+        // nothing about artwork rather than vouch for one that may be stale —
+        // Ledge keeps the cover it holds while the track is the same.
+        gArtworkID = nil;
+        gArtworkBytes = nil;
     }
     EmitIfNews(BuildPayload(info, playing, client));
 }
@@ -486,7 +662,10 @@ void ledge_media_adapter_main(void) {
         EmitLine(@{ @"adapter": @1, @"ok": @YES, @"kind": @"observers",
                     @"count": @(installed) });
 
-        Refresh();
+        // On the queue every later refresh runs on, so the first one cannot
+        // overlap a poll or a debounced refresh that is already armed — they
+        // share the artwork and last-sent state, which nothing else guards.
+        dispatch_async(gQueue, ^{ Refresh(); });
         CFRunLoopRun();
     }
 }

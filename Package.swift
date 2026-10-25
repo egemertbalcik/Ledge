@@ -90,8 +90,31 @@ let package = Package(
         // Swift dylib would additionally load the Swift runtime inside perl.
         .target(
             name: "LedgeMediaAdapter",
+            dependencies: ["LedgeMediaAdapterKit"],
             cSettings: [.unsafeFlags(["-fvisibility=hidden"])],
-            linkerSettings: [.linkedFramework("Foundation")]
+            linkerSettings: [
+                .linkedFramework("Foundation"),
+                // The kit below is linked in and cannot be hidden at compile
+                // time: the universal release build pre-links each target with
+                // `ld -r`, which turns hidden symbols local, and the dylib then
+                // fails to link. So the export list is enforced here instead,
+                // where it holds for every build.
+                .unsafeFlags(["-Xlinker", "-exported_symbol", "-Xlinker", "_ledge_media_adapter_main"]),
+            ]
+        ),
+
+        // What the adapter decides about artwork — how small to make it, which
+        // ids it has already sent, when to ask for the bytes at all — as plain
+        // functions, so they can be tested without perl or a player. Linked
+        // into the adapter statically; the adapter's export list keeps them
+        // out of the dylib's symbol table.
+        .target(
+            name: "LedgeMediaAdapterKit",
+            linkerSettings: [
+                .linkedFramework("Foundation"),
+                .linkedFramework("ImageIO"),
+                .linkedFramework("CoreGraphics"),
+            ]
         ),
 
         .testTarget(name: "LedgeCoreTests", dependencies: ["LedgeCore"]),
@@ -101,6 +124,7 @@ let package = Package(
         ),
         .testTarget(name: "LedgeSystemTests", dependencies: ["LedgeSystem", "LedgeCore"]),
         .testTarget(name: "LedgeHelperKitTests", dependencies: ["LedgeHelperKit"]),
+        .testTarget(name: "LedgeMediaAdapterKitTests", dependencies: ["LedgeMediaAdapterKit"]),
         .testTarget(name: "LedgeKeepAwakeHelperTests", dependencies: ["LedgeKeepAwakeHelper"]),
         .testTarget(name: "LedgeUITests", dependencies: ["LedgeUI", "LedgeCore"]),
         .testTarget(name: "LedgeShellTests", dependencies: ["LedgeShell", "LedgeCore", "LedgeProviders", "LedgeUI"]),
