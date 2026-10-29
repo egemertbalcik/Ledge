@@ -74,4 +74,34 @@ public enum DurationDial {
         case (let h, let m): return h == 1 ? "1 hr \(m) min" : "\(h) hr \(m) min"
         }
     }
+
+    /// What a scroll of whole minutes does to the rule.
+    public struct Scroll: Equatable, Sendable {
+        /// A glide from the last flick is still running, and the scroll stops
+        /// it, the way a touch catches a moving rule.
+        public let catchesGlide: Bool
+        /// Where the value lands, or nil when it does not move: the rule is
+        /// being dragged, or it is already at the end being scrolled toward.
+        public let landed: Int?
+
+        public init(catchesGlide: Bool, landed: Int?) {
+            self.catchesGlide = catchesGlide
+            self.landed = landed
+        }
+    }
+
+    /// A scroll on the rule.
+    ///
+    /// - Parameters:
+    ///   - minutes: the value now.
+    ///   - steps: whole minutes scrolled, positive for more.
+    ///   - dragging: a drag holds the rule — a press, or a glide it let go.
+    ///   - gliding: what holds it is a glide, not a hand.
+    public static func scroll(_ minutes: Int, by steps: Int, dragging: Bool, gliding: Bool) -> Scroll {
+        // A hand on the rule has it; a wheel turned under a held button must
+        // not pull it from under the hand. A glide is not a hand.
+        if dragging, !gliding { return Scroll(catchesGlide: false, landed: nil) }
+        let landed = clamp(minutes + steps)
+        return Scroll(catchesGlide: gliding, landed: landed == minutes ? nil : landed)
+    }
 }

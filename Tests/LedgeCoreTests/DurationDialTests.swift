@@ -69,3 +69,35 @@ struct DurationDialTests {
         #expect(DurationDial.clamp(25) == 25)
     }
 }
+
+/// Scrolling the rule a whole minute at a time.
+@Suite("Scrolling the timer's rule")
+struct DurationDialScrollTests {
+
+    @Test("A scroll moves the value by its minutes, more for positive")
+    func moves() {
+        #expect(DurationDial.scroll(25, by: 3, dragging: false, gliding: false)
+                == .init(catchesGlide: false, landed: 28))
+        #expect(DurationDial.scroll(25, by: -2, dragging: false, gliding: false).landed == 23)
+    }
+
+    @Test("A scroll stops at either end, and past it moves nothing")
+    func clamps() {
+        #expect(DurationDial.scroll(178, by: 5, dragging: false, gliding: false).landed == 180)
+        #expect(DurationDial.scroll(180, by: 1, dragging: false, gliding: false).landed == nil,
+                "no change, so no tick under the finger")
+        #expect(DurationDial.scroll(1, by: -1, dragging: false, gliding: false).landed == nil)
+    }
+
+    @Test("A hand dragging the rule keeps it")
+    func dragWins() {
+        #expect(DurationDial.scroll(25, by: 3, dragging: true, gliding: false)
+                == .init(catchesGlide: false, landed: nil))
+    }
+
+    @Test("A scroll catches a glide, then moves from where it caught it")
+    func catchesGlide() {
+        #expect(DurationDial.scroll(40, by: 1, dragging: true, gliding: true)
+                == .init(catchesGlide: true, landed: 41))
+    }
+}

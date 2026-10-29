@@ -161,14 +161,14 @@ struct SelfViewRunnerTests {
         #expect(h.published.value.last?.sentence == SelfViewCopy.waking)
     }
 
-    @Test("Five seconds without a frame gives up, and lets the camera go first")
+    @Test("Ten seconds without a frame gives up, and lets the camera go first")
     func givesUp() {
         let h = make()
         h.runner.press(now: 0)
-        h.runner.tick(now: 4.9)
+        h.runner.tick(now: 9.9)
         #expect(h.runner.phase == .waking)
 
-        h.runner.tick(now: 5)
+        h.runner.tick(now: 10)
         #expect(h.runner.phase == .failed)
         #expect(h.camera.stops == 1, "the light is out before the card says it never started")
         #expect(h.holds.value == [true, false], "nothing is running, so nothing is held")
@@ -179,16 +179,16 @@ struct SelfViewRunnerTests {
     func tryAgain() {
         let h = make()
         h.runner.press(now: 0)
-        h.runner.tick(now: 5)
+        h.runner.tick(now: 10)
         #expect(h.runner.phase == .failed)
 
-        h.runner.tryAgain(now: 10)
+        h.runner.tryAgain(now: 20)
         #expect(h.runner.phase == .waking)
         #expect(h.camera.starts == 2)
-        // The five seconds start again from here, not from the first press.
-        h.runner.tick(now: 14.9)
+        // The ten seconds start again from here, not from the first press.
+        h.runner.tick(now: 29.9)
         #expect(h.runner.phase == .waking)
-        h.runner.tick(now: 15)
+        h.runner.tick(now: 30)
         #expect(h.runner.phase == .failed)
     }
 

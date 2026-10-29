@@ -190,7 +190,7 @@ final class CountingCalendarSource: CalendarSource {
         return await inner.eventDays(monthOffset: monthOffset, hiding: hidden)
     }
 
-    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?, end: Date?)]] {
         monthQueries += 1
         return await inner.events(monthOffset: monthOffset, hiding: hidden)
     }
@@ -266,6 +266,32 @@ struct CalendarProviderTests {
         // The plan owns the card's lifetime; an expiry timer racing it would
         // drop the card mid-meeting.
         #expect(activity.expiresAfter == nil)
+    }
+
+    @Test("Each listed event carries its end, and an all-day one carries none")
+    func entriesCarryTheirEnd() async {
+        let start = Date().addingTimeInterval(10 * 60)
+        let end = start.addingTimeInterval(1800)
+        let source = StubCalendarSource(events: [
+            EventSnapshot(title: "Standup", start: start, end: end, eventKey: "standup"),
+            EventSnapshot(
+                title: "Holiday", start: start, end: start.addingTimeInterval(86_400),
+                isAllDay: true, eventKey: "holiday"
+            ),
+        ])
+        let provider = CalendarProvider(source: source)
+
+        let events = await collect(provider) {}
+
+        guard case .publish(let activity)? = events.first,
+              case .event(let payload) = activity.payload else {
+            Issue.record("expected an event payload")
+            return
+        }
+        let entries = payload.monthEvents.flatMap(\.entries)
+        #expect(entries.first { $0.title == "Standup" }?.ends == end)
+        #expect(entries.contains { $0.title == "Holiday" })
+        #expect(entries.first { $0.title == "Holiday" }?.ends == nil)
     }
 
     @Test("Nothing is published without authorization")

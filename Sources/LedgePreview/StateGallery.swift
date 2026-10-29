@@ -413,7 +413,7 @@ enum StateGallery {
             presentation.count = 3
             presentation.selfView = SelfViewPayload(phase: .noCamera)
         },
-        /// Five seconds and no frame. The session is already stopped when this is drawn.
+        /// Ten seconds and no frame. The session is already stopped when this is drawn.
         State(name: "card-calendar-failed") { presentation in
             presentation.phase = .expanded
             presentation.selected = PreviewFixtures.event

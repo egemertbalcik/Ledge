@@ -243,8 +243,15 @@ public struct TimerCardView: View {
             guard isRulerOpen else { return }
             setRuler(open: false)
         }
+        // A rule shut from under the pointer is never told the pointer left
+        // it, and would go on holding the scrolling: every sideways stroke on
+        // that spot would move a rule nobody can see instead of the cards.
+        .onChange(of: isRulerOpen) { _, open in
+            if !open { actions.claimScroll(nil) }
+        }
         .onDisappear {
             isRulerOpen = false
+            actions.claimScroll(nil)
             scrubAnchor = nil
             // Marks the card gone *before* releasing, so a teardown from the
             // rule arriving afterwards is refused rather than re-latching.
@@ -278,7 +285,8 @@ public struct TimerCardView: View {
                 setDragging: { dragging in
                     setRulerDragging(dragging)
                 },
-                haptic: actions.haptic
+                haptic: actions.haptic,
+                claimScroll: actions.claimScroll
             )
         }
         .frame(height: isRulerOpen ? DurationDialView.height + 8 : 0, alignment: .top)
@@ -1019,6 +1027,12 @@ public struct TimerActions {
     public var stopwatchLap: () -> Void
     public var stopwatchReset: () -> Void
 
+    /// Takes the notch's scrolling for the open rule while the pointer is on
+    /// it — whole minutes, positive for more — and, with nil, gives it back.
+    /// While it is held a sideways stroke on the rule moves the rule rather
+    /// than the cards.
+    public var claimScroll: (((Int) -> Void)?) -> Void
+
     public init(
         toggle: @escaping () -> Void = {},
         cancel: @escaping () -> Void = {},
@@ -1031,13 +1045,15 @@ public struct TimerActions {
         dismissFinished: @escaping () -> Void = {},
         stopwatchToggle: @escaping () -> Void = {},
         stopwatchLap: @escaping () -> Void = {},
-        stopwatchReset: @escaping () -> Void = {}
+        stopwatchReset: @escaping () -> Void = {},
+        claimScroll: @escaping (((Int) -> Void)?) -> Void = { _ in }
     ) {
         self.setDragging = setDragging
         self.dismissFinished = dismissFinished
         self.stopwatchToggle = stopwatchToggle
         self.stopwatchLap = stopwatchLap
         self.stopwatchReset = stopwatchReset
+        self.claimScroll = claimScroll
         self.toggle = toggle
         self.cancel = cancel
         self.skip = skip

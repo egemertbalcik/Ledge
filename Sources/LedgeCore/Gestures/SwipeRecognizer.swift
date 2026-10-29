@@ -67,7 +67,7 @@ public struct SwipeRecognizer: Equatable, Sendable {
     public var threshold: Double
 
     /// Follows the system's "natural" scrolling setting. When true, content
-    /// moves with the fingers, so a physical swipe left reports positive dx.
+    /// moves with the fingers, so a physical swipe right reports positive dx.
     public var isNatural: Bool
 
     /// A gesture is considered over after this long with no events, for mice

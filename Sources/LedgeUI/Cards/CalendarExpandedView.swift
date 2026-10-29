@@ -40,6 +40,12 @@ public struct CalendarExpandedView: View {
     /// Which event row the cursor is on, for its doorway chevron.
     @State private var hoveredEntry: String?
 
+    /// How many of today's events have ended while the card was open. Read
+    /// only so the card draws again when one does: the provider can go hours
+    /// between publishes on a quiet day, and a meeting that ended at ten must
+    /// not still be listed at eleven because nothing else changed.
+    @State private var endsPassed = 0
+
     /// What the self-view is doing. `.off` is the card as it has always been:
     /// no frame, and a segment beside Join that nobody has pressed.
     private let selfView: SelfViewPayload
@@ -92,7 +98,18 @@ public struct CalendarExpandedView: View {
         let days = monthOffset == 0 && shownWindow == nil
             ? Set(payload.monthEventDays)
             : Set(shownWindow?.eventDays ?? [])
+        // Today keeps its dot after its last event ends: the dot says the day
+        // had something on it, and today's list is what says what is left.
         return MonthGrid.make(containing: shownMonth, eventDays: days)
+    }
+
+    /// Today's day of the month.
+    private var todayNumber: Int { Calendar.current.component(.day, from: now) }
+
+    /// Everything on today, over or not. Nil when the payload has no list
+    /// for today at all, which is not the same as an empty day.
+    private var todaysEntries: [MonthDayEntry]? {
+        events(at: 0).first { $0.day == todayNumber }?.entries
     }
 
     private func month(at offset: Int) -> Date {
@@ -165,6 +182,7 @@ public struct CalendarExpandedView: View {
 
     public var body: some View {
         let grid = grid
+        let clock = TodayClock(nextEnd: nextChangeToday, endsPassed: endsPassed)
         HStack(alignment: .top, spacing: 12) {
             // Sized against the 300pt card. Narrowed from 160 with the owner's
             // approval: nothing in this column is that wide, so the spare
@@ -206,6 +224,26 @@ public struct CalendarExpandedView: View {
         // show — browsing is this view's own state. So it says.
         .onAppear { onWeekRows(grid.weeks.count) }
         .onChange(of: grid.weeks.count) { _, rows in onWeekRows(rows) }
+        // Wakes when the next of today's events ends and draws the card
+        // again, which takes that event off today's list — and at midnight,
+        // when today becomes yesterday and is listed whole again. Keyed on the end and on the count,
+        // so each wake schedules the one after it. Never for a pinned clock:
+        // a gallery card's "now" does not move, and waiting on it would wake
+        // straight away, forever.
+        //
+        // The end is the one this drawing was made with, not read again when
+        // the task starts: a task that starts late, after that end has
+        // passed, would read the *next* change instead — midnight — and
+        // leave the finished meeting listed until then.
+        .task(id: clock) {
+            guard fixedNow == nil, let end = clock.nextEnd else { return }
+            // A beat past the end, so the card is drawn after it rather than
+            // on its very edge, where it would still count as running.
+            let wait = max(0, end.timeIntervalSinceNow) + 0.5
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled else { return }
+            endsPassed += 1
+        }
         // Swiped to another card, or the notch collapsed under it: either way
         // this card is not on screen to hold a camera open.
         .onDisappear { selfViewActions.cardWentAway() }
@@ -222,6 +260,23 @@ public struct CalendarExpandedView: View {
         .onAppear {
             if meetingToJoin == nil, selfView.phase.showsFrame { selfViewActions.letGo() }
         }
+    }
+
+    /// When today's list next changes: the next of its events to end, or
+    /// midnight, whichever comes first. Midnight always comes, so a card left
+    /// open after the day's last event does not keep saying "That's it for
+    /// today" about a day that has gone.
+    private var nextChangeToday: Date? {
+        let midnight = Calendar.current.date(
+            byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: now)
+        )
+        let end = CalendarToday.nextEnd(of: todaysEntries ?? [], after: now)
+        return [end, midnight].compactMap { $0 }.min()
+    }
+
+    private struct TodayClock: Equatable {
+        var nextEnd: Date?
+        var endsPassed: Int
     }
 
     // MARK: - Left
@@ -242,8 +297,15 @@ public struct CalendarExpandedView: View {
     /// nothing else did, because this column only ever rendered the *next*
     /// event. The selection had no reader.
     private func selectedDayColumn(_ grid: MonthGrid, today: MonthGrid, day: Int) -> some View {
-        let entries = events(at: selectedOffset).first { $0.day == day }?.entries ?? []
         let isToday = selectedOffset == 0 && day == today.todayDay
+        let all = events(at: selectedOffset).first { $0.day == day }?.entries ?? []
+        // Today lists only what is still to come. Any other day is listed
+        // whole, as it looked when it began: tapping last Monday is asking
+        // what happened on it.
+        let entries = isToday ? CalendarToday.remaining(all, at: now) : all
+        // A day that had events and has none left is not a clear day, and
+        // saying so would contradict the morning the user just had.
+        let isOverForToday = isToday && !all.isEmpty && entries.isEmpty
         // The month is worth naming only when the grid is looking at a
         // different one — beside a grid already titled AUGUST it would just be
         // the word twice.
@@ -308,10 +370,12 @@ public struct CalendarExpandedView: View {
             Spacer().frame(height: 8)
 
             if entries.isEmpty {
-                Text("No events")
+                Text(isOverForToday ? "No more events" : "No events")
                     .font(.cardControl)
                     .foregroundStyle(.white)
-                Text("This day is clear")
+                // Short enough for the 126pt column on one line, like the
+                // sentence it stands in for.
+                Text(isOverForToday ? "That's it for today" : "This day is clear")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.55))
             } else {

@@ -78,7 +78,7 @@ public protocol CalendarSource: AnyObject {
 
     /// Every event in a month, grouped by day, so tapping a day in the grid can
     /// say what is on it. Titles and times only — the grid never needs more.
-    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]]
+    func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?, end: Date?)]]
 
     /// The event calendars that exist, for Settings to list. Empty without
     /// the grant.
@@ -174,7 +174,7 @@ public final class EventKitCalendarSource: CalendarSource {
         }
     }
 
-    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?, end: Date?)]] {
         guard isAuthorized else { return [:] }
         return await query { store in
             let calendar = Calendar.current
@@ -195,7 +195,7 @@ public final class EventKitCalendarSource: CalendarSource {
             ) else { return [:] }
             var byDay: [Int: [
                 (start: Date, isAllDay: Bool, title: String, time: String,
-                 eventID: String, occurrence: Date?)
+                 eventID: String, occurrence: Date?, end: Date?)
             ]] = [:]
             for event in store.events(matching: predicate) where event.status != .canceled && !Self.isDeclined(event) {
                 guard let start = event.startDate else { continue }
@@ -218,7 +218,10 @@ public final class EventKitCalendarSource: CalendarSource {
                         // needs the instance's own start to land on the right
                         // day; an event that happens once already has a link
                         // that works, and keeps it.
-                        occurrence: event.hasRecurrenceRules ? start : nil
+                        occurrence: event.hasRecurrenceRules ? start : nil,
+                        // An all-day event belongs to the whole day, however
+                        // EventKit spells its end, so it is given none.
+                        end: event.isAllDay ? nil : event.endDate
                     ))
                 }
             }
@@ -232,7 +235,10 @@ public final class EventKitCalendarSource: CalendarSource {
                         if a.isAllDay != b.isAllDay { return a.isAllDay }
                         return a.start < b.start
                     }
-                    .map { (title: $0.title, time: $0.time, eventID: $0.eventID, occurrence: $0.occurrence) }
+                    .map {
+                        (title: $0.title, time: $0.time, eventID: $0.eventID,
+                         occurrence: $0.occurrence, end: $0.end)
+                    }
             }
         }
     }
@@ -495,13 +501,16 @@ public final class StubCalendarSource: CalendarSource {
         return Set(visible(hiding: hidden).map { calendar.component(.day, from: $0.start) })
     }
 
-    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] {
+    public func events(monthOffset: Int, hiding hidden: Set<String>) async -> [Int: [(title: String, time: String, eventID: String, occurrence: Date?, end: Date?)]] {
         guard isAuthorized else { return [:] }
         let calendar = Calendar.current
-        var byDay: [Int: [(title: String, time: String, eventID: String, occurrence: Date?)]] = [:]
+        var byDay: [Int: [(title: String, time: String, eventID: String, occurrence: Date?, end: Date?)]] = [:]
         for event in visible(hiding: hidden) {
             let day = calendar.component(.day, from: event.start)
-            byDay[day, default: []].append((title: event.title, time: "", eventID: "", occurrence: nil))
+            byDay[day, default: []].append((
+                title: event.title, time: "", eventID: "", occurrence: nil,
+                end: event.isAllDay ? nil : event.end
+            ))
         }
         return byDay
     }

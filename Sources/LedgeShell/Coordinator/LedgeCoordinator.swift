@@ -873,7 +873,10 @@ public final class LedgeCoordinator {
                     .alignment, performanceTime: .drawCompleted
                 )
             },
-            setDragging: { [weak self] dragging in self?.setHUDDragging(dragging) }
+            setDragging: { [weak self] dragging in self?.setHUDDragging(dragging) },
+            claimScroll: { [weak self] number in
+                self?.claimScroll(number, by: .keepAwakeLength, axis: .vertical)
+            }
         )
     }
 
@@ -930,6 +933,18 @@ public final class LedgeCoordinator {
         threshold: preferences.swipeThreshold,
         isNatural: preferences.naturalSwipe
     )
+    /// A card claiming the notch's scrolling for a control under the pointer
+    /// — a Keep Awake length number, or the timer's open rule — or, with nil,
+    /// giving back what it holds.
+    private func claimScroll(
+        _ step: ((Int) -> Void)?, by owner: ScrollClaim.Owner, axis: ScrollClaim.Axis
+    ) {
+        if let step {
+            gestures.claimScroll(ScrollClaim(owner: owner, axis: axis, step: step))
+        } else {
+            gestures.releaseScroll(owner)
+        }
+    }
 
     private let artworkLoader = ArtworkLoader()
 
@@ -2967,6 +2982,9 @@ public final class LedgeCoordinator {
                 // Reset with no countdown retracts the session card for the
                 // ready card — stay on the clock either way.
                 self?.activities.selectWhenAvailable(TimerProvider.idleActivityID)
+            },
+            claimScroll: { [weak self] rule in
+                self?.claimScroll(rule, by: .timerRule, axis: .horizontal)
             }
         )
     }
@@ -3773,6 +3791,11 @@ public final class LedgeCoordinator {
             closeDelay: { [weak self] in self?.preferences.hoverCloseDelay ?? 0 },
             onInsideChanged: { [weak self] key in
                 guard let self else { return }
+                // A pointer outside the notch is over none of its controls.
+                // Their own hover says so too, but only if SwiftUI delivers
+                // the exit; a claim it missed would hand the next sideways
+                // stroke on the card to a control the pointer left.
+                if key == nil { self.gestures.releaseAllScroll() }
                 // A drag in flight owns the interaction: the slider must keep
                 // receiving events even when the cursor slips off the shape
                 // mid-slide, so exits are ignored until the drag ends.

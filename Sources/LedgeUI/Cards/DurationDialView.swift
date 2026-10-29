@@ -28,6 +28,11 @@ struct DurationDialView: View {
     /// feel like one instrument.
     var haptic: () -> Void = {}
 
+    /// Takes the notch's scrolling while the pointer is on the rule, so a
+    /// sideways stroke or a wheel moves it a minute at a time; nil gives it
+    /// back. See `TimerActions.claimScroll`.
+    var claimScroll: (((Int) -> Void)?) -> Void = { _ in }
+
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Where the drag started, and how far it has gone. Held apart so the rule
@@ -67,9 +72,17 @@ struct DurationDialView: View {
             .frame(width: width, height: Self.height)
             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .gesture(drag)
+            .onHover { inside in
+                claimScroll(inside ? { steps in scrolled(by: steps) } : nil)
+            }
             // A flick that outlives its rule would go on setting a value
-            // nobody can see, and go on holding the card open to do it.
-            .onDisappear { settle() }
+            // nobody can see, and go on holding the card open to do it. The
+            // scrolling goes back with it: a rule that is gone is never told
+            // the pointer left.
+            .onDisappear {
+                settle()
+                claimScroll(nil)
+            }
         }
         .frame(height: Self.height)
         .accessibilityElement()
@@ -196,6 +209,21 @@ struct DurationDialView: View {
         glide?.cancel()
         glide = nil
         minutes = DurationDial.clamp(minutes + delta)
+    }
+
+    /// Scrolling on the rule: whole minutes, positive for more.
+    ///
+    /// Takes no latch. A scroll is not a drag, and the pointer on the rule is
+    /// already what keeps the card open.
+    private func scrolled(by steps: Int) {
+        let scroll = DurationDial.scroll(
+            minutes, by: steps, dragging: anchor != nil, gliding: glide != nil
+        )
+        // Catching the glide also lets go of the card it was holding.
+        if scroll.catchesGlide { settle() }
+        guard let landed = scroll.landed else { return }
+        minutes = landed
+        haptic()
     }
 
     /// Records where the drag is, and forgets what is too old to matter.

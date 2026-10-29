@@ -157,7 +157,7 @@ public final class SelfViewCamera: SelfViewCapturing {
         // or from a notification carries it, because a frame that was already
         // in flight when a session was closed must not certify the *next*
         // one: it would arrive as "live" for a session that has not yet shown
-        // anything, and the five seconds that would otherwise have given up
+        // anything, and the ten seconds that would otherwise have given up
         // on it are only counted while it is still waking.
         generation += 1
         let generation = generation
@@ -211,6 +211,14 @@ public final class SelfViewCamera: SelfViewCapturing {
             if session.canAddOutput(output) { session.addOutput(output) }
             session.commitConfiguration()
 
+            // A layer made before the input existed got its connection from
+            // `addInput`, with the system's default: unmirrored. On a cold
+            // camera that is the first press every time. After the commit, so
+            // a connection formed by the commit itself is mirrored too.
+            for connection in session.connections where connection.videoPreviewLayer != nil {
+                Self.mirror(connection)
+            }
+
             session.startRunning()
         }
 
@@ -227,11 +235,16 @@ public final class SelfViewCamera: SelfViewCapturing {
         guard let session else { return nil }
         let layer = AVCaptureVideoPreviewLayer(session: session)
         layer.videoGravity = .resizeAspectFill
-        if let connection = layer.connection, connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = true
-        }
+        // Only there when the input already is; otherwise the capture queue
+        // mirrors it once the input arrives.
+        if let connection = layer.connection { Self.mirror(connection) }
         return layer
+    }
+
+    nonisolated private static func mirror(_ connection: AVCaptureConnection) {
+        guard connection.isVideoMirroringSupported else { return }
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = true
     }
 
     /// The session could not be built. Treated exactly as a session that

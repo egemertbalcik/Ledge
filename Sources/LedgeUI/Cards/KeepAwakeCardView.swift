@@ -50,6 +50,8 @@ public struct KeepAwakeCardView: View {
     /// The number the user is on: touched or being dragged. Its neighbours are
     /// shown while it is, which is how the column says which way to drag.
     @State private var activeField: KeepAwakeSpan.Field?
+    /// The number the pointer is over, which is the one scrolling moves.
+    @State private var hover = LengthHover()
     /// What the card is in the middle of: resting, asking how long, or
     /// explaining why the lid-closed mode cannot start.
     ///
@@ -132,9 +134,19 @@ public struct KeepAwakeCardView: View {
                 guard !Task.isCancelled else { return }
                 waitHasLasted = true
             }
+            // A number taken away from under the pointer is never told the
+            // pointer left, so the question ending gives the scrolling back
+            // itself. Keyed on the question, not on a face disappearing:
+            // see `KeepAwakeCardFlow`.
+            .onChange(of: flow.isAsking) { _, asking in
+                guard !asking else { return }
+                hover = LengthHover()
+                actions.claimScroll(nil)
+            }
             .onDisappear {
                 hold.release()
                 actions.setDragging(false)
+                actions.claimScroll(nil)
                 // The one reset, on the one event that means it. It used to
                 // sit on the resting face and on the question, each of which
                 // disappears when the *other* replaces it — so pressing Lid
@@ -1070,6 +1082,7 @@ public struct KeepAwakeCardView: View {
             activeField = field
         } }
         .gesture(drag(on: field))
+        .onHover { inside in pointer(inside, field) }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Self.spokenUnit(field))
         .accessibilityValue("\(value)")
@@ -1130,6 +1143,32 @@ public struct KeepAwakeCardView: View {
                 hold.release()
                 actions.setDragging(false)
             }
+    }
+
+    /// The pointer arriving on a number, or leaving it. See `LengthHover`
+    /// for why a leave is not always taken at its word.
+    private func pointer(_ inside: Bool, _ field: KeepAwakeSpan.Field) {
+        if inside {
+            hover.entered(field)
+            actions.claimScroll { steps in scrolled(field, by: steps) }
+        } else if hover.left(field) {
+            actions.claimScroll(nil)
+        }
+    }
+
+    /// Scrolling over a number: up is more, the same as dragging it up, and
+    /// each number keeps to its own range rather than carrying into the next.
+    private func scrolled(_ field: KeepAwakeSpan.Field, by steps: Int) {
+        focusedField = field
+        // Its neighbours come up, as they do for a touch, so the column shows
+        // which way it is going.
+        if activeField != field {
+            withAnimation(reduceMotion ? nil : Motion.levelChange) { activeField = field }
+        }
+        let moved = draft.moving(field, by: steps)
+        guard moved != draft else { return }
+        setDraft(moved)
+        actions.haptic()
     }
 
     /// How far the pointer travels between two numbers. The timer's own figure.
@@ -1419,6 +1458,11 @@ public struct KeepAwakeActions {
     /// wanders off it — the same latch the timer's length and the volume
     /// sliders use.
     public var setDragging: (Bool) -> Void
+    /// Hands vertical scrolling to one of the length's numbers while the
+    /// pointer is over it, or back to the notch with nil. The shell owns the
+    /// scroll events — LedgeUI never imports AppKit — so the card says where
+    /// they should go and the shell delivers them in whole steps, up positive.
+    public var claimScroll: (((Int) -> Void)?) -> Void
 
     public init(
         switchOn: @escaping () -> Void = {},
@@ -1430,7 +1474,8 @@ public struct KeepAwakeActions {
         dismiss: @escaping () -> Void = {},
         resume: @escaping () -> Void = {},
         haptic: @escaping () -> Void = {},
-        setDragging: @escaping (Bool) -> Void = { _ in }
+        setDragging: @escaping (Bool) -> Void = { _ in },
+        claimScroll: @escaping (((Int) -> Void)?) -> Void = { _ in }
     ) {
         self.switchOn = switchOn
         self.retryLid = retryLid
@@ -1442,6 +1487,7 @@ public struct KeepAwakeActions {
         self.resume = resume
         self.haptic = haptic
         self.setDragging = setDragging
+        self.claimScroll = claimScroll
     }
 }
 

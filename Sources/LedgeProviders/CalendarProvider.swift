@@ -311,7 +311,8 @@ public final class CalendarProvider: ActivityProvider {
                             entries: entries.map {
                                 MonthDayEntry(
                                     title: $0.title, time: $0.time,
-                                    eventID: $0.eventID, occurrence: $0.occurrence
+                                    eventID: $0.eventID, occurrence: $0.occurrence,
+                                    ends: $0.end
                                 )
                             }
                         )

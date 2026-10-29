@@ -100,7 +100,11 @@ public enum SelfViewTiming {
 
     /// How long a session may run without producing a frame before Ledge
     /// gives up on it and says so.
-    public static let giveUp: TimeInterval = 5
+    ///
+    /// Ten, not five: the first start after sleep can take the camera several
+    /// seconds to wake, and five gave up on a camera that was about to come
+    /// up. The card already says it is waking, so the wait is never silent.
+    public static let giveUp: TimeInterval = 10
 
     /// How long the camera stays on once the pointer has left the notch.
     ///

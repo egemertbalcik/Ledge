@@ -755,15 +755,34 @@ public struct MonthDayEntry: Equatable, Sendable, Codable, Identifiable {
     /// the row that was clicked. See `CalendarLink`.
     public var occurrence: Date?
 
+    /// When this occurrence ends, so today's list can let go of an event once
+    /// it is over. Nil for an all-day event, which belongs to the whole day,
+    /// and for payloads published before the end was carried — neither is
+    /// ever treated as over.
+    public var ends: Date?
+
     /// The eventID folded in so two same-titled events at the same time (twin
     /// "Birthday" all-day entries) stay distinct rows for SwiftUI's diffing.
     public var id: String { "\(time)-\(title)-\(eventID)" }
 
-    public init(title: String, time: String = "", eventID: String = "", occurrence: Date? = nil) {
+    public init(
+        title: String,
+        time: String = "",
+        eventID: String = "",
+        occurrence: Date? = nil,
+        ends: Date? = nil
+    ) {
         self.title = title
         self.time = time
         self.eventID = eventID
         self.occurrence = occurrence
+        self.ends = ends
+    }
+
+    /// Whether the event is over at `now`. An end that is not known never is.
+    public func hasEnded(at now: Date) -> Bool {
+        guard let ends else { return false }
+        return ends <= now
     }
 
     public init(from decoder: any Decoder) throws {
@@ -772,6 +791,7 @@ public struct MonthDayEntry: Equatable, Sendable, Codable, Identifiable {
         time = try c.decodeIfPresent(String.self, forKey: .time) ?? ""
         eventID = try c.decodeIfPresent(String.self, forKey: .eventID) ?? ""
         occurrence = try c.decodeIfPresent(Date.self, forKey: .occurrence)
+        ends = try c.decodeIfPresent(Date.self, forKey: .ends)
     }
 }
 

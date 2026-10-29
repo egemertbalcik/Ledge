@@ -178,7 +178,7 @@ public final class SelfViewRunner {
         if payload.phase == .waking {
             let waited = now - startedAt
             if waited >= SelfViewTiming.giveUp {
-                // Five seconds of nothing. The session goes before the
+                // Ten seconds of nothing. The session goes before the
                 // sentence appears, so the light is already out when the card
                 // says the camera never started.
                 camera.stop()
@@ -264,7 +264,10 @@ public final class SelfViewRunner {
     private func firstFrameArrived() {
         guard payload.phase == .waking else { return }
         payload = SelfViewPayload(phase: .live)
-        Self.log.notice("selfview: live")
+        // How long the camera took to wake, so a slow first start can be told
+        // apart from one that never comes.
+        let waited = startedAt.map { now() - $0 } ?? 0
+        Self.log.notice("selfview: live after \(waited, format: .fixed(precision: 2), privacy: .public) s")
     }
 
     private func sessionFailed() {

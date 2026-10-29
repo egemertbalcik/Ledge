@@ -148,3 +148,26 @@ struct KeepAwakeCardFlow: Equatable, Sendable {
         showsLidNote = false
     }
 }
+
+/// Which of the length's numbers the pointer is over: the one scrolling moves.
+///
+/// A value of its own for the one rule worth testing. Moving from hours to
+/// minutes can report minutes arriving before hours leaving, and a leave
+/// taken at its word would hand the notch back the scrolling that minutes had
+/// just been given. Only the number that holds the scrolling may give it back.
+struct LengthHover: Equatable, Sendable {
+
+    private(set) var over: KeepAwakeSpan.Field?
+
+    /// The pointer arrived on a number. It is now the one scrolling moves.
+    mutating func entered(_ field: KeepAwakeSpan.Field) {
+        over = field
+    }
+
+    /// The pointer left a number. True when that gives the scrolling back.
+    mutating func left(_ field: KeepAwakeSpan.Field) -> Bool {
+        guard over == field else { return false }
+        over = nil
+        return true
+    }
+}
