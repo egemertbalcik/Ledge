@@ -4,32 +4,36 @@
 
 **Your MacBook's notch, put to work.**
 
+Ledge is a free, open-source notch app for MacBook on macOS 26.
+
 You already look up there. Ledge puts what you're checking anyway — the song,
 the timer, the next meeting — in the black bar you've been ignoring so far.
 Quiet when nothing is happening, there the moment something is.
 
-<a href="https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download Ledge for macOS"></a>
+<a href="https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg"><img src="https://img.shields.io/badge/Download%20for%20macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download Ledge, the notch app for MacBook"></a>
 <a href="https://buymeacoffee.com/egebalcik" target="_blank" rel="noopener noreferrer"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black" alt="Buy me a coffee"></a>
 
-[ledgeapp.dev](https://ledgeapp.dev) · free · open source
+[ledgeapp.dev](https://ledgeapp.dev) · free · open source · no account
 
 <a href="https://github.com/egemertbalcik/Ledge/releases/latest"><img src="https://img.shields.io/github/v/release/egemertbalcik/Ledge?label=release&color=0071e3" alt="Latest release"></a>
 <img src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white" alt="macOS 26 or later">
+<a href="#install"><img src="https://img.shields.io/badge/Homebrew-egemertbalcik%2Ftap%2Fledge-FBB040?logo=homebrew&logoColor=white" alt="Install with Homebrew: brew install --cask egemertbalcik/tap/ledge"></a>
 <a href="LICENSE"><img src="https://img.shields.io/github/license/egemertbalcik/Ledge?color=555" alt="License: GPL-3.0"></a>
 
-<img src="docs/media/intro.gif" width="560" alt="Ledge waking up in the notch">
+<img src="docs/media/intro.gif" width="560" alt="Ledge waking up in the MacBook notch">
 
 https://github.com/user-attachments/assets/b610460d-a424-4dc1-bf8d-4ef967108194
 
 </div>
 
 **What is Ledge?** Ledge is a free, open-source (GPL-3.0) notch app for
-MacBook. It turns the notch into a live status area, like the iPhone's Dynamic
-Island: now playing, a timer, your next meeting with a camera mirror on the
-Join button, weather, notes, Keep Awake (lid closed too), AirPods, and volume
-and brightness readouts. It needs a MacBook with a notch on macOS 26 or later,
-ships signed and notarized, has no account and no telemetry, and records no
-audio or screen.
+MacBook. It turns the notch into a live status area, like the iPhone's
+[Dynamic Island](https://ledgeapp.dev/dynamic-island-for-mac/): now playing, a
+timer, your next meeting with a camera mirror on the Join button, weather,
+notes, [Keep Awake](https://ledgeapp.dev/keep-awake/) (lid closed too), AirPods
+battery, plus volume and brightness readouts. It needs a MacBook with a notch on
+macOS 26 or later. It ships signed and notarized, has no account or telemetry
+and records no audio or screen.
 
 ---
 
