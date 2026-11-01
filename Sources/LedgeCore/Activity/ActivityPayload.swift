@@ -623,7 +623,8 @@ public struct DevicePayload: Equatable, Sendable, Codable {
 public struct KeyboardLayoutPayload: Equatable, Sendable, Codable {
     /// "Turkish", "ABC" — the name System Settings uses.
     public var name: String
-    /// Two letters for the compact view: "TR", "EN".
+    /// The short code for the compact view: "TR", "EN", "TRQ" — three
+    /// characters at most.
     public var code: String
     /// A specific glyph when the generic keyboard is wrong — Caps Lock wants
     /// its own filled/outlined pair so on and off read at a glance.

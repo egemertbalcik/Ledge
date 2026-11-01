@@ -1686,12 +1686,24 @@ public final class LedgeCoordinator {
     /// stamped so stale entries can be dropped at drain time. Latest-wins was
     /// the old rule, and the loser simply never appeared. Full ids, not
     /// kinds: two queued device connects must each flash their own card, not
-    /// the first `.device` in the queue twice.
-    private var pendingPeeks: [(id: ActivityID, at: TimeInterval, byUser: Bool)] = []
+    /// the first `.device` in the queue twice. Keyboard facts bring a copy
+    /// of their card and wait at the front — see `PendingPeek`.
+    private var pendingPeeks: [PendingPeek] = []
 
     /// How long a queued peek stays worth playing. Past this it is old news —
     /// replaying a Bluetooth connect from a minute ago reads as a glitch.
     private static let pendingPeekLifetime: TimeInterval = 8
+
+    /// How many may wait at once.
+    private static let pendingPeekLimit = 3
+
+    /// What a queued entry would show if its turn came now: the live card,
+    /// or a keyboard fact's copy while its provider is still on — see
+    /// `PendingPeek.card`.
+    private func queuedCard(_ entry: PendingPeek) -> Activity? {
+        entry.card(live: activities.activity(withID: entry.id),
+                   publisherRunning: activities.isPublished(entry.id))
+    }
 
     /// The one admission test for a peek, applied both to fresh arrivals and
     /// to queued entries at drain time. The queue used to be a second entrance
@@ -1921,7 +1933,27 @@ public final class LedgeCoordinator {
         // the fresh payload rather than queueing behind itself: queued,
         // a rapid caps on-off-on showed its states seconds late, which
         // read as the indicator failing.
-        if self.state.phase == .peek, self.presentation.peeked?.id == activity.id {
+        //
+        // A keyboard fact does the same over another card's whisper: a
+        // layout switch lives a second, so queued behind a Caps Lock or a
+        // track-change peek it had always expired by its turn and was
+        // dropped. Replacing beats waiting because the user is typing now;
+        // a notch standing up for news, or a card that outranks it, keeps
+        // the stage instead — see `PeekTurn.takesOver`.
+        if self.state.phase == .peek,
+           self.presentation.peeked?.id == activity.id
+            || PeekTurn.takesOver(activity, from: self.presentation.peeked,
+                                  standingUp: self.presentation.announcement != nil) {
+            // What the keyboard fact cut short plays after it, rather than
+            // being lost a fraction of a second in — see `PendingPeek.resume`.
+            // The same card restarting itself puts nothing back.
+            let cutShort = self.presentation.peeked
+            PendingPeek.resume(
+                cutShort, cutShortBy: activity,
+                isLive: cutShort.map { self.activities.activity(withID: $0.id) != nil } ?? false,
+                at: Date().timeIntervalSinceReferenceDate,
+                into: &self.pendingPeeks, limit: Self.pendingPeekLimit
+            )
             self.presentation.peeked = activity
             self.presentation.announcement = announcement
             self.send(.peekRequested(duration))
@@ -1937,9 +1969,10 @@ public final class LedgeCoordinator {
         if self.state.phase == .peek
             || self.state.phase == .hover || self.state.phase == .expanded
             || (self.state.phase == .hud && (self.state.isHovering || self.state.isPinned)) {
-            if self.pendingPeeks.count < 3 {
-                self.pendingPeeks.append((activity.id, Date().timeIntervalSinceReferenceDate, byUser))
-            }
+            PendingPeek.enqueue(
+                PendingPeek(activity, at: Date().timeIntervalSinceReferenceDate, byUser: byUser),
+                into: &self.pendingPeeks, limit: Self.pendingPeekLimit
+            )
             return
         }
         // The card the peek is *for*: selection only moves for standings
@@ -3729,8 +3762,11 @@ public final class LedgeCoordinator {
                       // Gone from the queue (expired, dismissed) means gone:
                       // peeking anyway flashed whatever card happened to be
                       // selected — the exact wrong-card bug peeked exists to
-                      // prevent. The next queued entry gets its chance.
-                      activities.activity(withID: entry.id) != nil
+                      // prevent. The next queued entry gets its chance. A
+                      // keyboard fact is the exception: its card never
+                      // outlives the wait, so it brought a copy — which
+                      // plays only while its provider is still on.
+                      queuedCard(entry) != nil
                 else { continue }
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -3743,7 +3779,7 @@ public final class LedgeCoordinator {
                     }
                     // Re-fetched in the gap too — and if it vanished in these
                     // few milliseconds, there is nothing left to announce.
-                    guard let card = self.activities.activity(withID: entry.id) else { return }
+                    guard let card = self.queuedCard(entry) else { return }
                     self.presentation.peeked = card
                     // A queued announcement is still an announcement when its
                     // turn comes: waiting for the stage must not demote it to

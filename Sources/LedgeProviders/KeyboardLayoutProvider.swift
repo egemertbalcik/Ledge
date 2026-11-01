@@ -17,7 +17,7 @@ public final class KeyboardLayoutProvider: ActivityProvider {
 
     public let identifier = "keyboard"
 
-    /// A glance: two letters register instantly, and anything longer left the
+    /// A glance: a short code registers instantly, and anything longer left the
     /// card hanging around after the user had already started typing.
     static let lifetime: TimeInterval = 1.0
 
@@ -25,9 +25,14 @@ public final class KeyboardLayoutProvider: ActivityProvider {
     private let now: () -> TimeInterval
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
 
-    /// The layout last seen. Starts unset so the first observation only
-    /// establishes a baseline.
+    /// The layout last seen. Nil when the baseline found none.
     private var lastSeen: KeyboardLayoutSnapshot?
+
+    /// Whether `start()` has read its baseline. Kept apart from `lastSeen`,
+    /// because the baseline can be *nothing* — TIS not ready yet at login, a
+    /// source with no name — and read off `lastSeen == nil`, that launch took
+    /// the first real switch for its baseline and never showed it.
+    private var hasBaseline = false
 
     public init(
         source: any KeyboardLayoutWatching = KeyboardLayoutSource(),
@@ -44,6 +49,7 @@ public final class KeyboardLayoutProvider: ActivityProvider {
                 Task { @MainActor in self?.stop() }
             }
             lastSeen = source.current()
+            hasBaseline = true
             source.startWatching { [weak self] in self?.changed() }
         }
     }
@@ -53,16 +59,19 @@ public final class KeyboardLayoutProvider: ActivityProvider {
         continuation?.finish()
         continuation = nil
         lastSeen = nil
+        hasBaseline = false
     }
 
     private func changed() {
-        guard let snapshot = source.current() else { return }
-        // Only a real switch. The notification can fire for input-source list
-        // changes that leave the selection alone.
-        guard snapshot != lastSeen else { return }
-        let isFirstObservation = lastSeen == nil
+        // A reading with no baseline to compare against is not a switch.
+        guard hasBaseline, let snapshot = source.current() else { return }
+        // Only a real switch, which is a different source. The notification
+        // can fire for input-source list changes that leave the selection
+        // alone, and a list change can move the *code* under the same source —
+        // Turkish Q goes from TR to TRQ the moment Turkish F is added — which
+        // is not a switch either.
+        guard snapshot.name != lastSeen?.name else { return }
         lastSeen = snapshot
-        guard !isFirstObservation else { return }
 
         continuation?.yield(.publish(Activity(
             id: ActivityID(kind: .keyboard, source: "input"),

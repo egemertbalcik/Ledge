@@ -340,6 +340,13 @@ public final class ActivityCoordinator {
         hub.queue.activities.first { $0.id == id }
     }
 
+    /// Whether the provider behind `id` is still on — true after its card
+    /// has expired, false once the provider has been switched off or taken
+    /// away with its permission. A queued keyboard copy asks this.
+    public func isPublished(_ id: ActivityID) -> Bool {
+        hub.isPublishing(id)
+    }
+
     // MARK: - Syncing
 
     /// The payload last announced per re-announcing activity. A Focus toggle,

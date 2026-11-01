@@ -409,12 +409,16 @@ public struct CompactEarsView: View {
                         Capsule().fill(isOn ? Color.green.opacity(0.25) : .white.opacity(0.12))
                     )
             } else {
-                // The two-letter code is the whole point of the layout card:
-                // it is the one thing macOS's own menu-bar flag makes hard to
-                // read at a glance.
+                // The short code is the whole point of the layout card: it is
+                // the one thing macOS's own menu-bar flag makes hard to read
+                // at a glance. Three characters at most ("TRQ"), so it fits
+                // this slot as drawn — `KeyboardBadge` shortens, nothing here
+                // grows. One line, so a code that ever met a narrower ear
+                // than it was measured in would clip rather than wrap.
                 Text(payload.code)
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
+                    .lineLimit(1)
             }
         case .notes(let payload):
             // Notes never rest in the ears, so this is only ever reached while a

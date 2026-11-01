@@ -70,6 +70,13 @@ public final class ProviderHub {
     public var registeredIdentifiers: Set<String> { Set(entries.keys) }
     public var runningIdentifiers: Set<String> { Set(entries.filter(\.value.isRunning).keys) }
 
+    /// Whether a running provider still stands behind `id`, whether or not
+    /// its card is on the queue. Expiry takes a card off the queue and leaves
+    /// it its provider's; removing the provider leaves it nobody's.
+    public func isPublishing(_ id: ActivityID) -> Bool {
+        entries.values.contains { $0.isRunning && $0.published.contains(id) }
+    }
+
     /// Registers a provider, replacing any existing one with the same
     /// identifier — stopping and retracting the old one first, so re-enabling
     /// cannot strand the previous instance in the table.

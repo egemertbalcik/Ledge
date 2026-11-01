@@ -514,6 +514,27 @@ struct GalleryView: View {
     @State private var earLeadingDraft: CGFloat = 0
     @State private var earTrailingDraft: CGFloat = 0
 
+    /// The longest layout code in the narrowest ear Settings allows. The code
+    /// gets three characters only beside a sibling layout, and the ear width
+    /// goes down to 36, so the two together were never on screen anywhere.
+    /// Each ear here is that wide: the cutout and both gutters around two
+    /// minimum ears.
+    @ViewBuilder
+    private var narrowestKeyboardEarSection: some View {
+        // The floor every ear width is clamped to.
+        let ear = NotchLayout.sanitizedEarWidth(0)
+        section("Three-letter layout code at the narrowest ear") {
+            card {
+                CompactEarsView(
+                    activity: PreviewFixtures.keyboardThreeLetters,
+                    cutoutWidth: cutoutWidth,
+                    inset: 10
+                )
+                .frame(width: cutoutWidth + 2 * ear + 2 * 10, height: 34)
+            }
+        }
+    }
+
     /// The timer's ears at several points through a countdown, which is the
     /// only way to see a dial actually move without waiting out a session.
     @ViewBuilder
@@ -771,6 +792,7 @@ struct GalleryView: View {
                             }
                         }
                     }
+                    narrowestKeyboardEarSection
                 } else if only == "compact" {
                     compactPaneSection
                 } else if only == "levels" {
@@ -927,6 +949,8 @@ struct GalleryView: View {
                         }
                     }
                 }
+
+                narrowestKeyboardEarSection
 
                 section("Page dots") {
                     card {
@@ -1341,6 +1365,13 @@ enum PreviewFixtures {
         id: ActivityID(kind: .keyboard, source: "preview"),
         createdAt: 0,
         payload: .keyboard(KeyboardLayoutPayload(name: "Turkish Q", code: "TR"))
+    )
+
+    /// The longest a layout code gets: Turkish Q beside Turkish F.
+    static let keyboardThreeLetters = Activity(
+        id: ActivityID(kind: .keyboard, source: "preview-three"),
+        createdAt: 0,
+        payload: .keyboard(KeyboardLayoutPayload(name: "Turkish Q", code: "TRQ"))
     )
 
     /// Every kind, once, so the gallery is a complete review surface — a card

@@ -6,7 +6,9 @@ import os
 public struct KeyboardLayoutSnapshot: Equatable, Sendable {
     /// "Turkish", "ABC", "British" — what System Settings calls it.
     public var name: String
-    /// A two-letter tag for the compact view: "TR", "EN".
+    /// The badge for the compact view: "TR", "EN" — or "TRQ" beside Turkish F.
+    /// At most three characters, and unique among the enabled sources; see
+    /// `KeyboardBadge`.
     public var code: String
 
     public init(name: String, code: String) {
@@ -35,6 +37,13 @@ public final class KeyboardLayoutSource: KeyboardLayoutWatching {
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "keyboard")
 
     private var observer: NSObjectProtocol?
+    private var enabledObserver: NSObjectProtocol?
+
+    /// The enabled sources and the code each gets among them. Read when first
+    /// needed and again whenever the list changes: whether Turkish Q is TR or
+    /// TRQ depends on whether Turkish F is enabled beside it.
+    private var enabled: [KeyboardSourceFacts] = []
+    private var badges: [String: String]?
 
     public init() {}
 
@@ -42,22 +51,45 @@ public final class KeyboardLayoutSource: KeyboardLayoutWatching {
         guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else {
             return nil
         }
-        guard let name = Self.string(source, kTISPropertyLocalizedName) else { return nil }
-        return KeyboardLayoutSnapshot(name: name, code: Self.code(for: source, name: name))
+        guard let facts = Self.facts(source) else { return nil }
+        return KeyboardLayoutSnapshot(name: facts.name, code: badge(for: facts))
     }
 
-    /// Prefer the source's own language tag — it is what distinguishes two
-    /// layouts that share a script — and fall back to the name's initials so a
-    /// layout reporting no language still gets a legible badge.
-    private static func code(for source: TISInputSource, name: String) -> String {
-        if let languages = property(source, kTISPropertyInputSourceLanguages)
-            as? [String], let first = languages.first, !first.isEmpty {
-            // "en-GB" and "tr" both reduce to the leading subtag.
-            let base = first.split(separator: "-").first.map(String.init) ?? first
-            if base.count >= 2 { return String(base.prefix(2)).uppercased() }
-        }
-        let initials = name.split(separator: " ").compactMap(\.first)
-        return String(initials.prefix(2)).uppercased()
+    private func badge(for facts: KeyboardSourceFacts) -> String {
+        // Not in the table: never read yet, or behind — a source added and
+        // selected before the list notification landed. Read it again.
+        if badges?[facts.id] == nil { rebuildBadges() }
+        if let code = badges?[facts.id] { return code }
+        // Still not on the list — a source macOS selected on its own. Worked
+        // out with it added, so it gets a code no enabled source holds.
+        return KeyboardBadge.code(for: facts, among: enabled)
+    }
+
+    private func rebuildBadges() {
+        enabled = Self.enabledSources()
+        badges = KeyboardBadge.codes(for: enabled)
+    }
+
+    /// The sources a switch can land on: layouts and input modes the user has
+    /// enabled, not the palettes (Emoji & Symbols, Dictation) or an input
+    /// method's own container, which cannot be selected.
+    private static func enabledSources() -> [KeyboardSourceFacts] {
+        let filter = [
+            kTISPropertyInputSourceCategory as String: kTISCategoryKeyboardInputSource as String,
+            kTISPropertyInputSourceIsSelectCapable as String: true,
+        ] as CFDictionary
+        guard let list = TISCreateInputSourceList(filter, false)?.takeRetainedValue()
+            as? [TISInputSource] else { return [] }
+        return list.compactMap(facts)
+    }
+
+    private static func facts(_ source: TISInputSource) -> KeyboardSourceFacts? {
+        guard let name = string(source, kTISPropertyLocalizedName) else { return nil }
+        return KeyboardSourceFacts(
+            id: string(source, kTISPropertyInputSourceID) ?? name,
+            name: name,
+            languages: property(source, kTISPropertyInputSourceLanguages) as? [String] ?? []
+        )
     }
 
     private static func string(_ source: TISInputSource, _ key: CFString!) -> String? {
@@ -81,6 +113,16 @@ public final class KeyboardLayoutSource: KeyboardLayoutWatching {
             // by the time this fires, so no settling delay is needed.
             Task { @MainActor in onChange() }
         }
+        // The list, on its own: adding or removing a source changes which
+        // codes are free, so the table is rebuilt — and only rebuilt. A list
+        // change is not a switch, and the provider is not told one happened.
+        enabledObserver = DistributedNotificationCenter.default.addObserver(
+            forName: NSNotification.Name(kTISNotifyEnabledKeyboardInputSourcesChanged as String),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.rebuildBadges() }
+        }
         Self.log.debug("keyboard: watching input-source changes")
     }
 
@@ -89,9 +131,15 @@ public final class KeyboardLayoutSource: KeyboardLayoutWatching {
             DistributedNotificationCenter.default.removeObserver(observer)
         }
         observer = nil
+        if let enabledObserver {
+            DistributedNotificationCenter.default.removeObserver(enabledObserver)
+        }
+        enabledObserver = nil
+        // Unwatched, the list can change unseen; the next start reads it afresh.
+        badges = nil
     }
 
-    // No `deinit` cleanup: the observer is main-actor state and cannot be read
+    // No `deinit` cleanup: the observers are main-actor state and cannot be read
     // from a nonisolated deinit. The provider's `stop()` is what unregisters,
     // and it always runs — the stream's `onTermination` guarantees it.
 }
