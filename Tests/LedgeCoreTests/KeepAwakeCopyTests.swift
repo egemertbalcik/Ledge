@@ -62,4 +62,86 @@ struct KeepAwakeCopyTests {
             #expect(!line.contains("Start"), "the card has no Start button to try again")
         }
     }
+
+    /// The handover's sentences, and the reinstall's beside them, held to the
+    /// voice the rest of the card speaks in. Short sentences, nobody speaking
+    /// in the first person, and no comma before "and" or "but" — the proposal
+    /// these came from had all three, and was too long for the card besides.
+    @Test("The handover says what happened and what to do, in the card's own voice")
+    func handoverVoice() {
+        let removals = [KeepAwakeLidState.handover(.underWay), .handover(.restartNeeded),
+                        .helperMismatch].compactMap(KeepAwakeCopy.helperRemovalUnheard)
+        let lines = [KeepAwakeCopy.lidUpdating, KeepAwakeCopy.lidRestartNeeded,
+                     KeepAwakeCopy.lidHelperMismatch,
+                     KeepAwakeCopy.lidMenuHeadlineUpdating,
+                     KeepAwakeCopy.lidMenuHeadlineRestartNeeded,
+                     KeepAwakeCopy.lidMenuHeadlineHelperMismatch,
+                     KeepAwakeCopy.railUpdating, KeepAwakeCopy.railRestartNeeded,
+                     KeepAwakeCopy.railHelperMismatch] + removals
+        for line in lines {
+            #expect(!line.contains(", and") && !line.contains(", but"), "\(line)")
+            let words = Set(line.lowercased()
+                .components(separatedBy: CharacterSet.letters.inverted)
+                .filter { !$0.isEmpty })
+            #expect(words.isDisjoint(with: ["i", "we", "our", "us", "me", "my"]),
+                    "first person: \(line)")
+            // "Held" is not a word the card ever shows, so nothing may tell
+            // somebody to wait until it does.
+            #expect(!words.contains("held"), "names a state the card never shows: \(line)")
+        }
+        // What happened, how long, and the one thing to do meanwhile.
+        #expect(KeepAwakeCopy.lidUpdating.contains("updated"))
+        #expect(KeepAwakeCopy.lidUpdating.contains("two minutes"))
+        #expect(KeepAwakeCopy.lidUpdating.contains("Keep the lid open"))
+        // The fix, then what matters until then. "The update" once: the
+        // second sentence names what the restart does instead.
+        #expect(KeepAwakeCopy.lidRestartNeeded ==
+                "The helper is still the copy from before the update. "
+                    + "Restart your Mac to replace it. Until then, keep the lid open.")
+        #expect(KeepAwakeCopy.lidRestartNeeded.components(separatedBy: "the update").count == 2,
+                "the restart sentence says \"the update\" more than once")
+        // A reinstall, and never "updated" or "restart": nothing here was
+        // updated, and a restart starts the same helper again.
+        #expect(KeepAwakeCopy.lidHelperMismatch.contains("Reinstall Ledge"))
+        #expect(KeepAwakeCopy.lidHelperMismatch.contains("keep the lid open"))
+        #expect(!KeepAwakeCopy.lidHelperMismatch.lowercased().contains("update"))
+        #expect(!KeepAwakeCopy.lidHelperMismatch.lowercased().contains("restart"))
+        // None tells somebody to press the mode again, which is what
+        // "Can't tell" said here and what started the wait over.
+        for line in [KeepAwakeCopy.lidUpdating, KeepAwakeCopy.lidRestartNeeded,
+                     KeepAwakeCopy.lidHelperMismatch] {
+            #expect(!line.contains("press"), "\(line)")
+            #expect(!line.contains(KeepAwakeCopy.lidClosed), "\(line)")
+            #expect(line.count <= 140, "too long for the card: \(line.count) characters")
+        }
+        // Rail words sit under a stop on a card 275 points wide; the render
+        // tests measure them against the middle label.
+        for word in [KeepAwakeCopy.railUpdating, KeepAwakeCopy.railRestartNeeded,
+                     KeepAwakeCopy.railHelperMismatch] {
+            #expect(word.count <= 16, "\(word)")
+        }
+    }
+
+    /// Settings' Remove refuses while nothing the helper says can be heard,
+    /// and it used to say "try again in a moment" whatever the reason. In
+    /// these states a moment changes nothing, so each says what does.
+    @Test("Remove says what will let it ask, not to try again in a moment")
+    func removalSaysWhatWillHelp() {
+        let underWay = KeepAwakeCopy.helperRemovalUnheard(.handover(.underWay))
+        let stuck = KeepAwakeCopy.helperRemovalUnheard(.handover(.restartNeeded))
+        let wrong = KeepAwakeCopy.helperRemovalUnheard(.helperMismatch)
+        #expect(underWay?.contains("two minutes") == true)
+        #expect(stuck?.contains("Restart your Mac") == true)
+        #expect(wrong?.contains("Reinstall Ledge") == true)
+        for line in [underWay, stuck, wrong] {
+            #expect(line?.contains("setting to put back") == true,
+                    "the reason the helper stays is not said")
+            #expect(line?.lowercased().contains("in a moment") == false)
+        }
+        // Everything else keeps the general sentence.
+        for state: KeepAwakeLidState in [.off, .holding, .cannotTell, .unreachable,
+                                         .refused(.busy), .notInstalled] {
+            #expect(KeepAwakeCopy.helperRemovalUnheard(state) == nil, "\(state.name)")
+        }
+    }
 }

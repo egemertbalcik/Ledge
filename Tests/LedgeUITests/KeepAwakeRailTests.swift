@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import LedgeCore
 import SwiftUI
@@ -111,6 +112,95 @@ struct KeepAwakeRailTests {
         #expect(card(lidShut()).thirdStopLabel == KeepAwakeCopy.lidClosed)
         #expect(card(lidShut(.unconfirmed)).thirdStopLabel == KeepAwakeCopy.railChecking)
         #expect(card(lidShut(.unreachable)).thirdStopLabel == KeepAwakeCopy.railNotHeld)
+    }
+
+    // MARK: - A helper an update left behind
+
+    /// A lid session running while the helper is handed over. The bead stays
+    /// on the stop that was chosen; the fill never reaches it, because the
+    /// handover began by giving the hold back; and the label says which of
+    /// the two faces this is, where "Can't tell" used to.
+    @Test("A handover draws as work under way, then as not held, and never as held")
+    func handoverOnTheRail() {
+        let underWay = card(lidShut(.handover(.underWay)))
+        #expect(underWay.chosenStop == 2, "still what was asked for")
+        #expect(underWay.filledTo == 1, "the lid is not covered while the helper is swapped")
+        #expect(underWay.beadKind == .checking)
+        #expect(underWay.thirdStopLabel == KeepAwakeCopy.railUpdating)
+        // No retry: the client holds every request back until the new
+        // helper answers, so the press would change nothing.
+        #expect(!underWay.canPress(2))
+        #expect(underWay.previewLine(for: 2) == nil)
+
+        let stuck = card(lidShut(.handover(.restartNeeded)))
+        #expect(stuck.filledTo == 1)
+        #expect(stuck.beadKind == .notHeld)
+        #expect(stuck.thirdStopLabel == KeepAwakeCopy.railRestartNeeded)
+        #expect(!stuck.canPress(2))
+
+        // The way out stays. Off and Coffee are what the session still has.
+        for drawn in [underWay, stuck] {
+            #expect(drawn.canPress(0))
+            #expect(drawn.canPress(1))
+            #expect(drawn.endFigure != nil, "the session itself is really running")
+        }
+    }
+
+    /// With nothing running, the stop is pressable — a press reads again,
+    /// and that is how a finished handover is noticed — and the hover says
+    /// why it will not start rather than inviting a press.
+    @Test("At rest, a handover names itself before anybody presses")
+    func handoverAtRest() {
+        for face in KeepAwakeHandover.allCases {
+            let drawn = card(off(lid: .handover(face)))
+            #expect(drawn.chosenStop == 0)
+            #expect(drawn.thirdStopLabel == KeepAwakeCopy.lidClosed, "at rest the stop keeps its name")
+            #expect(drawn.canPress(2))
+            #expect(drawn.previewLine(for: 2) == KeepAwakeCopy.lid(.handover(face)),
+                    "the hover invited a press that cannot start anything")
+        }
+    }
+
+    /// A helper the installation would refuse too. The hold very probably
+    /// stands — the heartbeat goes on landing — so the bead is the still
+    /// ring of "can't tell", never the strike; the fill stops at Coffee
+    /// because nothing confirms more; and the word says what fixes it.
+    @Test("A mismatched helper draws as unconfirmable and names the reinstall")
+    func mismatchOnTheRail() {
+        let running = card(lidShut(.helperMismatch))
+        #expect(running.chosenStop == 2)
+        #expect(running.filledTo == 1, "nothing confirms the lid is covered")
+        #expect(running.beadKind == .cannotTell, "the strike says the hold is gone, which nobody knows")
+        #expect(running.thirdStopLabel == KeepAwakeCopy.railHelperMismatch)
+        #expect(!running.canPress(2), "a retry lands, is refused, and changes nothing")
+        #expect(running.canPress(0) && running.canPress(1))
+
+        let resting = card(off(lid: .helperMismatch))
+        #expect(resting.thirdStopLabel == KeepAwakeCopy.lidClosed)
+        #expect(resting.previewLine(for: 2) == KeepAwakeCopy.lidHelperMismatch)
+    }
+
+    /// The third word is right-aligned under the last stop and "Coffee" is
+    /// centred under the middle one, in the same row with nothing keeping
+    /// them apart. The new words are the longest the rail has ever had, so
+    /// they are measured at the narrowest width the card is drawn at.
+    @Test("Every word under the third stop clears the middle label")
+    func thirdWordsFit() {
+        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        func width(_ text: String) -> CGFloat {
+            (text as NSString).size(withAttributes: [.font: font]).width
+        }
+        // The narrowest card, less the content inset either side.
+        let rail: CGFloat = 260 - 2 * 10
+        let coffeeEnds = rail / 2 + width(KeepAwakeCopy.railAwake) / 2
+        for word in [KeepAwakeCopy.lidClosed, KeepAwakeCopy.railChecking,
+                     KeepAwakeCopy.railNotHeld, KeepAwakeCopy.railCannotTell,
+                     KeepAwakeCopy.railUpdating, KeepAwakeCopy.railRestartNeeded,
+                     KeepAwakeCopy.railHelperMismatch] {
+            let starts = rail - width(word)
+            #expect(starts - coffeeEnds >= 8,
+                    "\(word) runs into \(KeepAwakeCopy.railAwake): \(starts - coffeeEnds)pt apart")
+        }
     }
 
     // MARK: - The figure

@@ -63,6 +63,21 @@ public enum KeepAwakeHelperInstallation: String, Equatable, Sendable, Codable {
     case installed
 }
 
+/// Where the switch to the helper from a new copy of Ledge stands.
+///
+/// Two faces of one fact: the helper running is the copy from before an
+/// update, and nothing it says can be heard. One is waiting for it to make
+/// way, which takes about two minutes and needs nothing from anybody. The
+/// other is the wait having failed twice, which needs a restart.
+public enum KeepAwakeHandover: String, Equatable, Sendable, Codable, CaseIterable {
+    /// The old helper has been given the hold back and is being left alone
+    /// long enough to exit, so the next request starts the new one.
+    case underWay
+    /// Still the old copy after both waits. Ledge goes on asking every few
+    /// minutes, and a restart is the sure way out.
+    case restartNeeded
+}
+
 /// What the lid-closed mode is doing, as the card and the menu bar see it.
 ///
 /// Deliberately not an `Optional<Error>`: the two states that are neither on
@@ -115,6 +130,28 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
     case cannotTell
     /// The daemon answered, and the answer was no.
     case refused(KeepAwakeLidCode)
+    /// The helper is the copy from before an update, and Ledge is switching
+    /// to the new one — or has tried, and needs a restart to finish.
+    ///
+    /// Its own state rather than `cannotTell` or `off`, which is what it read
+    /// as. `cannotTell` treats a known fault as an unknown one, and its advice
+    /// — press again — took a hold Ledge could never hear about and landed
+    /// in the same state. `off` was worse: with nothing running, the same
+    /// failure offered the mode as ready to switch on. This one is never a
+    /// hold and never offerable, because nothing it would do can be
+    /// confirmed until the new helper is the one answering.
+    case handover(KeepAwakeHandover)
+    /// The helper installed with this copy of Ledge would fail the same check
+    /// its answers fail, so nothing it says can be confirmed — now or after a
+    /// restart.
+    ///
+    /// Not a face of `handover`. That one is a process an update left behind
+    /// and fixes itself; this one is the installation, and only a reinstall
+    /// changes it. Its own state so it can say so, and so it never gives up a
+    /// hold the way a handover does: everything Ledge sends still lands, and
+    /// the hold the user asked for is very probably standing. Never a hold
+    /// all the same, because nothing can vouch for it.
+    case helperMismatch
 
     /// The hold is in force as far as anything here can tell.
     ///
@@ -143,6 +180,14 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         // answering it here took the menu-bar item away from somebody whose
         // lid was already shut over a hold that may well have been standing.
         case .cannotTell: false
+        // Not live either face. The handover begins by giving the hold back,
+        // and it is not taken again until the new helper has said yes — so
+        // the one thing that is never true during it is that the lid is
+        // covered.
+        case .handover: false
+        // Not live. Its heartbeats very probably keep a hold standing, but
+        // nothing can confirm it, which is the line `cannotTell` draws too.
+        case .helperMismatch: false
         case .unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .refused: false
         }
     }
@@ -162,6 +207,14 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         // Worth another press: taking the hold again is exactly what
         // resolves not knowing.
         case .cannotTell: true
+        // Not until the new helper answers. Nothing the old one does can be
+        // confirmed, so the client holds every request back until then, and
+        // after a restart is needed no press changes anything at all. A
+        // switch offered here would be a press that visibly does nothing.
+        case .handover: false
+        // No press fixes an installation. One would land, be refused like
+        // everything else, and change nothing the card could show.
+        case .helperMismatch: false
         case .holding, .unconfirmed, .applying,
              .unsignedBuild, .notInstalled, .needsApproval: false
         }
@@ -181,6 +234,9 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         case .applying: "applying"
         case .cannotTell: "cannot-tell"
         case .refused(let code): "refused-\(code.rawValue)"
+        case .handover(.underWay): "handing-over"
+        case .handover(.restartNeeded): "restart-needed"
+        case .helperMismatch: "helper-mismatch"
         }
     }
 
@@ -218,11 +274,22 @@ public enum KeepAwakeLidState: Equatable, Sendable, Codable {
         // is still standing, and reading that as "nothing to end" took the
         // menu-bar item away from a Mac that was being held.
         case .holding, .unconfirmed, .applying, .cannotTell, .unreachable, .refused: true
+        // A session that wanted the lid is still running through it, with an
+        // ordinary hold of its own and a release nobody could hear land. If
+        // the lid is already down on an external display, the menu-bar item
+        // is the one place left to read "updating" and to end it.
+        case .handover: true
+        // The heartbeat goes on landing, so the hold is very probably
+        // standing, and with the lid down the menu-bar item is the only way
+        // to end it.
+        case .helperMismatch: true
         }
     }
 
     public var belongsOnARunningCard: Bool {
-        isLive || isRefusal || self == .unreachable || self == .cannotTell
+        if case .handover = self { return true }
+        if self == .helperMismatch { return true }
+        return isLive || isRefusal || self == .unreachable || self == .cannotTell
     }
 
     /// Whether the helper exists to be talked to at all. Settings asks this to
@@ -278,6 +345,16 @@ public struct KeepAwakeLidBadge: Equatable, Sendable {
         if state.isConfirmed {
             headline = remaining.map(KeepAwakeCopy.lidMenuHeadline(remaining:))
                 ?? KeepAwakeCopy.lidMenuHeadlineOpenEnded
+        } else if case .handover(let face) = state {
+            // Its own line, because these are the states with an instruction
+            // that fits in a headline: keep the lid open, restart, reinstall.
+            // None says the lid is covered, and "can't be checked" would hide
+            // the fact that Ledge knows exactly why.
+            headline = face == .underWay
+                ? KeepAwakeCopy.lidMenuHeadlineUpdating
+                : KeepAwakeCopy.lidMenuHeadlineRestartNeeded
+        } else if state == .helperMismatch {
+            headline = KeepAwakeCopy.lidMenuHeadlineHelperMismatch
         } else if state == .cannotTell || state.isRefusal || state == .unreachable {
             // The item is here so the hold can be ended, not to say it is
             // working. A renewal the daemon refused leaves a lease that may

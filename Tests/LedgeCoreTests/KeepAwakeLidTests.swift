@@ -14,8 +14,11 @@ import Testing
 struct KeepAwakeLidTests {
 
     private static let everyState: [KeepAwakeLidState] =
-        [.unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .holding, .unconfirmed]
+        [.unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .holding, .unconfirmed,
+         .applying, .cannotTell]
             + KeepAwakeLidCode.allCases.map { .refused($0) }
+            + KeepAwakeHandover.allCases.map { .handover($0) }
+            + [.helperMismatch]
 
     // MARK: - The nine codes
 
@@ -207,10 +210,80 @@ struct KeepAwakeLidTests {
                     "\(state.name): an item for a hold nobody asked for")
         }
         for state: KeepAwakeLidState in [.holding, .unconfirmed, .applying, .cannotTell,
-                                         .unreachable, .refused(.busy), .refused(.foreign)] {
+                                         .unreachable, .refused(.busy), .refused(.foreign),
+                                         .handover(.underWay), .handover(.restartNeeded), .helperMismatch] {
             #expect(KeepAwakeLidBadge.badge(for: state, remaining: nil) != nil,
                     "\(state.name): no way out of a hold that may be standing")
         }
+    }
+
+    // MARK: - A helper an update left behind
+
+    /// Neither face is a hold: the handover begins by giving the hold back
+    /// and takes it again only once the new helper says yes. Neither is
+    /// offerable: nothing the old helper does can be confirmed, so a press
+    /// would be held back by the client and visibly do nothing.
+    @Test("A handover is never a hold and never offered")
+    func handoverIsNeitherHeldNorOfferable() {
+        for face in KeepAwakeHandover.allCases {
+            let state = KeepAwakeLidState.handover(face)
+            #expect(!state.isConfirmed, "\(state.name) claimed the lid is covered")
+            #expect(!state.isLive, "\(state.name) told the menu bar the hold is on")
+            #expect(!state.mayArm, "\(state.name) offered a mode nothing could confirm")
+            #expect(!state.isRefusal, "\(state.name) is not the daemon saying no")
+            #expect(state.belongsOnARunningCard, "\(state.name) is about the session on the card")
+        }
+    }
+
+    /// The log names are how the owner's own log was read when this was
+    /// found: "lid reads cannot-tell" over a fault that had a known cause.
+    @Test("Each face has its own name in the log")
+    func handoverHasItsOwnNames() {
+        let names = Self.everyState.map(\.name)
+        #expect(Set(names).count == names.count, "two states share a log name: \(names)")
+        #expect(KeepAwakeLidState.handover(.underWay).name == "handing-over")
+        #expect(KeepAwakeLidState.handover(.restartNeeded).name == "restart-needed")
+    }
+
+    @Test("The menu bar says what to do during a handover, and never that the lid is covered")
+    func handoverMenuSaysWhatToDo() {
+        let covered = [KeepAwakeCopy.lidMenuHeadline(remaining: "2h 14m"),
+                       KeepAwakeCopy.lidMenuHeadlineOpenEnded]
+        let underWay = KeepAwakeLidBadge.badge(for: .handover(.underWay), remaining: "2h 14m")
+        let stuck = KeepAwakeLidBadge.badge(for: .handover(.restartNeeded), remaining: "2h 14m")
+        #expect(underWay?.headline == KeepAwakeCopy.lidMenuHeadlineUpdating)
+        #expect(stuck?.headline == KeepAwakeCopy.lidMenuHeadlineRestartNeeded)
+        for badge in [underWay, stuck] {
+            #expect(!covered.contains(badge?.headline ?? ""), "a handover promised the lid was covered")
+            #expect(badge?.endTitle == KeepAwakeCopy.lidMenuEnd, "the item must still end the session")
+        }
+        #expect(underWay?.headline.contains("lid open") == true)
+        #expect(stuck?.headline.lowercased().contains("restart") == true)
+    }
+
+    // MARK: - A helper the installation would refuse too
+
+    /// Not a hold, because nothing can confirm one; not offerable, because no
+    /// press fixes an installation. Unlike a handover it keeps the menu-bar
+    /// item for the opposite reason: nothing was given back, the heartbeat
+    /// goes on landing, and the hold very probably stands.
+    @Test("A mismatched helper is never a hold, never offered, and keeps a way out")
+    func mismatchIsNeitherHeldNorOfferable() {
+        let state = KeepAwakeLidState.helperMismatch
+        #expect(!state.isConfirmed)
+        #expect(!state.isLive)
+        #expect(!state.mayArm)
+        #expect(!state.isRefusal)
+        #expect(state.needsAWayOut, "a hold that very probably stands lost its only way out")
+        #expect(state.belongsOnARunningCard)
+        #expect(state.name == "helper-mismatch")
+        #expect(state != .handover(.restartNeeded), "a reinstall is not a restart")
+
+        let badge = KeepAwakeLidBadge.badge(for: state, remaining: "2h 14m")
+        #expect(badge?.headline == KeepAwakeCopy.lidMenuHeadlineHelperMismatch)
+        #expect(badge?.headline.lowercased().contains("reinstall") == true)
+        #expect(badge?.headline != KeepAwakeCopy.lidMenuHeadline(remaining: "2h 14m"))
+        #expect(badge?.endTitle == KeepAwakeCopy.lidMenuEnd)
     }
 
     @Test("Only a confirmed hold is announced as covering the lid")

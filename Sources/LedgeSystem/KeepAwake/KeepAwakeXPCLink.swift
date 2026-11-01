@@ -1,6 +1,7 @@
 import Foundation
 import LedgeHelperKit
 import os
+import Security
 
 /// The real connection to the root daemon.
 ///
@@ -14,7 +15,19 @@ public final class KeepAwakeXPCLink: @unchecked Sendable, KeepAwakeHelperLink {
 
     private static let log = Logger(subsystem: "com.egemert.ledge", category: "keep-awake-xpc")
 
-    private let serviceName: String
+    /// What a connection is made to.
+    ///
+    /// The daemon's mach service in the app, and an anonymous listener in a
+    /// test. The second exists because the one failure this file has to
+    /// recognise exactly — an answer the requirement refuses — can be
+    /// produced in-process with a requirement nothing satisfies, and a link
+    /// that could only reach a root daemon could never be shown it.
+    private enum Peer {
+        case machService(String)
+        case endpoint(NSXPCListenerEndpoint)
+    }
+
+    private let peer: Peer
     private let requirement: String
     private let lock = NSLock()
     private var connection: NSXPCConnection?
@@ -37,7 +50,14 @@ public final class KeepAwakeXPCLink: @unchecked Sendable, KeepAwakeHelperLink {
     ///     app cannot be answered by a release daemon, or either by anything
     ///     signed with another certificate.
     public init(serviceName: String, requirement: String) {
-        self.serviceName = serviceName
+        self.peer = .machService(serviceName)
+        self.requirement = requirement
+    }
+
+    /// For a test: a link to a listener in the same process, checked against
+    /// `requirement` exactly as the daemon's answers are.
+    init(endpoint: NSXPCListenerEndpoint, requirement: String) {
+        self.peer = .endpoint(endpoint)
         self.requirement = requirement
     }
 
@@ -66,9 +86,14 @@ public final class KeepAwakeXPCLink: @unchecked Sendable, KeepAwakeHelperLink {
     private func proxy(
         onFailure: @escaping @Sendable (Error) -> Void
     ) -> KeepAwakeHelperProtocol? {
-        let live: NSXPCConnection = lock.withLock {
-            if let connection { return connection }
-            let made = NSXPCConnection(machServiceName: serviceName, options: .privileged)
+        let (live, which): (NSXPCConnection, Int) = lock.withLock {
+            if let connection { return (connection, epoch) }
+            let made: NSXPCConnection = switch peer {
+            case .machService(let name):
+                NSXPCConnection(machServiceName: name, options: .privileged)
+            case .endpoint(let endpoint):
+                NSXPCConnection(listenerEndpoint: endpoint)
+            }
             made.remoteObjectInterface = NSXPCInterface(with: KeepAwakeHelperProtocol.self)
             // Before resume, never after: a connection that has been resumed
             // may already have carried a message.
@@ -85,9 +110,95 @@ public final class KeepAwakeXPCLink: @unchecked Sendable, KeepAwakeHelperLink {
             made.interruptionHandler = { [weak self] in self?.forget(mine) }
             made.resume()
             connection = made
-            return made
+            return (made, mine)
         }
-        return live.remoteObjectProxyWithErrorHandler(onFailure) as? KeepAwakeHelperProtocol
+        return live.remoteObjectProxyWithErrorHandler { [weak self] error in
+            guard Self.isRefusedAnswer(error) else { return onFailure(error) }
+            // Dropped before the caller hears about it, so by the time
+            // anybody above can act on the answer the connection is already
+            // gone and the next call cannot go out on it.
+            self?.retire(which)
+            onFailure(KeepAwakeHelperOutOfDate())
+        } as? KeepAwakeHelperProtocol
+    }
+
+    /// The daemon answered and the requirement refused the answer.
+    ///
+    /// `NSXPCConnectionCodeSigningRequirementFailure`, which in practice
+    /// means one thing: Ledge was updated, the bundle the running daemon was
+    /// started from was deleted underneath it, and macOS can no longer look
+    /// its code up to check it. Every answer from then on fails the same way,
+    /// at once.
+    ///
+    /// The SDK says the connection is invalidated when this happens. It is
+    /// not: no handler fires, the connection stays up, and the next call goes
+    /// out on it and is acted on by the daemon all the same. A connection
+    /// left open keeps the daemon counting a client, so it never idle-exits
+    /// and never makes way for the copy in the new bundle. That is how a Mac
+    /// came to read "Can't tell" from one update until the next reboot.
+    static func isRefusedAnswer(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain
+            && error.code == NSXPCConnectionCodeSigningRequirementFailure
+    }
+
+    /// Tears down one connection because of what it answered.
+    ///
+    /// By epoch, like `forget`: an answer can arrive after its connection has
+    /// already been replaced, and retiring whatever is in the slot by then
+    /// would drop a connection that has done nothing wrong.
+    private func retire(_ which: Int) {
+        let old: NSXPCConnection? = lock.withLock {
+            guard which == epoch else { return nil }
+            let held = connection
+            connection = nil
+            epoch += 1
+            return held
+        }
+        guard let old else { return }
+        Self.log.error("keep awake: the helper's answer failed the code signing check, so it is the copy from before an update; dropping the connection")
+        old.invalidate()
+    }
+
+    /// Whether a connection is being kept. For a test, which has no other
+    /// way to see that a refused answer let go of it.
+    var isConnected: Bool { lock.withLock { connection != nil } }
+
+    // MARK: - The helper on disk
+
+    /// Where the helper lives inside the app: the job's `BundleProgram`, as
+    /// `helper-plist.sh` writes it. A test reads the script to keep the two
+    /// from drifting apart.
+    public static let helperProgram = "Contents/MacOS/LedgeKeepAwakeHelper"
+
+    /// Whether the helper inside `bundle` passes the requirement this link
+    /// holds every answer to.
+    ///
+    /// The one way to tell the two causes of a refused answer apart. If the
+    /// copy on disk passes, what is refusing can only be a process started
+    /// from a bundle that has since been deleted — and the handover is the
+    /// cure. If it fails, the installation is wrong, a restart starts the
+    /// same helper again, and a handover would give up a hold for nothing.
+    public func checkInstalledHelper(in bundle: Bundle = .main) -> KeepAwakeInstalledHelper {
+        Self.check(executable: bundle.bundleURL.appendingPathComponent(Self.helperProgram),
+                   against: requirement)
+    }
+
+    /// The check itself, on any file. Static so a test can point it at a
+    /// binary whose signature it knows.
+    static func check(executable: URL, against text: String) -> KeepAwakeInstalledHelper {
+        // Nothing there is not a failed check. It says nothing about which
+        // helper is installed, and the rescue should not be held back for it.
+        guard FileManager.default.fileExists(atPath: executable.path) else { return .unchecked }
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executable as CFURL, [], &code) == errSecSuccess,
+              let code else { return .unchecked }
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess,
+              let requirement else { return .unchecked }
+        // Anything short of success is a helper the app would refuse: the
+        // wrong signer, a broken signature, or none at all.
+        return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess ? .passes : .fails
     }
 
     /// Drops the connection so the next call makes a fresh one.
@@ -219,6 +330,10 @@ public final class KeepAwakeXPCLink: @unchecked Sendable, KeepAwakeHelperLink {
     /// pending reply's error handler on teardown — so past this many the
     /// connection is torn down and the next call builds a fresh one. That is
     /// the only lever there is: an abandoned XPC call cannot be cancelled.
+    ///
+    /// No help with an out-of-date daemon. Its refused answers are answers,
+    /// so they never pile up here, and that connection is dropped by
+    /// `retire` the moment the first one arrives instead.
     static let outstandingLimit = 8
 
     private func beganOne() {
@@ -296,3 +411,15 @@ private struct UncheckedBox<Value>: @unchecked Sendable {
 
 /// No connection could be made at all.
 public struct KeepAwakeXPCUnavailable: Error, Sendable {}
+
+/// The daemon answered, and the answer failed the app's code signing check.
+///
+/// Its own error rather than a failure like any other, because it is the one
+/// failure that is not luck. It comes back at once, every time, from a daemon
+/// still running out of a bundle an update has deleted — and that daemon
+/// still acts on every message it is sent. Read as silence, it became "Can't
+/// tell" on every press, and the press that was meant to settle it took a hold
+/// the app could never hear about.
+public struct KeepAwakeHelperOutOfDate: Error, Sendable, Equatable {
+    public init() {}
+}

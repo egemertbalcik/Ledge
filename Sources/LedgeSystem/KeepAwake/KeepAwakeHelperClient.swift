@@ -120,6 +120,48 @@ public enum KeepAwakeHelperState: Sendable, Equatable {
     case unreachable
     /// The daemon answered and said no.
     case refused(KeepAwakeHelperCode)
+    /// The daemon is the copy from before an update, and the client is
+    /// waiting for it to make way for the new one.
+    ///
+    /// Not silence, and not a refusal. Every answer it sends fails the app's
+    /// code signing check at once, so nothing it says can be heard — while
+    /// everything the app sends it still lands. The hold has been given back
+    /// and nothing is sent until it has had time to exit, so this is never a
+    /// hold, whatever the last reading said.
+    case handingOver
+    /// The handover was tried and the old copy is still the one answering.
+    ///
+    /// A restart is the one thing sure to replace it, so that is what the
+    /// card says. The client still asks once every few minutes, because the
+    /// old copy can yet get clean and exit, and the first answer that comes
+    /// through ends this by itself.
+    case restartNeeded
+    /// Every answer is refused, and the helper installed in this copy of
+    /// Ledge would be refused too.
+    ///
+    /// Not a stale process, so not a handover. A restart starts the same
+    /// helper again and changes nothing, and the release a handover begins
+    /// with would only take away a hold that is very probably standing:
+    /// everything the app sends still lands. So nothing is given back, the
+    /// heartbeat goes on, and the card asks for a reinstall. Never a hold,
+    /// because nothing can confirm one.
+    case helperMismatch
+}
+
+/// Whether the helper inside this copy of Ledge passes the check its answers
+/// are held to.
+///
+/// Asked once, on the first refused answer, to tell the two causes of a
+/// refusal apart. A copy on disk that passes leaves one explanation: the
+/// process answering was started from a bundle that has since been replaced.
+/// A copy that fails means the installation itself is wrong.
+public enum KeepAwakeInstalledHelper: Sendable, Equatable {
+    case passes
+    case fails
+    /// The check could not be made — no file there, a requirement that would
+    /// not compile. Treated as `passes`: the handover is the rescue the field
+    /// needs, and a check that could not run is no evidence against it.
+    case unchecked
 }
 
 /// Keeps one lid-closed hold alive.
@@ -158,9 +200,68 @@ public actor KeepAwakeHelperClient {
     /// stopped answering is noticed with time left to do something about it.
     public static let callTimeout: TimeInterval = 45
 
+    /// How long the client says nothing at all while an out-of-date daemon
+    /// lets go.
+    ///
+    /// The old daemon cannot be told to exit — it is code already on the
+    /// user's Mac — and its own rule is the only way out: clean, nobody
+    /// connected, and quiet for `idleExitAfter`, asked every `idleCheckEvery`.
+    /// So the worst case is the two added together, from the last word the
+    /// app said. The margin is for launchd reaping it and for the restore the
+    /// release set off, which has to finish before the daemon counts as
+    /// clean.
+    ///
+    /// Read from the daemon's own constants rather than written down here a
+    /// second time. Those are pinned by a test, because the daemon being
+    /// waited out was built before this one.
+    ///
+    /// It stays this long while helpers without the replaced-bundle check
+    /// are still installed. A helper built with that check leaves within
+    /// seconds of its restore, but the app cannot tell which kind is
+    /// answering until one of them is heard — and a question asked early of
+    /// an old one resets its idle clock and costs another whole round. Once
+    /// every installed helper has the check, this can shrink to a few
+    /// seconds.
+    ///
+    /// Counted on a clock that stops while the Mac sleeps, as the daemon's
+    /// own idle tick does. See `sleepWhileAwake`.
+    public static var handoverSilence: TimeInterval {
+        HelperLimits.idleExitAfter + HelperLimits.idleCheckEvery + handoverMargin
+    }
+    static let handoverMargin: TimeInterval = 10
+    /// How many silences before saying a restart is needed. The second
+    /// covers a restore that took longer than the margin.
+    static let handoverRounds = 2
+    /// How often the client asks again once a restart is needed.
+    ///
+    /// Longer than `handoverSilence` on purpose. Each question resets the old
+    /// daemon's idle clock, and only a gap longer than its whole exit rule
+    /// lets that rule fire between two questions. The link drops every
+    /// refused connection at once, so the gap really is a gap.
+    static let restartProbeEvery: TimeInterval = 5 * 60
+
+    /// The silence's own sleep: on the clock that stops while the Mac sleeps.
+    ///
+    /// The daemon being waited out ticks on uptime. A silence counted on the
+    /// continuous clock — which is what `Task.sleep(for:)` uses — runs down
+    /// while the lid is shut, which is the natural thing to do right after
+    /// clicking Install, and the first question on waking reaches an old
+    /// daemon that has not ticked once since. Two of those in a row would
+    /// read as "restart needed" over a helper that would have left by itself
+    /// a minute later.
+    public static let sleepWhileAwake: @Sendable (TimeInterval) async throws -> Void = {
+        try await Task.sleep(for: .seconds($0), clock: .suspending)
+    }
+
     private let link: KeepAwakeHelperLink
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
+    /// The handover's waits, apart from the heartbeat's and the timeouts'.
+    /// Those are about the app's own clock; this one is about the daemon's.
+    private let silence: @Sendable (TimeInterval) async throws -> Void
+    /// Whether the helper inside this copy of Ledge would pass the check its
+    /// answers fail. Asked at most once, on the first refusal.
+    private let installedHelper: @Sendable () -> KeepAwakeInstalledHelper
 
     /// The session being held, and the generation it is being held under.
     ///
@@ -291,17 +392,76 @@ public actor KeepAwakeHelperClient {
     private var beat: Task<Void, Never>?
     private var state: KeepAwakeHelperState = .idle
 
+    /// The handover under way, if there is one, including the slow questions
+    /// asked once a restart is needed.
+    ///
+    /// While it runs the client sends nothing on anybody's behalf: no
+    /// heartbeat, no status, no Low Power Mode, no hold for a session that
+    /// began in the meantime. Each of those would reach the old daemon,
+    /// reset its idle clock, and keep it alive for another two minutes.
+    private var handover: Task<Void, Never>?
+    /// Both silences ended on the old copy. The handover goes on asking, far
+    /// less often, and the card says a restart is needed meanwhile.
+    private var needsRestart = false
+
+    /// What the client must say while it is keeping quiet, or nil when it is
+    /// free to talk.
+    private var quiet: KeepAwakeHelperState? {
+        guard handover != nil else { return nil }
+        return needsRestart ? .restartNeeded : .handingOver
+    }
+
+    /// What the helper on disk last said, and when it was asked.
+    ///
+    /// A pass is kept: nothing about an installation that checked out is
+    /// going to start failing in a way a handover gets wrong. A fail is not
+    /// kept, because a fail is also what a helper reads as while it is being
+    /// written — Finder's Replace, `ditto`, an installer copying over the
+    /// app in place — and the copy finishing a second later leaves exactly
+    /// the stale process the handover exists for. Pinned, that one read said
+    /// "reinstall" until Ledge was relaunched, through the reinstall itself,
+    /// while the heartbeat kept the stale helper alive.
+    private var installedVerdict: KeepAwakeInstalledHelper?
+    private var installedCheckedAt: Date?
+    /// How old a fail may be before a refusal asks the disk again.
+    ///
+    /// Under the heartbeat, so every renewal a mismatched helper refuses
+    /// looks again and a finished copy is noticed within one beat. Over a
+    /// burst, so several refusals arriving together hash the file once. The
+    /// check reads one small binary and is cheap at that rate; it only runs
+    /// while answers are being refused.
+    static let installedRecheckAfter: TimeInterval = 15
+    /// Every answer is refused and the installed helper would be too.
+    ///
+    /// A flag laid over the state rather than a state of its own, because
+    /// nothing about the client's ordinary bookkeeping stops: the heartbeat
+    /// goes on landing, and its silence is read exactly as before underneath.
+    /// The first answer that is heard takes the flag off.
+    private var mismatched = false
+
     /// The last thing the daemon actually said, if it has said anything.
     private var lastStatus: KeepAwakeHelperStatus?
 
+    /// - Parameters:
+    ///   - silence: the handover's waits. Defaults to a sleep that stops
+    ///     while the Mac sleeps, like the daemon's idle tick.
+    ///   - installedHelper: whether the helper inside this copy of Ledge
+    ///     passes the check its answers are held to. Defaults to `.passes`,
+    ///     which is what every refusal was taken to mean before the check
+    ///     existed; the app passes the real one.
     public init(link: KeepAwakeHelperLink,
                 now: @escaping @Sendable () -> Date = Date.init,
                 sleep: @escaping @Sendable (TimeInterval) async throws -> Void = {
                     try await Task.sleep(for: .seconds($0))
-                }) {
+                },
+                silence: @escaping @Sendable (TimeInterval) async throws -> Void
+                    = KeepAwakeHelperClient.sleepWhileAwake,
+                installedHelper: @escaping @Sendable () -> KeepAwakeInstalledHelper = { .passes }) {
         self.link = link
         self.now = now
         self.sleep = sleep
+        self.silence = silence
+        self.installedHelper = installedHelper
     }
 
     /// What this client believes, as of being asked.
@@ -310,7 +470,13 @@ public actor KeepAwakeHelperClient {
     /// of the clock. A reassurance that only expired when the *next* request
     /// finished stood for ever on a client whose daemon had gone away —
     /// nothing else happening is exactly the case it is supposed to cover.
+    ///
+    /// The handover and a mismatched helper are laid over whatever is stored:
+    /// both say nothing the daemon answers can be heard, and that outranks
+    /// any reading taken from it.
     public var currentState: KeepAwakeHelperState {
+        if let quiet { return quiet }
+        if mismatched { return .helperMismatch }
         guard state == .temporarilyUnavailable else { return state }
         return confidence()
     }
@@ -333,12 +499,20 @@ public actor KeepAwakeHelperClient {
             issuedGeneration = 0
             lowPowerWanted = nil
         }
-        let outcome = await renew()
+        // Remembered and not sent. The handover holds this session itself
+        // once the new daemon answers, and a hold sent now would reach the
+        // old one and keep it alive.
+        if let quiet { return quiet }
+        _ = await renew()
         // A `begin` that was overtaken by an `end`, or by another `begin`, has
         // nothing left to start a heartbeat for.
-        guard lifecycle == era else { return state }
+        guard lifecycle == era else { return currentState }
         startBeating()
-        return outcome
+        // The state as anybody else would read it now, not the bare outcome:
+        // a refusal from a mismatched helper is laid over a renewal that
+        // otherwise reads as silence, and returning the silence would tell
+        // the card "can't tell" instead of what to do.
+        return currentState
     }
 
     /// Gives the hold back.
@@ -365,13 +539,25 @@ public actor KeepAwakeHelperClient {
         let sent = issuedGeneration
         forget()
 
+        // Nothing to send while a handover runs. Its own release went out
+        // when it began and nothing has been held since, so a second one
+        // would only reset the old daemon's idle clock.
+        guard quiet == nil else { return }
         // `issuedGeneration`, not `generation`: a hold still in flight has
         // already named a number to the daemon, and releasing the one this
         // client had heard back about would leave that one holding the Mac.
         guard let id, sent > 0 else { return }
-        _ = try? await withTimeout { [link] in
-            try await link.release(session: id, generation: sent)
-        }
+        do {
+            _ = try await withTimeout { [link] in
+                try await link.release(session: id, generation: sent)
+            }
+        } catch is KeepAwakeHelperOutOfDate {
+            // The release landed. Its answer is the news that nothing the
+            // daemon says can be heard, and that is still worth acting on
+            // with no session left: the next reading would otherwise say
+            // "off" over a daemon nothing can be heard from.
+            heardRefusal()
+        } catch {}
     }
 
     /// Asks for Low Power Mode, or gives it back.
@@ -403,11 +589,17 @@ public actor KeepAwakeHelperClient {
     /// rather than left to a warning, so the discard reads as a decision.
     @discardableResult
     private func pushLowPower() async -> KeepAwakeHelperCode? {
+        // Kept, not sent. The re-hold at the end of a handover pushes it
+        // again behind the new hold, like every renewal does.
+        guard quiet == nil else { return nil }
         guard let id = session, let on = lowPowerWanted, generation > 0 else { return nil }
         do {
             return try await withTimeout { [link, generation] in
                 try await link.setLowPowerMode(on, session: id, generation: generation)
             }
+        } catch is KeepAwakeHelperOutOfDate {
+            heardRefusal()
+            return nil
         } catch {
             return nil
         }
@@ -419,6 +611,10 @@ public actor KeepAwakeHelperClient {
     /// memory, so this is cheap enough to drive a settings pane.
     @discardableResult
     public func refreshStatus() async -> KeepAwakeHelperStatus? {
+        // Not asked during a handover. A status call is the cheapest thing
+        // this client sends and still enough to keep the old daemon alive,
+        // and the card reads the handover from `currentState` regardless.
+        guard quiet == nil else { return nil }
         // Whose observation this is, taken before the call. A status held in
         // flight while its session ended and another began came back and
         // filed itself as the *new* session's evidence, so B read as
@@ -426,7 +622,19 @@ public actor KeepAwakeHelperClient {
         // ever true of A.
         let era = lifecycle
         let id = session
-        let answer = try? await withTimeout { [link] in try await link.status() }
+        let answer: KeepAwakeHelperStatus?
+        do {
+            answer = try await withTimeout { [link] in try await link.status() }
+        } catch is KeepAwakeHelperOutOfDate {
+            // Not dropped with the rest. This was a `try?`, so a daemon that
+            // refused every answer at once looked exactly like one that had
+            // timed out — and with no session that read as "off", offering a
+            // mode nothing could confirm.
+            heardRefusal()
+            return nil
+        } catch {
+            answer = nil
+        }
         guard let answer else { return nil }
         guard lifecycle == era, session == id else { return answer }
         lastStatus = answer
@@ -485,7 +693,7 @@ public actor KeepAwakeHelperClient {
     }
 
     private func beatOnce() async {
-        guard session != nil else { return }
+        guard session != nil, quiet == nil else { return }
         _ = await renew()
     }
 
@@ -510,6 +718,19 @@ public actor KeepAwakeHelperClient {
                 try await link.hold(session: id, generation: attempt,
                                     until: asked, leaseSeconds: Self.lease)
             }
+        } catch is KeepAwakeHelperOutOfDate {
+            // Before the era check, not after it. The refusal is a fact about
+            // the daemon rather than about this session, and the hold it
+            // refused to answer has landed all the same — `issuedGeneration`
+            // already names it, so a handover's release covers it whoever is
+            // running by then.
+            //
+            // Then read like any unanswered call. A handover has moved the
+            // era on, so the check below writes nothing; a mismatched helper
+            // has not, and its renewal is exactly what silence is: sent,
+            // probably taken, not heard.
+            heardRefusal()
+            answer = nil
         } catch {
             answer = nil
         }
@@ -569,7 +790,17 @@ public actor KeepAwakeHelperClient {
     /// memory without spawning anything, is the difference between a card that
     /// says the Mac is held and a card that is right.
     private func confirm(era: Int, session id: String) async -> KeepAwakeHelperState {
-        let status = try? await withTimeout { [link] in try await link.status() }
+        let status: KeepAwakeHelperStatus?
+        do {
+            status = try await withTimeout { [link] in try await link.status() }
+        } catch is KeepAwakeHelperOutOfDate {
+            // Read as no answer, like the renewal's refusal: the era check
+            // stops a handover's, and a mismatch is an unconfirmed acceptance.
+            heardRefusal()
+            status = nil
+        } catch {
+            status = nil
+        }
         guard lifecycle == era, session == id else { return state }
         guard let status else { return .pending }
         lastStatus = status
@@ -599,9 +830,17 @@ public actor KeepAwakeHelperClient {
             issuedGeneration = max(issuedGeneration, attempt)
             everIssued = true
 
-            let answer = try? await withTimeout { [link] in
-                try await link.hold(session: id, generation: attempt,
-                                    until: self.deadline, leaseSeconds: Self.lease)
+            let answer: KeepAwakeHelperCode?
+            do {
+                answer = try await withTimeout { [link] in
+                    try await link.hold(session: id, generation: attempt,
+                                        until: self.deadline, leaseSeconds: Self.lease)
+                }
+            } catch is KeepAwakeHelperOutOfDate {
+                heardRefusal()
+                answer = nil
+            } catch {
+                answer = nil
             }
             guard lifecycle == era, session == id else { return state }
             // The same bookkeeping as an ordinary renewal. Catching up used
@@ -643,7 +882,155 @@ public actor KeepAwakeHelperClient {
         generation = 0
         issuedGeneration = 0
         lowPowerWanted = nil
-        state = .idle
+        // A session ending says nothing about the daemon. The handover is
+        // still under way, or still waiting on a restart, and the card must
+        // go on saying so rather than "off".
+        state = quiet ?? .idle
+    }
+
+    // MARK: - The handover
+
+    /// What a refused answer means.
+    ///
+    /// Every refusal comes here, and asks whether the helper inside this copy
+    /// of Ledge would pass the same check. If it would, the process answering
+    /// can only be one started from a bundle that has since been replaced,
+    /// and the handover is the cure. If it would not, the installation looks
+    /// wrong: no release goes out, nothing goes quiet, and the client goes on
+    /// as before with the card saying to reinstall.
+    ///
+    /// "Looks", because a fail is asked again once it is
+    /// `installedRecheckAfter` old. A fail is the safe thing to act on while
+    /// it is wrong — it keeps the hold rather than giving it up — so the
+    /// first one is believed at once, which is what a broken installation
+    /// deserves, and it is never believed for long. A pass that follows it
+    /// goes straight into the handover, as if the fail had never been read.
+    private func heardRefusal() {
+        if installedVerdict == nil || failIsOld { checkInstalledHelper() }
+        if installedVerdict == .fails {
+            mismatched = true
+            return
+        }
+        mismatched = false
+        beginHandover()
+    }
+
+    private func checkInstalledHelper() {
+        installedVerdict = installedHelper()
+        installedCheckedAt = now()
+    }
+
+    /// Whether a fail on record is old enough to ask about again. A clock
+    /// that has gone backwards counts as old: an age that cannot be trusted
+    /// is no reason to keep believing a fail.
+    private var failIsOld: Bool {
+        guard installedVerdict == .fails, let checked = installedCheckedAt else { return false }
+        let age = now().timeIntervalSince(checked)
+        return age < 0 || age >= Self.installedRecheckAfter
+    }
+
+    /// Starts waiting out a daemon that is the copy from before an update.
+    ///
+    /// Synchronous on purpose: everything the handover owes is decided here,
+    /// in the same turn of the actor that heard the refusal, before anything
+    /// else can run. In particular the release is captured now, naming the
+    /// highest generation this session has sent — an `end` arriving a moment
+    /// later finds the client already quiet and sends nothing of its own.
+    private func beginHandover() {
+        guard quiet == nil else { return }
+        stopBeating()
+        // Every request still in the air belongs to an era that is over, so
+        // whatever it hears back — a refusal, a timeout — is written nowhere.
+        lifecycle += 1
+        let owed: (session: String, generation: Int)? = session.flatMap { id in
+            issuedGeneration > 0 ? (id, issuedGeneration) : nil
+        }
+        // What the old copy said about this hold ends here. The release takes
+        // it down, and a confirmation from before it must not make a silence
+        // after the handover read as "almost certainly still stands".
+        everAccepted = false
+        everIssued = false
+        lastConfirmed = nil
+        lastDenied = nil
+        // Above everything sent, so the hold after the handover is a new
+        // generation whichever daemon receives it. A fresh one has never
+        // heard of this session; the old one, if it is somehow still there,
+        // has retired every generation up to the one released.
+        generation = issuedGeneration
+        state = .handingOver
+        handover = Task { [weak self] in await self?.handOver(releasing: owed) }
+    }
+
+    /// The handover itself: one release, silence, and a question.
+    ///
+    /// The release lands even though nothing can be heard back from it, and
+    /// it makes the old copy clean now rather than ninety seconds from now
+    /// when its lease would have run out. Then nothing at all for
+    /// `handoverSilence`. Then one status call, which launchd answers by
+    /// starting the daemon from the new bundle if the old one has gone.
+    ///
+    /// Two refused questions and the card says a restart is needed — but the
+    /// asking does not stop. A restore that took its time, or a Mac that
+    /// slept through more than the clock could allow for, can still end with
+    /// the old copy leaving by itself, so a question goes out every
+    /// `restartProbeEvery` until one is answered.
+    private func handOver(releasing owed: (session: String, generation: Int)?) async {
+        if let owed {
+            _ = try? await withTimeout { [link] in
+                try await link.release(session: owed.session, generation: owed.generation)
+            }
+        }
+        var refused = 0
+        while true {
+            // Counted from after the release, because the release is the
+            // last thing the old copy heard and its idle clock starts there.
+            // A sleep cut short still asks. Returning here instead would
+            // leave the client quiet for good, and one question too early
+            // costs at most another round.
+            try? await silence(needsRestart ? Self.restartProbeEvery : Self.handoverSilence)
+            // Cancelled is not cut short. Every sleep in a cancelled task
+            // throws at once, and carrying on would ask as fast as the old
+            // copy can refuse — which keeps it alive, the one thing this
+            // loop is for undoing. Nothing cancels the handover today; this
+            // is the line that keeps that from mattering.
+            if Task.isCancelled { return }
+            do {
+                let answer = try await withTimeout { [link] in try await link.status() }
+                return await finishHandover(answer)
+            } catch is KeepAwakeHelperOutOfDate {
+                // Still the old copy. The status call it just refused was
+                // the last word again, so the next silence starts from it.
+                refused += 1
+                if refused >= Self.handoverRounds, !needsRestart {
+                    needsRestart = true
+                    state = .restartNeeded
+                }
+            } catch {
+                // Not refused, which is all the handover was for. Silence or
+                // an absent daemon is ordinary trouble, and the ordinary
+                // rules read it from here.
+                return await finishHandover(nil)
+            }
+        }
+    }
+
+    /// The new daemon answered. Holds again if a session still wants it.
+    private func finishHandover(_ answer: KeepAwakeHelperStatus?) async {
+        handover = nil
+        needsRestart = false
+        if let answer { lastStatus = answer }
+        guard session != nil else {
+            state = .idle
+            return
+        }
+        // Still the handover's state while this goes out: the session has
+        // nothing held until the new daemon says so, and "off" for the
+        // length of one call would be a flicker that says the opposite.
+        lifecycle += 1
+        let era = lifecycle
+        _ = await renew()
+        guard lifecycle == era else { return }
+        startBeating()
     }
 
     /// Runs one call under the timeout, or throws.
@@ -669,7 +1056,7 @@ public actor KeepAwakeHelperClient {
     ) async throws -> T {
         let seconds = Self.callTimeout
         let sleeper = sleep
-        return try await withCheckedThrowingContinuation { continuation in
+        let answer: T = try await withCheckedThrowingContinuation { continuation in
             let gate = FirstAnswerOnly(continuation)
             let timing = Task {
                 // The injected sleeper, so tests drive this rather than wait
@@ -683,6 +1070,10 @@ public actor KeepAwakeHelperClient {
                 timing.cancel()
             }
         }
+        // Heard. Whatever made answers fail the check is not doing so now,
+        // so a mismatch read from earlier refusals no longer stands.
+        mismatched = false
+        return answer
     }
 }
 

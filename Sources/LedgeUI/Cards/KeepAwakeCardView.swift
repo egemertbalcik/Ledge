@@ -562,7 +562,18 @@ public struct KeepAwakeCardView: View {
         if !isHolding { return .resting }
         if !payload.lidClosed { return .held }
         if isHoldingThroughLid { return .held }
-        if payload.lid == .cannotTell { return .cannotTell }
+        // A mismatched helper draws as `cannotTell` does, and for the same
+        // reason: the heartbeat keeps landing, so the hold may well stand,
+        // and nobody is waiting on an answer that is coming.
+        if payload.lid == .cannotTell || payload.lid == .helperMismatch { return .cannotTell }
+        // The handover's two faces, in the two existing drawings. While it is
+        // under way something is happening, so the ring breathes, and the
+        // fill stops at Coffee because that is all that is true. Once a
+        // restart is needed the hold has been given back for longer than any
+        // lease, and the struck bead is the honest picture of that.
+        if case .handover(let face) = payload.lid {
+            return face == .underWay ? .checking : .notHeld
+        }
         return lidIsWaiting ? .checking : .notHeld
     }
 
@@ -585,6 +596,10 @@ public struct KeepAwakeCardView: View {
     var thirdStopLabel: String {
         guard lidIsUnsettled else { return KeepAwakeCopy.lidClosed }
         if payload.lid == .cannotTell { return KeepAwakeCopy.railCannotTell }
+        if payload.lid == .helperMismatch { return KeepAwakeCopy.railHelperMismatch }
+        if case .handover(let face) = payload.lid {
+            return face == .underWay ? KeepAwakeCopy.railUpdating : KeepAwakeCopy.railRestartNeeded
+        }
         return lidIsWaiting ? KeepAwakeCopy.railChecking : KeepAwakeCopy.railNotHeld
     }
 
@@ -600,9 +615,11 @@ public struct KeepAwakeCardView: View {
         guard i == 2 else { return KeepAwakeCopy.on }
         switch beadKind {
         case .held: return KeepAwakeCopy.on
-        case .checking: return KeepAwakeCopy.railChecking
-        case .cannotTell: return KeepAwakeCopy.railCannotTell
-        case .notHeld: return KeepAwakeCopy.railNotHeld
+        // The word under the stop, whatever the drawing. The handover shares
+        // its beads with Checking and Not held, and reading those words
+        // aloud over a rail that says Updating would be the one reader with
+        // no picture told something the picture is not saying.
+        case .checking, .cannotTell, .notHeld: return thirdStopLabel
         case .resting: return KeepAwakeCopy.off
         }
     }
@@ -704,6 +721,10 @@ public struct KeepAwakeCardView: View {
             return KeepAwakeCopy.lid(payload.lid) ?? KeepAwakeCopy.lidRowHint
         case .refused(let code) where !code.isWorthRetrying:
             return KeepAwakeCopy.lid(payload.lid) ?? KeepAwakeCopy.lidRowHint
+        // Not the invitation. The press will only say why it cannot start,
+        // so the hover says so first.
+        case .handover, .helperMismatch:
+            return KeepAwakeCopy.lid(payload.lid) ?? KeepAwakeCopy.lidRowHint
         default:
             return KeepAwakeCopy.lidRowHint
         }
@@ -731,6 +752,13 @@ public struct KeepAwakeCardView: View {
     private var canRetryLid: Bool {
         guard lidIsUnsettled, !lidIsWaiting else { return false }
         if case .refused(let code) = payload.lid { return code.isWorthRetrying }
+        // Asking again during a handover changes nothing: the client holds
+        // the request back until the new helper answers, then holds the
+        // session again by itself. With a mismatched helper the request
+        // lands and is refused like the heartbeat already is. The sentence
+        // says what to do instead.
+        if case .handover = payload.lid { return false }
+        if payload.lid == .helperMismatch { return false }
         return true
     }
 
@@ -992,6 +1020,16 @@ public struct KeepAwakeCardView: View {
         // reason beside it is the dead control this card keeps being redrawn
         // to be rid of.
         case .notInstalled, .needsApproval, .unsignedBuild:
+            KeepAwakeCopy.lid(payload.lid)
+        // Always, on the resting card and the running one alike, and never
+        // waited for. With nothing running this is the sentence that took the
+        // place of a silent "off", and with a session running it is the only
+        // thing saying the lid is not covered for the next two minutes.
+        case .handover:
+            KeepAwakeCopy.lid(payload.lid)
+        // Always too. It is the one thing on the card that says what would
+        // fix this, and nothing else on the card will.
+        case .helperMismatch:
             KeepAwakeCopy.lid(payload.lid)
         }
     }

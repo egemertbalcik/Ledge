@@ -150,6 +150,39 @@ struct IdleExitTests {
     func staysWhileRecentlyBusy() {
         #expect(!IdleExit.shouldExit(clean: true, connections: 0, idleFor: 59))
     }
+
+    // MARK: - A bundle an update replaced
+
+    /// The client still connected is what kept the old copy alive until a
+    /// reboot: nothing it answers can pass the app's check, and the app could
+    /// not make it leave. A clean copy whose bundle is gone leaves anyway.
+    @Test("A clean daemon whose bundle was replaced leaves with clients connected")
+    func replacedAndCleanLeaves() {
+        #expect(IdleExit.shouldExit(clean: true, connections: 1, idleFor: 0, replaced: true))
+        #expect(IdleExit.shouldExit(clean: true, connections: 3, idleFor: 0, replaced: true))
+    }
+
+    /// The rule that must not move. Exiting with a claim outstanding leaves
+    /// the setting held with nobody watching the lease, and the new copy does
+    /// not inherit the hold.
+    @Test("A replaced daemon with a claim outstanding stays until it has put it back")
+    func replacedButNotCleanStays() {
+        #expect(!IdleExit.shouldExit(clean: false, connections: 0, idleFor: 6_000, replaced: true))
+        #expect(!IdleExit.shouldExit(clean: false, connections: 1, idleFor: 0, replaced: true))
+    }
+
+    @Test("A bundle nobody replaced changes nothing about the idle rule")
+    func notReplacedIsTheOldRule() {
+        for clean in [true, false] {
+            for connections in [0, 1] {
+                for idle: TimeInterval in [0, 59, 60, 6_000] {
+                    #expect(IdleExit.shouldExit(clean: clean, connections: connections,
+                                                idleFor: idle, replaced: false)
+                            == (clean && connections == 0 && idle >= 60))
+                }
+            }
+        }
+    }
 }
 
 /// Which boot this is.

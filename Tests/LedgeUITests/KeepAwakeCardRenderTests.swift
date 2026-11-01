@@ -217,6 +217,8 @@ struct KeepAwakeLidRenderTests {
     private static let everyState: [KeepAwakeLidState] =
         [.unsignedBuild, .notInstalled, .needsApproval, .unreachable, .off, .holding, .unconfirmed]
             + KeepAwakeLidCode.allCases.map { .refused($0) }
+            + KeepAwakeHandover.allCases.map { .handover($0) }
+            + [.helperMismatch]
 
     private func drawn(_ view: some View, width: CGFloat) -> CGSize? {
         let renderer = ImageRenderer(content: view.frame(width: width))
@@ -303,7 +305,8 @@ struct KeepAwakeLidRenderTests {
         }
         let standing = height(.off, note: false)
         for lid: KeepAwakeLidState in [.notInstalled, .needsApproval, .unsignedBuild,
-                                       .unreachable, .refused(.foreign)] {
+                                       .unreachable, .refused(.foreign),
+                                       .handover(.underWay), .handover(.restartNeeded), .helperMismatch] {
             #expect(height(lid, note: false) > standing,
                     "\(lid.name) leaves its switch unexplained")
         }

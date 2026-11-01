@@ -237,6 +237,54 @@ public enum KeepAwakeCopy {
     /// for it. Not "Not held", which is a claim, and not "Checking…", which
     /// says somebody is still asking.
     public static let railCannotTell = "Can't tell"
+    /// Under the third stop while the helper from before an update makes way
+    /// for the new one. Says something is happening and that it is not a
+    /// fault, which "Can't tell" — what this used to read — could not.
+    public static let railUpdating = "Updating"
+    /// Under the third stop once that has been tried and has not worked.
+    /// Names the one thing that fixes it, because no press on this card will.
+    public static let railRestartNeeded = "Restart needed"
+    /// Under the third stop when the helper installed with Ledge is the wrong
+    /// one. The same shape as "Restart needed", because the card's question
+    /// is the same — what fixes this — and the answer is a different act.
+    public static let railHelperMismatch = "Reinstall needed"
+
+    /// The helper running is the copy from before an update, and Ledge is
+    /// leaving it alone long enough to exit so the new one can start.
+    ///
+    /// Says what happened first, because that is what makes the rest
+    /// believable: nothing is broken, Ledge was updated. Then how long, so
+    /// the wait has an end. Then the one thing to do meanwhile. It does not
+    /// say "press again", which is what "Can't tell" said here: before the
+    /// handover existed, that press reached the old helper, took a hold
+    /// nothing could confirm, and landed in the same state.
+    public static let lidUpdating =
+        "Ledge was just updated. Its helper is switching to the new copy, "
+            + "which takes about two minutes. Keep the lid open until then."
+
+    /// The wait was tried twice and the old helper is still the one running.
+    ///
+    /// A restart is the one fix that needs no admin password and always
+    /// works, so that is the instruction. "Replace it", not "finish the
+    /// update": the sentence before has just said "the update", and what the
+    /// restart does is the thing worth naming. The lid comes last because it
+    /// is what matters until then. Nothing is holding the Mac through a shut
+    /// lid, and nothing will until the new helper answers.
+    public static let lidRestartNeeded =
+        "The helper is still the copy from before the update. "
+            + "Restart your Mac to replace it. Until then, keep the lid open."
+
+    /// The helper installed with this copy of Ledge fails the check its
+    /// answers are held to.
+    ///
+    /// Not "updated": nothing here was, or a restart would fix it. Says what
+    /// is true — what the helper says cannot be confirmed — then the one fix,
+    /// then the lid. It does not say nothing is held. Everything Ledge sends
+    /// still lands, so the hold very probably stands, and the sentence
+    /// promises neither way.
+    public static let lidHelperMismatch =
+        "This copy of Ledge can't confirm anything its helper says. "
+            + "Reinstall Ledge to fix it. Until then, keep the lid open."
 
     /// Said from a second and a half into a first request, not before: most
     /// answers arrive in under a second, and a warning that flashes and
@@ -299,6 +347,9 @@ public enum KeepAwakeCopy {
         case .applying: lidPending
         case .cannotTell: lidCannotTell
         case .refused(let code): lidRefused(code)
+        case .handover(.underWay): lidUpdating
+        case .handover(.restartNeeded): lidRestartNeeded
+        case .helperMismatch: lidHelperMismatch
         }
     }
 
@@ -418,6 +469,41 @@ public enum KeepAwakeCopy {
     /// lid is shut and the person may need to end a hold that is quite
     /// possibly standing. It does not say the lid is covered.
     public static let lidMenuHeadlineCannotTell = "Awake — the lid hold can't be checked"
+
+    /// The menu-bar headline while the helper from before an update makes
+    /// way. The instruction fits in a headline, so the headline is the
+    /// instruction: whoever is reading the menu bar with the lid down is the
+    /// person it is for.
+    public static let lidMenuHeadlineUpdating = "Awake — keep the lid open while Ledge updates"
+
+    /// The same, once only a restart will finish it.
+    public static let lidMenuHeadlineRestartNeeded = "Awake — restart your Mac to finish the update"
+
+    /// The same, for a helper only a reinstall will put right.
+    public static let lidMenuHeadlineHelperMismatch = "Awake — reinstall Ledge to use the lid hold"
+
+    /// Why Remove left the helper alone while nothing it says can be heard.
+    /// Nil for every other state, which keeps the general sentence.
+    ///
+    /// The general one says to try again in a moment, and in these states a
+    /// moment changes nothing. The rule behind the refusal stands — a helper
+    /// that may still have a setting to put back stays registered — and
+    /// here it cannot be asked. So each says what will let it be asked.
+    public static func helperRemovalUnheard(_ state: KeepAwakeLidState) -> String? {
+        switch state {
+        case .handover(.underWay):
+            "The helper is switching to the new copy, so Ledge can't ask yet whether it "
+                + "has a setting to put back. Wait about two minutes."
+        case .handover(.restartNeeded):
+            "The helper is still the copy from before the update, so Ledge can't ask "
+                + "whether it has a setting to put back. Restart your Mac first."
+        case .helperMismatch:
+            "This copy of Ledge can't confirm anything its helper says, so it can't ask "
+                + "whether there is a setting to put back. Reinstall Ledge first."
+        default:
+            nil
+        }
+    }
 
     /// The one thing the menu does. Named for the whole act rather than for
     /// the helper: from the menu bar there is no card nearby to make "End"

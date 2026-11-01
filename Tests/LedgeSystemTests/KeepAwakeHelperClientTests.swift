@@ -1,4 +1,5 @@
 import Foundation
+import LedgeCore
 import LedgeHelperKit
 import Testing
 
@@ -42,6 +43,24 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
 
     /// The apply fails, as a refused `pmset` does. The hold is still accepted.
     func refusesTheApply() { lock.withLock { applySucceeds = false } }
+
+    /// Every call, in the order it arrived, whatever came of it.
+    private var log: [String] = []
+    var callLog: [String] { lock.withLock { log } }
+
+    /// The daemon is the copy from before an update.
+    ///
+    /// Every message still lands and is acted on — a hold applies, a release
+    /// puts the setting back — and every answer is refused on the way back,
+    /// which is what the app's code signing check does to a daemon whose
+    /// bundle has been deleted.
+    private var outOfDate = false
+    func goesOutOfDate() { lock.withLock { outOfDate = true } }
+    /// The old copy has exited and launchd started the new one.
+    func comesBackUpToDate() { lock.withLock { outOfDate = false } }
+    private func refuseIfOutOfDate() throws {
+        if lock.withLock({ outOfDate }) { throw KeepAwakeHelperOutOfDate() }
+    }
 
     var recordedHolds: [Hold] { lock.withLock { holds } }
     var recordedLowPower: [(on: Bool, session: String, generation: Int)] {
@@ -94,12 +113,14 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
     }
 
     func status() async throws -> KeepAwakeHelperStatus {
+        lock.withLock { log.append("status") }
         if lock.withLock({ silent }) { try await Task.sleep(for: .seconds(3600)) }
         if let gate = lock.withLock({ statusGate }) {
             await withCheckedContinuation { (k: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global().async { gate.wait(); k.resume() }
             }
         }
+        try refuseIfOutOfDate()
         return lock.withLock {
             if let reported { return reported }
             return KeepAwakeHelperStatus(
@@ -142,12 +163,14 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
         }
         let silent: Bool = lock.withLock {
             lowPowerCalls.append((on, session, generation))
+            log.append("low-power")
             return self.silent
         }
         if silent {
             try await Task.sleep(for: .seconds(3600))
             throw CancellationError()
         }
+        try refuseIfOutOfDate()
         return .ok
     }
 
@@ -156,6 +179,7 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
         let answer: KeepAwakeHelperCode? = lock.withLock {
             holds.append(Hold(session: session, generation: generation,
                               deadline: deadline, lease: leaseSeconds))
+            log.append("hold")
             if silent { return nil }
             if generation < staleBelow { return KeepAwakeHelperCode.stale }
             let answer = answers.isEmpty ? fallback : answers.removeFirst()
@@ -163,6 +187,9 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
             if answer == .ok, applySucceeds { applied = true }
             return answer
         }
+        // Applied above, refused here: the old copy takes the hold and the
+        // app never hears that it did.
+        try refuseIfOutOfDate()
         // A hold held open: sent, not yet answered.
         if let gate = lock.withLock({ holdGate }) {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -226,6 +253,7 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
     func release(session: String, generation: Int) async throws -> KeepAwakeHelperCode {
         let gate: DispatchSemaphore? = lock.withLock {
             releases.append((session, generation))
+            log.append("release")
             releasesReached += 1
             applied = false
             return releaseGate
@@ -238,6 +266,7 @@ private final class FakeLink: @unchecked Sendable, KeepAwakeHelperLink {
                 }
             }
         }
+        try refuseIfOutOfDate()
         return .ok
     }
 }
@@ -273,6 +302,33 @@ private final class Sleeper: @unchecked Sendable {
     /// code should be able to lose and not a property worth testing.
     func timeOutCalls() { lock.withLock { timeoutFires = true } }
     func answerCallsAgain() { lock.withLock { timeoutFires = false } }
+
+    /// The handover's silences, through their own door — the client's
+    /// `silence`, not its `sleep` — so a test can let one go without the
+    /// other, and can see that it began at all.
+    private var silenceGate: [CheckedContinuation<Void, Error>] = []
+    private var lengths: [TimeInterval] = []
+    var silencesWaiting: Int { lock.withLock { silenceGate.count } }
+    /// How many silences have started, ended or not. Two waiting one after
+    /// the other look the same to `silencesWaiting`.
+    var silencesBegun: Int { lock.withLock { lengths.count } }
+    /// How long each silence asked for, in order.
+    var silenceLengths: [TimeInterval] { lock.withLock { lengths } }
+    func endSilence() {
+        let waiting: CheckedContinuation<Void, Error>? = lock.withLock {
+            silenceGate.isEmpty ? nil : silenceGate.removeFirst()
+        }
+        waiting?.resume()
+    }
+
+    func silence(_ seconds: TimeInterval) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.withLock {
+                lengths.append(seconds)
+                silenceGate.append(continuation)
+            }
+        }
+    }
 
     func sleep(_ seconds: TimeInterval) async throws {
         if seconds == KeepAwakeHelperClient.callTimeout {
@@ -1484,5 +1540,776 @@ final class MovableClock: @unchecked Sendable {
     var now: Date { lock.withLock { value } }
     func advance(_ seconds: TimeInterval) {
         lock.withLock { value = value.addingTimeInterval(seconds) }
+    }
+}
+
+
+/// A daemon from before the update, and the way out of it.
+///
+/// After an update the helper still running is the old copy, out of a bundle
+/// that has been deleted. Everything the app sends it lands and is acted on;
+/// every answer it sends is refused by the app's code signing check. The app
+/// cannot tell it to leave, so it gives the hold back, says nothing at all
+/// long enough for the old copy's own idle rule to fire, and asks again —
+/// which starts the new copy. These pin each part of that, and that the card
+/// is never told the lid is covered while it happens.
+@Suite("Handing over from a helper an update left behind", .timeLimit(.minutes(10)))
+struct KeepAwakeHandoverTests {
+
+    private static let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+    private static func client(
+        _ link: FakeLink, _ sleeper: Sleeper,
+        installed: @escaping @Sendable () -> KeepAwakeInstalledHelper = { .passes }
+    ) -> KeepAwakeHelperClient {
+        KeepAwakeHelperClient(link: link, now: { t0 }, sleep: sleeper.sleep,
+                              silence: sleeper.silence, installedHelper: installed)
+    }
+
+    /// For as long as it takes; the suite's time limit catches a condition
+    /// that never comes.
+    private func waitUntil(_ condition: @Sendable () -> Bool) async throws {
+        while !condition() {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    private func waitForState(_ client: KeepAwakeHelperClient,
+                              _ wanted: KeepAwakeHelperState) async throws {
+        while await client.currentState != wanted {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    /// What the card would be told right now.
+    private func reading(_ client: KeepAwakeHelperClient) async -> KeepAwakeLidState {
+        KeepAwakeLidState.reading(installation: .installed,
+                                  client: await client.currentState,
+                                  status: await client.status)
+    }
+
+    // MARK: - The window
+
+    /// Three numbers that only mean anything together. The silence has to
+    /// outlast the old copy's own exit rule at its worst, and the old copy
+    /// was built before this one — so its numbers are pinned, not merely
+    /// read. The test sleeper also tells the client's sleeps apart by their
+    /// length, so the three must differ.
+    @Test("The silence outlasts the old helper's own idle rule, and no more than it must")
+    func silenceIsTheHelpersOwnRule() {
+        #expect(HelperLimits.idleExitAfter == 60,
+                "every helper already installed exits after sixty idle seconds")
+        #expect(HelperLimits.idleCheckEvery == 60,
+                "and asks whether to every sixty")
+        let worst = HelperLimits.idleExitAfter + HelperLimits.idleCheckEvery
+        #expect(KeepAwakeHelperClient.handoverSilence > worst,
+                "the old helper could still be there when the silence ends")
+        #expect(KeepAwakeHelperClient.handoverSilence <= worst + 30,
+                "a silence this long is time nobody can use the lid for nothing")
+        #expect(KeepAwakeHelperClient.handoverSilence != KeepAwakeHelperClient.heartbeat)
+        #expect(KeepAwakeHelperClient.handoverSilence != KeepAwakeHelperClient.callTimeout)
+    }
+
+    // MARK: - With a hold standing
+
+    @Test("A refused answer gives the hold back once, says nothing, then holds again higher")
+    func handoverFromAStandingHold() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        #expect(await client.begin(session: "s1") == .holding)
+        _ = await client.setLowPowerMode(true)
+
+        // The update. The next heartbeat lands on the old copy and its answer
+        // is refused.
+        link.goesOutOfDate()
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        sleeper.beat()
+
+        // Arrived: the silence has begun, which is the only point the
+        // silence can be measured from.
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        #expect(await client.currentState == .handingOver)
+        #expect(link.recordedHolds.last?.generation == 2, "the premise: the heartbeat went out")
+        // One release, naming the heartbeat the old copy took without saying so.
+        #expect(link.recordedReleases.map(\.session) == ["s1"])
+        #expect(link.recordedReleases.first?.generation == 2,
+                "the release named a generation older than the one the old helper is holding")
+
+        // Everything that would normally talk to the daemon, asked at once.
+        let quietFrom = link.callLog.count
+        #expect(await client.refreshStatus() == nil)
+        #expect(await client.setLowPowerMode(true) == nil)
+        #expect(await client.begin(session: "s1") == .handingOver)
+        sleeper.beat()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(link.callLog.count == quietFrom,
+                "the old helper was spoken to during the silence: \(link.callLog.dropFirst(quietFrom))")
+
+        // The old copy has gone. The next call reaches the new one.
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .holding)
+        let rehold = try #require(link.recordedHolds.last)
+        #expect(rehold.session == "s1")
+        #expect(rehold.generation > 2,
+                "the hold after the handover reused a generation that was already given back")
+        // Low Power Mode goes again behind the new hold, as it does behind
+        // every renewal.
+        try await waitUntil { link.recordedLowPower.last?.generation == rehold.generation }
+        // And the heartbeat is back.
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        await client.end()
+    }
+
+    /// The headline rule of the card: nothing may say the lid is covered when
+    /// nothing can confirm it. The last status the old copy managed to send
+    /// before the update said it was holding, and that must not count.
+    @Test("A handover never reads as a hold, whatever the last status said")
+    func handoverIsNeverAHold() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        #expect(await client.begin(session: "s1") == .holding)
+        #expect(await client.status?.isArmed == true, "the premise: the last word was a hold")
+
+        link.goesOutOfDate()
+        #expect(await client.refreshStatus() == nil)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+
+        let seen = await reading(client)
+        #expect(seen == .handover(.underWay))
+        #expect(!seen.isConfirmed)
+        #expect(!seen.isLive, "the hold was given back; nothing is covering the lid")
+        #expect(!seen.mayArm)
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .holding)
+        await client.end()
+    }
+
+    @Test("A session that ends during the silence is not held again, or released twice")
+    func endingDuringTheSilence() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        #expect(await client.begin(session: "s1") == .holding)
+
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        #expect(link.recordedReleases.count == 1, "the premise: the handover gave the hold back")
+
+        await client.end(session: "s1")
+        #expect(link.recordedReleases.count == 1,
+                "a second release went to the old helper and reset its idle clock")
+        #expect(await client.currentState == .handingOver,
+                "a session ending is not the handover ending")
+
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+        #expect(link.recordedHolds.count == 1, "a session that had ended was held again")
+    }
+
+    @Test("A session that begins during the silence waits for the new helper")
+    func beginningDuringTheSilence() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        let deadline = Self.t0.addingTimeInterval(3600)
+
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+
+        #expect(await client.begin(session: "s2", until: deadline) == .handingOver)
+        #expect(link.recordedHolds.isEmpty, "a hold went to the old helper during the silence")
+
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .holding)
+        #expect(link.recordedHolds.map(\.session) == ["s2"])
+        #expect(link.recordedHolds.first?.deadline == deadline,
+                "the deadline the session fixed did not survive the wait")
+        await client.end()
+    }
+
+    /// `end` sends its own release, and that release is the first to hear
+    /// the old copy refuse. It has already landed, so the handover owes
+    /// nothing more — but with no session left, the next reading would
+    /// otherwise have been "off".
+    @Test("A release that comes back refused starts the handover and is not sent again")
+    func refusedRelease() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        #expect(await client.begin(session: "s1") == .holding)
+
+        link.goesOutOfDate()
+        await client.end()
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        #expect(await client.currentState == .handingOver)
+        #expect(link.recordedReleases.count == 1)
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+    }
+
+    // MARK: - With nothing running
+
+    /// The second half of the bug. With no session the failed status became
+    /// `.off`, and the card offered the mode as ready over a helper nothing
+    /// could hear.
+    @Test("With nothing running, the old helper reads as a handover rather than off")
+    func nothingRunningIsNotOff() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+
+        link.goesOutOfDate()
+        #expect(await client.refreshStatus() == nil, "a refused answer was reported as one")
+        #expect(link.callLog == ["status"], "the premise: the old helper was asked, and refused")
+        let seen = await reading(client)
+        #expect(seen == .handover(.underWay))
+        #expect(seen != .off)
+        #expect(!seen.mayArm, "the mode was offered over a helper nothing can hear")
+
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        #expect(link.recordedReleases.isEmpty, "nothing was held, so nothing is given back")
+
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+        #expect(link.callLog == ["status", "status"])
+        #expect(await client.status != nil, "the new helper's answer was not kept")
+        #expect(await reading(client) == .off, "once the new helper answers, the mode is offered")
+    }
+
+    // MARK: - Giving up, and not for good
+
+    @Test("Still the old helper after two silences: restart needed, and quiet between slow questions")
+    func twoRoundsThenRestart() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+
+        link.goesOutOfDate()
+        #expect(await client.begin(session: "s1") == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        #expect(link.recordedReleases.map(\.generation) == [1],
+                "the hold the old helper took without answering was not given back")
+
+        // The first silence ends on the old copy.
+        sleeper.endSilence()
+        try await waitUntil { sleeper.silencesBegun == 2 && sleeper.silencesWaiting == 1 }
+        #expect(await client.currentState == .handingOver, "one refusal after a silence is not the end")
+        #expect(link.callLog == ["hold", "release", "status"])
+
+        // And so does the second.
+        sleeper.endSilence()
+        try await waitForState(client, .restartNeeded)
+        #expect(link.callLog == ["hold", "release", "status", "status"])
+        #expect(await reading(client) == .handover(.restartNeeded))
+
+        // Arrived at the slow questions: a third wait has begun, and it is
+        // longer than the old helper's whole exit rule, so that rule can
+        // still fire between two of them.
+        try await waitUntil { sleeper.silencesBegun == 3 && sleeper.silencesWaiting == 1 }
+        let lengths = sleeper.silenceLengths
+        #expect(lengths.prefix(2).allSatisfy { $0 == KeepAwakeHelperClient.handoverSilence })
+        #expect(lengths.last == KeepAwakeHelperClient.restartProbeEvery)
+        #expect(KeepAwakeHelperClient.restartProbeEvery >= KeepAwakeHelperClient.handoverSilence,
+                "a question sooner than the exit rule resets the old helper's clock every time")
+
+        // Between questions nothing reaches anybody.
+        let quietFrom = link.callLog.count
+        #expect(await client.refreshStatus() == nil)
+        #expect(await client.begin(session: "s1") == .restartNeeded)
+        #expect(await client.setLowPowerMode(true) == nil)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(link.callLog.count == quietFrom,
+                "the old helper was spoken to between the slow questions")
+
+        // A slow question the old copy still refuses changes nothing.
+        sleeper.endSilence()
+        try await waitUntil { sleeper.silencesBegun == 4 && sleeper.silencesWaiting == 1 }
+        #expect(link.callLog.count == quietFrom + 1, "exactly one question per wait")
+        #expect(link.callLog.last == "status")
+        #expect(await client.currentState == .restartNeeded)
+        await client.end()
+    }
+
+    /// "Restart needed" was final for the life of the app. The old copy can
+    /// still get clean and leave — a restore that took its time, a Mac that
+    /// slept through more than any margin — and then nothing ever asked
+    /// again, so the card went on saying restart over a helper that had gone.
+    @Test("A slow question that gets through ends restart needed and holds again")
+    func restartNeededIsNotFinal() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+
+        link.goesOutOfDate()
+        #expect(await client.begin(session: "s1") == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        sleeper.endSilence()
+        try await waitUntil { sleeper.silencesBegun == 2 && sleeper.silencesWaiting == 1 }
+        sleeper.endSilence()
+        try await waitForState(client, .restartNeeded)
+        try await waitUntil { sleeper.silencesBegun == 3 && sleeper.silencesWaiting == 1 }
+        let heldBefore = link.recordedHolds.count
+
+        // The old copy has gone after all.
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .holding)
+        let rehold = try #require(link.recordedHolds.last)
+        #expect(link.recordedHolds.count == heldBefore + 1)
+        #expect(rehold.session == "s1")
+        #expect(rehold.generation > 1, "the hold reused the generation that was given back")
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        await client.end()
+    }
+
+    // MARK: - After the silence, ordinary trouble
+
+    /// A question after the silence that is not refused ends the handover,
+    /// whatever else is wrong. A daemon that is merely slow is the ordinary
+    /// rules' business, and the session's hold has to be taken again under
+    /// them rather than left waiting on a handover that is over.
+    @Test("A timeout after the silence ends the handover and the hold is asked for again")
+    func timeoutAfterTheSilence() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper)
+        #expect(await client.begin(session: "s1") == .holding)
+
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        let heldBefore = link.recordedHolds.count
+
+        // The new daemon is not answering yet: neither refused nor heard.
+        link.comesBackUpToDate()
+        link.goSilent()
+        sleeper.timeOutCalls()
+        sleeper.endSilence()
+        try await waitUntil { link.recordedHolds.count > heldBefore }
+        var seen = await client.currentState
+        while seen == .handingOver {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        // The re-hold went out and was not heard, which the ordinary rules
+        // read as an unknown outcome — not as the handover, and not as held.
+        #expect(seen == .unknownWhetherHeld)
+        #expect(sleeper.silencesBegun == 1, "a timeout started another silence")
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+
+        // And the ordinary rules carry it from there. Beaten until a hold
+        // goes out: the heartbeat from before the handover was cancelled
+        // with its wait still parked in the sleeper, and the first beat can
+        // land on that one and wake nothing.
+        link.speakAgain()
+        sleeper.answerCallsAgain()
+        let holdsBefore = link.recordedHolds.count
+        while link.recordedHolds.count == holdsBefore {
+            sleeper.beat()
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await waitForState(client, .holding)
+        link.releaseStranded()
+        await client.end()
+    }
+
+    // MARK: - A refusal that is not a leftover process
+
+    /// The helper on disk would be refused too, so this is the installation
+    /// rather than an update's leftover. A restart starts the same helper
+    /// again, and the handover's release would only take away a hold that
+    /// is very probably standing — everything sent still lands.
+    @Test("With the installed helper failing the check: no release, no silence, the hold kept going")
+    func mismatchedHelperKeepsTheHold() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let asked = CallCounter()
+        let client = Self.client(link, sleeper, installed: { asked.bump(); return .fails })
+        #expect(await client.begin(session: "s1") == .holding)
+        #expect(asked.value == 0, "the helper on disk was checked with nothing refused")
+
+        link.goesOutOfDate()
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        sleeper.beat()
+        try await waitForState(client, .helperMismatch)
+        #expect(asked.value == 1)
+        #expect(link.recordedReleases.isEmpty, "a hold the user still wants was given back")
+        #expect(sleeper.silencesBegun == 0, "a silence was kept for a helper no wait will replace")
+        let seen = await reading(client)
+        #expect(seen == .helperMismatch)
+        #expect(!seen.isConfirmed && !seen.isLive && !seen.mayArm)
+
+        // The heartbeat goes on landing, under the generation nobody has
+        // answered, and the check is not asked again.
+        let holds = link.recordedHolds.count
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        sleeper.beat()
+        try await waitUntil { link.recordedHolds.count > holds }
+        #expect(link.recordedHolds.last?.generation == link.recordedHolds[holds - 1].generation)
+        #expect(await client.refreshStatus() == nil)
+        #expect(await client.currentState == .helperMismatch)
+        #expect(asked.value == 1, "the helper on disk was checked more than once")
+
+        // Ending it still gives the hold back, and the reading stays.
+        await client.end()
+        #expect(link.recordedReleases.map(\.session) == ["s1"])
+        #expect(await client.currentState == .helperMismatch,
+                "a session ending does not fix the installation")
+    }
+
+    @Test("With the installed helper passing the check, a refusal is a handover")
+    func passingHelperIsAHandover() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let asked = CallCounter()
+        let client = Self.client(link, sleeper, installed: { asked.bump(); return .passes })
+
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        #expect(asked.value == 1, "the helper on disk was never asked about")
+        #expect(await client.currentState == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+    }
+
+    /// A check that could not be made is no evidence against the rescue.
+    @Test("An installed helper that could not be checked is treated as passing")
+    func uncheckedIsAHandover() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper, installed: { .unchecked })
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        #expect(await client.currentState == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+    }
+
+    @Test("An answer that is heard takes the mismatch off")
+    func heardAnswerEndsTheMismatch() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let client = Self.client(link, sleeper, installed: { .fails })
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        #expect(await client.currentState == .helperMismatch)
+
+        link.comesBackUpToDate()
+        #expect(await client.refreshStatus() != nil)
+        #expect(await client.currentState == .idle)
+        #expect(await reading(client) == .off)
+    }
+
+    // MARK: - A fail read while the bundle was being written
+
+    /// Finder's Replace, `ditto`, an installer copying over the app in
+    /// place: the helper reads as failing while it is half written, and the
+    /// copy finishing leaves the stale process a handover exists for. A fail
+    /// kept for good said "reinstall" until a relaunch, through the reinstall
+    /// itself, while the heartbeat kept the stale helper alive.
+    @Test("A fail read mid-copy is asked again, and the pass that follows hands over")
+    func halfWrittenThenFixed() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let disk = Verdicts([.fails, .passes])
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep,
+                                           silence: sleeper.silence,
+                                           installedHelper: { disk.next() })
+        #expect(await client.begin(session: "s1") == .holding)
+
+        // The update, read while the new helper was still being written.
+        link.goesOutOfDate()
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        sleeper.beat()
+        try await waitForState(client, .helperMismatch)
+        #expect(disk.asked == 1)
+        #expect(link.recordedReleases.isEmpty)
+
+        // Moments later: the fail is too fresh to ask about again.
+        clock.advance(5)
+        #expect(await client.refreshStatus() == nil)
+        #expect(disk.asked == 1, "the disk was asked again on every refusal")
+        #expect(await client.currentState == .helperMismatch)
+
+        // The copy has finished. The next renewal is refused, the fail is
+        // old, and the disk says pass.
+        clock.advance(KeepAwakeHelperClient.installedRecheckAfter)
+        try await waitUntil { sleeper.beatsWaiting > 0 }
+        sleeper.beat()
+        try await waitForState(client, .handingOver)
+        #expect(disk.asked == 2, "a fail was believed for good")
+
+        // From there it is the ordinary handover: one release naming the
+        // highest generation sent, the silence, and a new hold above it.
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        let released = try #require(link.recordedReleases.first)
+        #expect(link.recordedReleases.count == 1)
+        #expect(released.generation == link.recordedHolds.map(\.generation).max())
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .holding)
+        #expect((link.recordedHolds.last?.generation ?? 0) > released.generation)
+        await client.end()
+    }
+
+    /// And the other half: an installation that really is wrong goes on
+    /// saying so, however often it is asked again, and never gives up a hold.
+    @Test("A fail that keeps failing stays a mismatch and gives nothing back")
+    func brokenStaysBroken() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let disk = Verdicts([.fails])
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep,
+                                           silence: sleeper.silence,
+                                           installedHelper: { disk.next() })
+        #expect(await client.begin(session: "s1") == .holding)
+        link.goesOutOfDate()
+
+        for round in 1 ... 3 {
+            try await waitUntil { sleeper.beatsWaiting > 0 }
+            sleeper.beat()
+            try await waitUntil { disk.asked == round }
+            #expect(await client.currentState == .helperMismatch, "round \(round)")
+            clock.advance(KeepAwakeHelperClient.installedRecheckAfter)
+        }
+        #expect(link.recordedReleases.isEmpty, "a hold the user still wants was given back")
+        #expect(sleeper.silencesBegun == 0)
+        await client.end()
+    }
+
+    /// The pass ends the mismatch by itself, not only once the new helper is
+    /// heard. A new helper that is slow to answer ends the handover under
+    /// the ordinary rules, and those must not find a reinstall still laid
+    /// over them from a read that turned out wrong.
+    @Test("A pass after a fail leaves no mismatch behind, even if the new helper is slow")
+    func passClearsTheMismatch() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let disk = Verdicts([.fails, .passes])
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep,
+                                           silence: sleeper.silence,
+                                           installedHelper: { disk.next() })
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        #expect(await client.currentState == .helperMismatch, "the premise: the first read failed")
+
+        clock.advance(KeepAwakeHelperClient.installedRecheckAfter)
+        _ = await client.refreshStatus()
+        #expect(await client.currentState == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+
+        // Neither refused nor heard: the new helper is slow.
+        link.comesBackUpToDate()
+        link.goSilent()
+        sleeper.timeOutCalls()
+        sleeper.endSilence()
+        var seen = await client.currentState
+        while seen == .handingOver {
+            try await Task.sleep(for: .milliseconds(5))
+            seen = await client.currentState
+        }
+        #expect(seen == .idle, "a mismatch from a read that was wrong outlived the handover")
+    }
+
+    @Test("A clock that went backwards does not keep a fail alive")
+    func backwardsClockAsksAgain() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let clock = MovableClock(Self.t0)
+        let disk = Verdicts([.fails, .passes])
+        let client = KeepAwakeHelperClient(link: link, now: { clock.now }, sleep: sleeper.sleep,
+                                           silence: sleeper.silence,
+                                           installedHelper: { disk.next() })
+        link.goesOutOfDate()
+        _ = await client.refreshStatus()
+        #expect(disk.asked == 1)
+
+        clock.advance(-600)
+        _ = await client.refreshStatus()
+        #expect(disk.asked == 2, "an age that cannot be trusted kept a fail alive")
+        #expect(await client.currentState == .handingOver)
+        try await waitUntil { sleeper.silencesWaiting == 1 }
+        link.comesBackUpToDate()
+        sleeper.endSilence()
+        try await waitForState(client, .idle)
+    }
+
+    @Test("The disk is asked again within one heartbeat, and not on every refusal")
+    func recheckSitsUnderTheHeartbeat() {
+        #expect(KeepAwakeHelperClient.installedRecheckAfter < KeepAwakeHelperClient.heartbeat,
+                "a finished copy would wait more than one renewal to be noticed")
+        #expect(KeepAwakeHelperClient.installedRecheckAfter >= 5,
+                "a burst of refusals would hash the helper once each")
+    }
+
+    // MARK: - Cancellation
+
+    /// Nothing cancels the handover today. If something did, every sleep in
+    /// it would throw at once, and a loop that read that as "cut short" would
+    /// ask as fast as the old copy could refuse — keeping it alive.
+    @Test("A cancelled handover stops, rather than asking as fast as it is refused")
+    func cancelledHandoverStops() async throws {
+        let link = FakeLink()
+        let sleeper = Sleeper()
+        let silences = CallCounter()
+        let client = KeepAwakeHelperClient(
+            link: link, now: { Self.t0 }, sleep: sleeper.sleep,
+            // The silence cancels the very task it is waiting in, then throws
+            // as a cancelled sleep does.
+            silence: { _ in
+                silences.bump()
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw CancellationError()
+            }
+        )
+
+        link.goesOutOfDate()
+        #expect(await client.refreshStatus() == nil)
+        try await waitUntil { silences.value >= 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(silences.value == 1, "the cancelled handover went round again")
+        #expect(link.callLog == ["status"], "a cancelled handover went on asking")
+    }
+}
+
+/// Counts from any thread.
+private final class CallCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0
+    func bump() { lock.withLock { stored += 1 } }
+    var value: Int { lock.withLock { stored } }
+}
+
+/// What the helper on disk says, in order, then the last answer for good.
+private final class Verdicts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var queue: [KeepAwakeInstalledHelper]
+    private var count = 0
+    init(_ answers: [KeepAwakeInstalledHelper]) { queue = answers }
+    var asked: Int { lock.withLock { count } }
+    func next() -> KeepAwakeInstalledHelper {
+        lock.withLock {
+            count += 1
+            return queue.count > 1 ? queue.removeFirst() : queue[0]
+        }
+    }
+}
+
+/// A Mac with two clocks: the wall clock, which goes on while it sleeps, and
+/// uptime, which does not.
+///
+/// The old helper's idle tick runs on uptime. The point of this is a client
+/// whose silence is counted on the wrong one — the continuous clock, which
+/// is what `Task.sleep(for:)` uses — and so runs down while the lid is shut.
+private final class TwoClockMac: @unchecked Sendable {
+    private let lock = NSLock()
+    private var wall: TimeInterval = 0
+    private var awake: TimeInterval = 0
+    private var wallSleepers: [(until: TimeInterval, k: CheckedContinuation<Void, Error>)] = []
+    private var awakeSleepers: [(until: TimeInterval, k: CheckedContinuation<Void, Error>)] = []
+
+    var now: Date { lock.withLock { Date(timeIntervalSince1970: 1_000_000 + wall) } }
+    var awakeWaiting: Int { lock.withLock { awakeSleepers.count } }
+
+    /// A sleep on the wall clock, as `Task.sleep(for:)` is.
+    func wallSleep(_ seconds: TimeInterval) async throws {
+        try await withCheckedThrowingContinuation { k in
+            lock.withLock { wallSleepers.append((wall + seconds, k)) }
+        }
+    }
+
+    /// A sleep on uptime, as the daemon's tick and the client's silence are.
+    func awakeSleep(_ seconds: TimeInterval) async throws {
+        try await withCheckedThrowingContinuation { k in
+            lock.withLock { awakeSleepers.append((awake + seconds, k)) }
+        }
+    }
+
+    /// The Mac sleeps: the wall clock moves and uptime does not.
+    func sleeps(for seconds: TimeInterval) { advance(wall: seconds, awake: 0) }
+    /// The Mac is awake: both move.
+    func isAwake(for seconds: TimeInterval) { advance(wall: seconds, awake: seconds) }
+
+    private func advance(wall dw: TimeInterval, awake da: TimeInterval) {
+        let due: [CheckedContinuation<Void, Error>] = lock.withLock {
+            wall += dw
+            awake += da
+            let w = wallSleepers.filter { $0.until <= wall }.map(\.k)
+            wallSleepers.removeAll { $0.until <= wall }
+            let a = awakeSleepers.filter { $0.until <= awake }.map(\.k)
+            awakeSleepers.removeAll { $0.until <= awake }
+            return w + a
+        }
+        due.forEach { $0.resume() }
+    }
+}
+
+@Suite("A handover the Mac sleeps through", .timeLimit(.minutes(10)))
+struct KeepAwakeHandoverSleepTests {
+
+    /// The scenario that made "restart needed" a likely outcome rather than a
+    /// corner case. The handover begins by giving the lid hold back, so the
+    /// natural next thing — shutting the lid — sleeps the Mac. Counted on a
+    /// clock that keeps going in sleep, the silence is over on waking, and
+    /// the first question reaches an old helper that has not ticked since
+    /// before the lid shut.
+    @Test("Time asleep does not count towards the silence")
+    func sleepDoesNotCount() async throws {
+        let link = FakeLink()
+        let mac = TwoClockMac()
+        let client = KeepAwakeHelperClient(link: link, now: { mac.now },
+                                           sleep: mac.wallSleep, silence: mac.awakeSleep)
+
+        link.goesOutOfDate()
+        #expect(await client.refreshStatus() == nil)
+        try await waitUntil { mac.awakeWaiting == 1 }
+        #expect(link.callLog == ["status"], "the premise: one refused question, then silence")
+
+        // Ten minutes asleep, far past the silence on any wall clock.
+        mac.sleeps(for: 600)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(link.callLog == ["status"], "a Mac asleep counted towards the silence")
+        #expect(await client.currentState == .handingOver)
+
+        // Awake for all but the last second of it: still nothing.
+        mac.isAwake(for: KeepAwakeHelperClient.handoverSilence - 1)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(link.callLog == ["status"], "the silence ended before the old helper could tick")
+
+        // And the last second.
+        link.comesBackUpToDate()
+        mac.isAwake(for: 1)
+        try await waitForState(client, .idle)
+        #expect(link.callLog == ["status", "status"])
+    }
+
+    private func waitUntil(_ condition: @Sendable () -> Bool) async throws {
+        while !condition() {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
+
+    private func waitForState(_ client: KeepAwakeHelperClient,
+                              _ wanted: KeepAwakeHelperState) async throws {
+        while await client.currentState != wanted {
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 }

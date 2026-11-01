@@ -10,11 +10,27 @@ import OSLog
 /// back is a launchd restart nobody has asked for.
 enum IdleExit {
 
-    /// How long with nothing happening before the daemon lets go.
-    static let after: TimeInterval = 60
+    /// How long with nothing happening before the daemon lets go. Shared
+    /// with the app, which waits this out after an update.
+    static var after: TimeInterval { HelperLimits.idleExitAfter }
 
-    static func shouldExit(clean: Bool, connections: Int, idleFor: TimeInterval) -> Bool {
-        clean && connections == 0 && idleFor >= after
+    /// - Parameter replaced: the file this process was started from is no
+    ///   longer the one at its path — an update has swapped the bundle. A
+    ///   clean daemon then leaves at once, connections or no connections:
+    ///   nothing it answers can pass the app's check any more, and a client
+    ///   that stays connected to it is exactly what kept the old copy alive
+    ///   until a reboot. The client reconnects through launchd on its next
+    ///   call and gets the new copy.
+    ///
+    ///   Never without `clean`. A daemon that exits with a claim outstanding
+    ///   leaves the setting held with nobody watching the lease, and the new
+    ///   copy does not inherit the hold — so the old one stays until it has
+    ///   put everything back, replaced or not.
+    static func shouldExit(clean: Bool, connections: Int, idleFor: TimeInterval,
+                           replaced: Bool = false) -> Bool {
+        guard clean else { return false }
+        if replaced { return true }
+        return connections == 0 && idleFor >= after
     }
 }
 
@@ -46,6 +62,9 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
     private let timer: QueueTimer
     private let listener: NSXPCListener
     private let exitProcess: @Sendable (Int32) -> Void
+    /// Which file this process was started from, so it can tell when an
+    /// update has replaced it.
+    private let runningCopy: RunningCopy
 
     private var tally = ConnectionTally()
     private var connections: Int { tally.live }
@@ -56,17 +75,31 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
     private var idleCheck: DispatchSourceTimer?
     private var terminationSignal: DispatchSourceSignal?
     private var terminating = false
+    /// Whether `start` takes SIGTERM over. Always in the daemon; a test that
+    /// runs the whole daemon in its own process must not leave that process
+    /// ignoring SIGTERM afterwards.
+    private let handlesTermination: Bool
 
+    /// - Parameters:
+    ///   - listener: the daemon's mach service in production. A test passes
+    ///     an anonymous listener, so the exit paths that hang off connections
+    ///     closing and releases landing can be driven without launchd.
+    ///   - handlesTermination: false only in a test; see the property.
     init(arguments: HelperArguments,
          store: any ClaimStore,
          pmset: ProcessPmsetRunner,
          watchdogPmset: any PmsetRunner,
          bootID: String = BootSessionID.current(),
+         runningCopy: RunningCopy = .atLaunch(),
+         listener: NSXPCListener? = nil,
+         handlesTermination: Bool = true,
          exitProcess: @escaping @Sendable (Int32) -> Void = { exit($0) }) {
         self.arguments = arguments
         self.store = store
+        self.runningCopy = runningCopy
         self.exitProcess = exitProcess
-        self.listener = NSXPCListener(machServiceName: arguments.label)
+        self.handlesTermination = handlesTermination
+        self.listener = listener ?? NSXPCListener(machServiceName: arguments.label)
         let timer = QueueTimer(queue: queue)
         self.timer = timer
         // Its own runner, so a watchdog write is never queued behind whatever
@@ -112,7 +145,13 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
         // had to be built with the runner in hand.
         pmset.report { [weak self] opID, outcome in
             guard let self else { return }
-            queue.async { self.core.childExited(opID: opID, outcome: outcome) }
+            queue.async {
+                self.core.childExited(opID: opID, outcome: outcome)
+                // A restore finishing is the moment a release's work is done
+                // and the core can first be clean. Waiting for the next tick
+                // would keep a replaced copy up to another minute for nothing.
+                self.leaveIfReplaced()
+            }
         }
         // The core's own children have the same gap: an operation answered
         // `.failed` over a child that is still alive, whose privileged write
@@ -147,7 +186,7 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
         }
         queue.async { [self] in
             core.start()
-            watchForTermination()
+            if handlesTermination { watchForTermination() }
             watchForIdleness()
         }
         Self.log.notice("keep awake helper: \(self.arguments.label, privacy: .public) is listening")
@@ -165,6 +204,29 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
         source.setEventHandler { [weak self] in self?.watchdog.check() }
         source.resume()
         watchTimer = source
+    }
+
+    /// Stops everything `start` set going. For a test that runs a whole
+    /// daemon inside its own process: the daemon itself only ever stops by
+    /// exiting, and a test's daemons would otherwise go on ticking for the
+    /// rest of the run.
+    ///
+    /// Marks the daemon as terminating too, so nothing still in flight can
+    /// ask for an exit afterwards.
+    func stop() {
+        listener.invalidate()
+        watchQueue.sync {
+            watchTimer?.cancel()
+            watchTimer = nil
+        }
+        queue.sync {
+            terminating = true
+            idleCheck?.cancel()
+            idleCheck = nil
+            terminationSignal?.cancel()
+            terminationSignal = nil
+            timer.wake(after: nil)
+        }
     }
 
     private func watchForTermination() {
@@ -205,18 +267,49 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
 
     private func watchForIdleness() {
         let check = DispatchSource.makeTimerSource(queue: queue)
-        check.schedule(deadline: .now() + IdleExit.after, repeating: IdleExit.after)
+        check.schedule(deadline: .now() + HelperLimits.idleCheckEvery,
+                       repeating: HelperLimits.idleCheckEvery)
         check.setEventHandler { [weak self] in
             guard let self, !terminating else { return }
+            let replaced = runningCopy.reading() == .replaced
             guard IdleExit.shouldExit(clean: core.isClean, connections: connections,
-                                      idleFor: Date().timeIntervalSince(lastActivity)) else {
+                                      idleFor: Date().timeIntervalSince(lastActivity),
+                                      replaced: replaced) else {
                 return
             }
-            Self.log.notice("keep awake helper: nothing to do; exiting until asked again")
+            if replaced {
+                Self.log.notice("keep awake helper: the bundle this copy was started from has been replaced; clean, so exiting for the new one")
+            } else {
+                Self.log.notice("keep awake helper: nothing to do; exiting until asked again")
+            }
             exitProcess(0)
         }
         check.resume()
         idleCheck = check
+    }
+
+    /// The replaced-bundle half of the exit rule, asked between ticks.
+    ///
+    /// Only that half. The ordinary idle rule stays on its tick, exactly as
+    /// it was; these are the moments the core may just have become clean —
+    /// a restore finishing, a release landing, a client going — and a copy
+    /// nothing can hear any more has no reason to wait a minute for the next
+    /// tick. On the queue, like everything that reads the core.
+    ///
+    /// The lease watchdog's children are the one thing `isClean` can see only
+    /// late: they report to the core through `queue.async`, and only once an
+    /// answered write turns out to be still alive. That is safe to exit
+    /// across. The watchdog starts a write only for a published lease that
+    /// has lapsed, and a clean core publishes none, so nothing new can start;
+    /// and the only write it ever makes is `disablesleep 0`, the same
+    /// direction as the restore the core has just finished. At worst one
+    /// lands after the new copy's hold, which is the early-sleep case the
+    /// watchdog already accepts and the holder's own re-read puts right — and
+    /// the ordinary idle exit has always had this same window.
+    private func leaveIfReplaced() {
+        guard !terminating, core.isClean, runningCopy.reading() == .replaced else { return }
+        Self.log.notice("keep awake helper: the bundle this copy was started from has been replaced; clean, so exiting for the new one")
+        exitProcess(0)
     }
 
     // MARK: - Connections
@@ -248,8 +341,15 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
         queue.async { [self] in
             guard tally.closed(identity) else { return }
             lastActivity = Date()
+            // An app that has just heard this copy's answers refused drops
+            // its connection, and that is when it next matters.
+            leaveIfReplaced()
         }
     }
+
+    /// How many clients the tally counts. For a test, which has to know a
+    /// close has been counted before it can say what the close did.
+    var liveConnections: Int { queue.sync { connections } }
 
     // MARK: - The protocol
 
@@ -277,6 +377,20 @@ final class KeepAwakeDaemon: NSObject, NSXPCListenerDelegate, KeepAwakeHelperPro
         queue.async { [self] in
             lastActivity = Date()
             core.release(session: session, generation: generation) { code in reply.send(code) }
+            // Usually not clean yet — the restore it set off is still
+            // running, and its end is asked about when the child exits. A
+            // release of something no longer held is clean already.
+            //
+            // The reply above is only queued, so an exit here can beat it out
+            // of the process. That costs nothing. From a replaced copy the
+            // reply would fail the app's check anyway, and the app ignores a
+            // release's answer either way: a refusal starts its handover, an
+            // interruption is an ordinary failure, and its next call reaches
+            // the new copy through launchd. The one case where the reply
+            // could have been heard is a bundle renamed over in place, and
+            // there the app sees "interrupted" instead of "ok" for a release
+            // that landed.
+            leaveIfReplaced()
         }
     }
 

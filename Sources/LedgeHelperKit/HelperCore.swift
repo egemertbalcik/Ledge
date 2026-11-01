@@ -38,6 +38,26 @@ public enum HelperLimits {
     /// anything is outstanding, so "for as long as the daemon runs" means
     /// until it is clean.
     public static let retryBackoffNs: [UInt64] = [5_000_000_000, 15_000_000_000, 60_000_000_000, 300_000_000_000]
+
+    /// How long a clean daemon with nobody connected waits before it exits.
+    ///
+    /// Here rather than beside the rule that uses it, because the app reads
+    /// it too. After an update the app has to make a daemon running from the
+    /// deleted bundle go away without being able to hear it, and the only
+    /// lever it has is silence long enough for this rule to fire — so the
+    /// length of that silence is worked out from these two numbers rather
+    /// than guessed at.
+    ///
+    /// The daemon the app is waiting out was built from an *older* copy of
+    /// this file. These numbers describe it only because they have never
+    /// changed, which is why a test pins them: moving either one changes what
+    /// the app assumes about every helper already installed.
+    public static let idleExitAfter: TimeInterval = 60
+
+    /// How often the daemon asks whether it should exit. The worst case
+    /// between the last word anybody said and the exit is this plus
+    /// `idleExitAfter`.
+    public static let idleCheckEvery: TimeInterval = 60
 }
 
 /// What the daemon says about itself.

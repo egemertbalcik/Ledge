@@ -22,7 +22,8 @@ struct KeepAwakeCardFlowTests {
         .holding, .unconfirmed,
         .refused(.foreign), .refused(.inUseByOtherLedge), .refused(.stale),
         .refused(.busy), .refused(.persistFailed), .refused(.pmsetFailed),
-        .refused(.notHolder), .refused(.invalidArgument)
+        .refused(.notHolder), .refused(.invalidArgument),
+        .handover(.underWay), .handover(.restartNeeded), .helperMismatch
     ]
 
     // MARK: - The flash

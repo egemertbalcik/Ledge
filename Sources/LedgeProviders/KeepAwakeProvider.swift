@@ -379,6 +379,8 @@ public final class KeepAwakeProvider: ActivityProvider {
         cancelDeadline()
         cancelPublish()
         cancelReturnToReady()
+        handoverFollowUpWork?.cancel()
+        handoverFollowUpWork = nil
         assertion.release()
         power.stopWatching()
         thermal.stopWatching()
@@ -769,6 +771,11 @@ public final class KeepAwakeProvider: ActivityProvider {
             self.lidArmActivity += 1
             self.lidState = reading
             self.publish()
+            // An arm can be the first thing to hear of a handover — a session
+            // resumed after the update reaches the old helper before any
+            // reading does — and nothing else would read again until the
+            // next minute's tick.
+            self.followHandover()
         }
     }
 
@@ -949,6 +956,9 @@ public final class KeepAwakeProvider: ActivityProvider {
         )
         guard lifecycle == era, lidAttempt == attempt,
               lidArmActivity == armsSeen else { return }
+        // Whether or not the reading moved: a handover that is still under
+        // way is exactly the reading that has not.
+        defer { followHandover() }
         guard reading != lidState else { return }
         lidState = reading
         publish()
@@ -956,6 +966,39 @@ public final class KeepAwakeProvider: ActivityProvider {
 
     /// The reading the card needs, for a settings pane or a test.
     public var lidReading: KeepAwakeLidState { lidState }
+
+    /// How long after a reading that says a handover is under way it is
+    /// taken again. Internal so a test does not have to wait it out.
+    var handoverFollowUp: TimeInterval = 15
+    private var handoverFollowUpWork: DispatchWorkItem?
+
+    /// Reads the lid again while the helper is being handed over.
+    ///
+    /// The client finishes a handover by itself, about two minutes in, and
+    /// nothing tells this provider when it has. A running lid session reads
+    /// again every minute anyway. A card with nothing running read once, when
+    /// it was opened, and went on saying "updating" over a helper that had
+    /// long since been replaced. The readings taken meanwhile cost nothing:
+    /// a client in the middle of a handover sends nothing to anybody.
+    ///
+    /// Both faces. "Restart needed" is not the end either — the client goes
+    /// on asking every few minutes and can find the new helper by itself —
+    /// and a card that never read again would go on telling somebody to
+    /// restart a Mac that no longer needs it.
+    private func followHandover() {
+        handoverFollowUpWork?.cancel()
+        handoverFollowUpWork = nil
+        guard case .handover = lidState, continuation != nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.handoverFollowUpWork = nil
+                Task { @MainActor [weak self] in await self?.refreshLid() }
+            }
+        }
+        handoverFollowUpWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + handoverFollowUp, execute: work)
+    }
 
     /// Whether another session may be started.
     ///

@@ -128,12 +128,39 @@ struct KeepAwakeLidReadingTests {
     @Test("What the build can do outranks what the client last said")
     func installationOutranks() {
         for client: KeepAwakeHelperState in [.idle, .holding, .temporarilyUnavailable,
-                                             .refused(.busy)] {
+                                             .refused(.busy), .handingOver, .restartNeeded] {
             #expect(KeepAwakeLidState.reading(installation: .unsignedBuild, client: client,
                                               status: Self.status(sleepDisabled: 1)) == .unsignedBuild)
             #expect(KeepAwakeLidState.reading(installation: .notInstalled, client: client,
                                               status: Self.status(sleepDisabled: 1)) == .notInstalled)
         }
+    }
+
+    // MARK: - A helper an update left behind
+
+    /// Whatever the last status said. It is the old copy's last word from
+    /// before the update — a hold, somebody else's setting, nothing — and
+    /// none of it can be checked now.
+    @Test("A handover reads as a handover over every status")
+    func handoverOutranksTheStatus() {
+        let statuses: [KeepAwakeHelperStatus?] = [
+            nil, Self.status(), Self.status(sleepDisabled: 1, ours: true),
+            Self.status(sleepDisabled: 1), Self.status(sleepDisabled: 1, otherLedgeHolds: true),
+        ]
+        for status in statuses {
+            let underWay = KeepAwakeLidState.reading(installation: .installed,
+                                                     client: .handingOver, status: status)
+            #expect(underWay == .handover(.underWay), "\(String(describing: status))")
+            let stuck = KeepAwakeLidState.reading(installation: .installed,
+                                                  client: .restartNeeded, status: status)
+            #expect(stuck == .handover(.restartNeeded), "\(String(describing: status))")
+            let wrong = KeepAwakeLidState.reading(installation: .installed,
+                                                  client: .helperMismatch, status: status)
+            #expect(wrong == .helperMismatch, "\(String(describing: status))")
+        }
+        #expect(KeepAwakeLidState.reading(installation: .notInstalled, client: .helperMismatch,
+                                          status: nil) == .notInstalled,
+                "the installation still outranks the client")
     }
 }
 
@@ -192,7 +219,8 @@ struct KeepAwakeHelperLidTests {
 
     private static let deadline = Date(timeIntervalSince1970: 1_003_600)
 
-    private static func lid(_ link: ScriptedLink,
+    private static func lid(_ link: any KeepAwakeHelperLink,
+                            installed: @escaping @Sendable () -> KeepAwakeInstalledHelper = { .passes },
                             _ installation: @escaping @Sendable () -> KeepAwakeHelperInstallation)
         -> KeepAwakeHelperLid {
         KeepAwakeHelperLid(
@@ -200,7 +228,10 @@ struct KeepAwakeHelperLidTests {
                 link: link,
                 // Never fires: these are about one call and its answer, not
                 // about the heartbeat, which the client's own suite owns.
-                sleep: { _ in try await Task.sleep(for: .seconds(3600)) }
+                sleep: { _ in try await Task.sleep(for: .seconds(3600)) },
+                // Nor the handover's silence, for the same reason.
+                silence: { _ in try await Task.sleep(for: .seconds(3600)) },
+                installedHelper: installed
             ),
             installation: installation
         )
@@ -264,6 +295,65 @@ struct KeepAwakeHelperLidTests {
         let lid = Self.lid(link) { .installed }
         #expect(await lid.state() == .refused(.foreign))
     }
+
+    /// Through `state()` and `arm()`, not the mapping alone. The bug lived in
+    /// the client dropping the error with `try?` before the mapping ever saw
+    /// it, so a test of the mapping would have passed over it.
+    @Test("A helper from before the update reads as a handover, not as off")
+    func outOfDateHelperIsNotOff() async {
+        let link = RefusingLink()
+        let lid = Self.lid(link) { .installed }
+
+        let reading = await lid.state()
+        #expect(link.reached == 1, "the premise: the helper was asked, and refused")
+        #expect(reading == .handover(.underWay))
+        #expect(!reading.mayArm, "the card offered a mode nothing could confirm")
+
+        // Asked again, and armed, during the handover: neither reaches it.
+        #expect(await lid.state() == .handover(.underWay))
+        #expect(await lid.arm(session: "s1", until: Self.deadline) == .handover(.underWay))
+        await lid.disarm(session: "s1")
+        #expect(link.reached == 1, "the old helper was spoken to again during the handover")
+    }
+
+    /// The other cause of a refusal, through the same two doors. Arming is
+    /// still sent — no handover is waiting on silence — and still reads as
+    /// the reinstall, not as "can't tell".
+    @Test("A helper the installation would refuse too reads as a mismatch, and arming still lands")
+    func mismatchedHelperReadsAsSuch() async {
+        let link = RefusingLink()
+        let lid = Self.lid(link, installed: { .fails }) { .installed }
+
+        let reading = await lid.state()
+        #expect(link.reached == 1, "the premise: the helper was asked, and refused")
+        #expect(reading == .helperMismatch)
+        #expect(!reading.mayArm)
+
+        #expect(await lid.arm(session: "s1", until: Self.deadline) == .helperMismatch)
+        #expect(link.reached > 1, "the hold the user asked for was never sent")
+        await lid.disarm(session: "s1")
+    }
+}
+
+/// A helper from before an update: everything lands, every answer is refused.
+private final class RefusingLink: @unchecked Sendable, KeepAwakeHelperLink {
+    private let lock = NSLock()
+    private var calls = 0
+    var reached: Int { lock.withLock { calls } }
+
+    private func refuse() throws -> Never {
+        lock.withLock { calls += 1 }
+        throw KeepAwakeHelperOutOfDate()
+    }
+
+    func status() async throws -> KeepAwakeHelperStatus { try refuse() }
+    func hold(session: String, generation: Int, until deadline: Date?,
+              leaseSeconds: Double) async throws -> KeepAwakeHelperCode { try refuse() }
+    func release(session: String, generation: Int) async throws -> KeepAwakeHelperCode {
+        try refuse()
+    }
+    func setLowPowerMode(_ on: Bool, session: String,
+                         generation: Int) async throws -> KeepAwakeHelperCode { try refuse() }
 }
 
 /// A box a `@Sendable` closure can read and a test can write.

@@ -42,6 +42,9 @@ extension KeepAwakeLidState {
     ///    about to sleep when it is not. `pending` lands there too: the daemon
     ///    answers a hold once the lease is on disk and before it runs the
     ///    privileged write, so an `ok` is an acceptance and not yet a hold.
+    ///    A handover lands here too, with or without a session: the helper
+    ///    answering is the copy from before an update, and the status below
+    ///    is only ever whatever it said before that.
     /// 3. The last status, which is the only place `foreign` can be read from
     ///    while nothing has been asked for. Sleep disabled with no Ledge claim
     ///    to explain it is a standing fact about the Mac, and the card has to
@@ -89,6 +92,18 @@ extension KeepAwakeLidState {
             // the fallback is the one refusal that says "Ledge's fault, try
             // again" rather than nothing at all.
             return .refused(KeepAwakeLidCode(code) ?? .invalidArgument)
+        case .handingOver:
+            // Ahead of the status, which is whatever the old copy last
+            // managed to say before the update, or nothing. With no session
+            // this used to fall through to `.idle` and read "off", which
+            // offered the mode as ready over a helper nothing could hear.
+            return .handover(.underWay)
+        case .restartNeeded:
+            return .handover(.restartNeeded)
+        case .helperMismatch:
+            // Ahead of the status for the same reason, and whatever the
+            // session is doing: no answer from this helper can be heard.
+            return .helperMismatch
         case .idle:
             guard let status else { return .off }
             if status.isForeign { return .refused(.foreign) }

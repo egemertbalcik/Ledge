@@ -98,6 +98,8 @@ enum StateGallery {
         // card below, which is the card they belong to.
         let lids: [KeepAwakeLidState] = [.holding, .unconfirmed, .unreachable]
             + KeepAwakeLidCode.allCases.map { KeepAwakeLidState.refused($0) }
+            + KeepAwakeHandover.allCases.map { KeepAwakeLidState.handover($0) }
+            + [KeepAwakeLidState.helperMismatch]
         return lids.map { lid in
             State(name: "card-keep-awake-lid-\(lid.name)") { presentation in
                 presentation.phase = .expanded
@@ -127,6 +129,10 @@ enum StateGallery {
     private static let keepAwakeRestingStates: [State] = {
         let lids: [KeepAwakeLidState] = [.unreachable, .unconfirmed]
             + KeepAwakeLidCode.allCases.map { KeepAwakeLidState.refused($0) }
+            // Speaks unasked too. With nothing running it is the sentence
+            // that replaced a silent "off".
+            + KeepAwakeHandover.allCases.map { KeepAwakeLidState.handover($0) }
+            + [KeepAwakeLidState.helperMismatch]
         return lids.map { lid in
             State(name: "card-keep-awake-resting-\(lid.name)") { presentation in
                 presentation.phase = .expanded

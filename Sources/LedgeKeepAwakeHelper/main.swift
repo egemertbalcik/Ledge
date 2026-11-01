@@ -6,6 +6,13 @@ import OSLog
 // and in the four files beside this one, and the reason this is so short is
 // that the thing running as root should be readable in one sitting.
 
+// First, before anything else can take time: which file this process was
+// started from. An update that swaps the bundle between launch and this line
+// leaves the helper noting the new file, and it then behaves as every helper
+// did before this check existed — so the earlier this is, the smaller that
+// window.
+let runningCopy = RunningCopy.atLaunch()
+
 private let log = Logger(subsystem: "com.egemert.ledge", category: "keep-awake-helper")
 
 private func stop(_ message: String) -> Never {
@@ -37,7 +44,8 @@ let daemon = KeepAwakeDaemon(
     // A second runner for the lease watchdog, with its own queues. It exists
     // to act when the ordinary path cannot, so it must not be able to queue
     // behind the ordinary path's child.
-    watchdogPmset: ProcessPmsetRunner(tool: ProcessPmsetRunner.pmset)
+    watchdogPmset: ProcessPmsetRunner(tool: ProcessPmsetRunner.pmset),
+    runningCopy: runningCopy
 )
 daemon.start()
 dispatchMain()

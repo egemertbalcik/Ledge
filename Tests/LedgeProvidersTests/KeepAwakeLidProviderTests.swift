@@ -719,4 +719,47 @@ struct KeepAwakeLidFirstReadingTests {
         #expect(p.lidReading == .off, "an approval outside Ledge was never noticed")
         withExtendedLifetime(stream) {}
     }
+
+    /// The client finishes a handover by itself and tells nobody. With no
+    /// session there is no minute tick to read again on, so a card left open
+    /// went on saying "updating" over a helper that had been replaced.
+    ///
+    /// Both faces. "Restart needed" is not final: the client goes on asking
+    /// every few minutes and can find the new helper by itself, and a card
+    /// that never read again would go on asking for a restart nobody needs.
+    @Test("A handover, either face, is read again until it is over, with nothing else asking")
+    func followsTheHandover() async {
+        for face in KeepAwakeHandover.allCases {
+            let lid = FakeLid(resting: .handover(face))
+            let p = provider(lid)
+            p.handoverFollowUp = 0.02
+            let stream = p.start()
+            await wait(for: { p.lidReading == .handover(face) }, "the first reading")
+
+            // The new helper has answered. Nothing here calls `refreshLid`.
+            lid.rests(.off)
+            await wait(for: { p.lidReading == .off }, "the reading after the handover")
+            #expect(p.lidReading.mayArm, "the mode is offered again once the new helper answers")
+            p.stop()
+            withExtendedLifetime(stream) {}
+        }
+    }
+
+    /// And it stops. Any other reading — the reinstall included, which the
+    /// client reads afresh on every question it is asked anyway — is read
+    /// again only when something asks.
+    @Test("Nothing is read again for a reading that is not a handover")
+    func stopsFollowing() async throws {
+        let lid = FakeLid(resting: .helperMismatch)
+        let p = provider(lid)
+        p.handoverFollowUp = 0.02
+        let stream = p.start()
+        defer { p.stop() }
+        await wait(for: { p.lidReading == .helperMismatch }, "the first reading")
+
+        lid.rests(.off)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(p.lidReading == .helperMismatch, "a reading nothing asked for was taken")
+        withExtendedLifetime(stream) {}
+    }
 }

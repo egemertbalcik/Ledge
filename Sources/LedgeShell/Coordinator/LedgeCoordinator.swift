@@ -717,7 +717,11 @@ public final class LedgeCoordinator {
     /// refused every time it asked.
     private lazy var keepAwakeHelperClient: KeepAwakeHelperClient? = {
         guard let link = KeepAwakeXPCLink.fromBundle() else { return nil }
-        return KeepAwakeHelperClient(link: link)
+        // The helper on disk, checked against the link's own requirement the
+        // first time an answer is refused. It is what tells an update's
+        // leftover process apart from an installation that is simply wrong.
+        return KeepAwakeHelperClient(link: link,
+                                     installedHelper: { link.checkInstalledHelper() })
     }()
 
     private lazy var keepAwakeLid: any KeepAwakeLidHolding = {
@@ -4709,8 +4713,18 @@ public final class LedgeCoordinator {
             // a sleep setting back, at exactly the moment Ledge cannot say
             // whether it is holding one.
             guard let status else {
+                // Still closed when nothing the helper says can be heard. A
+                // restart-needed helper is the very one most likely to be
+                // holding a setting it could not put back — that is why it
+                // never left — and unregistering it would end it with the
+                // setting still out. What changes is the sentence: "in a
+                // moment" is untrue there, so it says what will let Ledge ask.
+                let reading = KeepAwakeLidState.reading(
+                    installation: .installed, client: await client.currentState, status: nil
+                )
                 return .failed(
-                    "Ledge couldn't reach the helper to ask whether it still has a setting "
+                    KeepAwakeCopy.helperRemovalUnheard(reading)
+                        ?? "Ledge couldn't reach the helper to ask whether it still has a setting "
                         + "to put back, so it left it alone. Try again in a moment."
                 )
             }
