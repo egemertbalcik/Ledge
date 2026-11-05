@@ -1,0 +1,78 @@
+# Builds, tests and launches Ledge on the oldest macOS it supports.
+#
+# Development happens on macOS 26, so nothing else ever runs the app on 15.
+# The compiler checks API availability; this checks what it cannot: a symbol
+# missing at load time, a test that only holds on 26, a library a 26-target
+# build would link that 15 does not have.
+name: macOS 15
+
+on:
+  push:
+    branches: [main, macos15]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos15-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-launch:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # bundle.sh stamps CFBundleVersion from the commit count.
+          fetch-depth: 0
+
+      # Package.swift needs Swift 6.2, which only Xcode 26 carries. Pinned to
+      # the release the app is built with locally; the newest non-beta 26 on
+      # the image only if that one is ever removed.
+      - name: Select Xcode 26
+        run: |
+          XCODE=/Applications/Xcode_26.2.app
+          if [[ ! -d "$XCODE" ]]; then
+            XCODE="$(ls -d /Applications/Xcode_26*.app | grep -iv beta | sort -V | tail -1)"
+          fi
+          test -n "$XCODE"
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          echo "using $XCODE"
+
+      - name: Versions
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build
+        run: swift build
+
+      # A few timing tests are known to flake on a slow machine, and a runner
+      # has three cores. One retry; a failure that repeats is real. The first
+      # run's failures stay in the log either way.
+      - name: Test
+        run: swift test --no-parallel || { echo "::warning::test run failed once, retrying"; swift test --no-parallel; }
+
+      - name: Bundle
+        run: ./Scripts/bundle.sh debug build/Ledge.app
+
+      # A missing symbol or library shows up here and nowhere else: dyld kills
+      # the process before any of Ledge's own code runs.
+      - name: Launch
+        run: |
+          ./build/Ledge.app/Contents/MacOS/Ledge > launch.log 2>&1 &
+          PID=$!
+          sleep 20
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "Ledge exited during launch:"
+            cat launch.log
+            exit 1
+          fi
+          kill "$PID"
+          if grep -E "dyld|Symbol not found|Library not loaded" launch.log; then
+            exit 1
+          fi
+          echo "Ledge was still running after 20 s"
