@@ -148,6 +148,39 @@ if [[ "${LEDGE_DIST:-0}" == "1" ]]; then
     shopt -u nullglob
 fi
 
+# Every binary of ours must be built for exactly the macOS the bundle claims.
+# Two failures here are silent at build time and only show on the oldest
+# supported macOS:
+#   - a binary whose minos is above LSMinimumSystemVersion. dyld refuses it,
+#     and perl refuses the media adapter, so Now Playing quietly falls back to
+#     AppleScript-only.
+#   - a hard link to a library that macOS 26 added. A 26-target build links
+#     _LocationEssentials and libswift_DarwinFoundation*; with an older minos
+#     the linker redirects both, and this checks that it did. A hard link to
+#     either kills the app at launch on macOS 15.
+MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$PLIST")"
+shopt -s nullglob
+for binary in "$APP/Contents/MacOS/Ledge" "$APP"/Contents/MacOS/LedgeKeepAwakeHelper \
+              "$APP"/Contents/Frameworks/*.dylib; do
+    [[ -e "$binary" ]] || continue
+    # One line per architecture; every one must match.
+    MINOS="$(vtool -show-build "$binary" | awk '$1 == "minos" { print $2 }' | sort -u)"
+    if [[ "$MINOS" != "$MIN_OS" ]]; then
+        echo "error: $(basename "$binary") is built for macOS $(tr '\n' ' ' <<<"$MINOS")but LSMinimumSystemVersion is $MIN_OS" >&2
+        echo "       Package.swift's platforms and Bundle/Info.plist must name the same macOS" >&2
+        exit 1
+    fi
+    if (( ${MIN_OS%%.*} < 26 )); then
+        HARD_LINKS="$(otool -l "$binary" | awk '$1 == "cmd" { cmd = $2 } $1 == "name" && cmd == "LC_LOAD_DYLIB" { print $2 }')"
+        if grep -E "_LocationEssentials|libswift_DarwinFoundation" <<<"$HARD_LINKS" >&2; then
+            echo "error: $(basename "$binary") hard-links a library that only exists on macOS 26 (above)" >&2
+            echo "       it would not launch on macOS $MIN_OS" >&2
+            exit 1
+        fi
+    fi
+done
+shopt -u nullglob
+
 # Development fixtures, opt-in at runtime via LEDGE_FAKE_ACTIVITIES=1. They are
 # scaffolding, not product, so a distribution bundle ships without them.
 if [[ "${LEDGE_DIST:-0}" != "1" && -d "$ROOT/Fixtures/scenarios" ]]; then
