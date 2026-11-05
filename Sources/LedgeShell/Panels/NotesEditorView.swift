@@ -9,7 +9,8 @@ import SwiftUI
 /// hidden without rebuilding the hosting view, which would reset SwiftUI state
 /// and drop the selection mid-sentence.
 @MainActor
-final class NotesEditorModel: ObservableObject {
+@available(macOS 26.0, *)
+final class NotesEditorModel: ObservableObject, NotesEditing {
 
     @Published var text = AttributedString("")
     @Published var selection = AttributedTextSelection()
@@ -339,6 +340,7 @@ enum NoteFace {
 /// text on that edit, which came back through the binding as a replacement of
 /// everything; line height is outside this scope, so it is never written into
 /// the text and the spacing is drawn from the environment alone.
+@available(macOS 26.0, *)
 struct NoteFormatting: AttributedTextFormattingDefinition {
     struct Scope: AttributeScope {
         let inlinePresentationIntent: AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute
@@ -359,6 +361,7 @@ struct NoteFormatting: AttributedTextFormattingDefinition {
 /// A rich paste has no intent at all, only a font — Helvetica Bold, Times Bold
 /// from an `<h1>`, a heavy face from Word — and the rest of Ledge only knows
 /// bold as intent. A run with no face of its own is left as it is.
+@available(macOS 26.0, *)
 struct IntentFollowsFace: AttributedTextValueConstraint {
     typealias Scope = NoteFormatting.Scope
     typealias AttributeKey = AttributeScopes.FoundationAttributes.InlinePresentationIntentAttribute
@@ -379,6 +382,7 @@ struct IntentFollowsFace: AttributedTextValueConstraint {
 }
 
 /// The face is only ever Ledge's own, chosen by the intent.
+@available(macOS 26.0, *)
 struct FaceFollowsIntent: AttributedTextValueConstraint {
     typealias Scope = NoteFormatting.Scope
     typealias AttributeKey = AttributeScopes.SwiftUIAttributes.FontAttribute
@@ -392,6 +396,7 @@ struct FaceFollowsIntent: AttributedTextValueConstraint {
 ///
 /// No toolbar, no slash menu, no browse list, no save button. The card in the
 /// notch is the index; this window is one note.
+@available(macOS 26.0, *)
 struct NotesEditorView: View {
 
     @ObservedObject var model: NotesEditorModel
@@ -620,7 +625,7 @@ struct NotesEditorView: View {
 
 /// A small bold/italic control. Shows what the selection already is, so the
 /// keyboard shortcut and the button never disagree.
-private struct StyleChip: View {
+struct StyleChip: View {
     let label: String
     var weight: Font.Weight = .regular
     var italic = false
@@ -654,7 +659,7 @@ private struct StyleChip: View {
 /// Never an alert. An alert for something the reader can do nothing about this
 /// second is an interruption, not information; this sits where they are already
 /// looking and leaves on its own.
-private struct NoticeLine: View {
+struct NoticeLine: View {
     let text: String
 
     var body: some View {
@@ -675,7 +680,7 @@ private struct NoticeLine: View {
 /// seconds, arrives as a pale system rectangle that belongs to no window, and
 /// cannot show the shortcut beside the name. Three unlabelled glyphs need
 /// naming faster and more quietly than that.
-private struct HeaderButton: View {
+struct HeaderButton: View {
     let symbol: String
     let name: String
     let keys: String
@@ -756,7 +761,7 @@ private struct Tip: View {
 /// It moves the selection to each match rather than counting them: knowing a
 /// word appears seven times helps nobody reach any of them, and moving the
 /// selection is also what scrolls the editor to it.
-private struct FindBar: View {
+struct FindBar: View {
     @Binding var query: String
     let summary: String
     let hasMatches: Bool
@@ -821,7 +826,7 @@ private struct StepButton: View {
 
 /// Closes the window. Always visible, not hover-revealed: a control you cannot
 /// see is one that is not there.
-private struct CloseButton: View {
+struct CloseButton: View {
     let action: () -> Void
     @State private var hovering = false
 

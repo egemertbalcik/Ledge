@@ -11,12 +11,13 @@ import Testing
 /// The window is clear and the view paints the black, so the outline is
 /// wherever the view's content ends. Hosted the way `makePanel` hosts it —
 /// 360 by 420, `sizingOptions = []` — in a window twenty thousand points off
-/// every screen, never key, and photographed without the WindowServer.
+/// every screen, never key, and photographed without the WindowServer. Once
+/// for each editor this Mac can run.
 @MainActor
 @Suite("Notes window outline", .serialized)
 struct NotesOutlineTests {
 
-    private func host(_ model: NotesEditorModel) -> (NSWindow, NSHostingView<NotesEditorView>) {
+    private func host(_ editor: NotesEditorKind) -> (NSWindow, NSView, any NotesListing) {
         _ = NSApplication.shared
         let size = CGSize(width: 360, height: 420)
         let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height),
@@ -24,12 +25,12 @@ struct NotesOutlineTests {
         window.isReleasedWhenClosed = false
         window.isOpaque = false
         window.backgroundColor = .clear
-        let hosting = NSHostingView(rootView: NotesEditorView(model: model))
-        hosting.sizingOptions = []
+        let (model, hosting) = editor.host()
+        note(model)
         hosting.frame = CGRect(origin: .zero, size: size)
         window.contentView = hosting
         window.orderFrontRegardless()
-        return (window, hosting)
+        return (window, hosting, model as! any NotesListing)
     }
 
     /// Points, at the window's horizontal middle, where nothing is drawn at
@@ -65,17 +66,14 @@ struct NotesOutlineTests {
         return -1
     }
 
-    private func note() -> NotesEditorModel {
-        let model = NotesEditorModel()
+    private func note(_ model: any NotesEditing) {
         model.load(NoteBody(id: "A", text: AttributedString("Groceries\nMilk"), createdAt: 0, editedAt: 0))
         model.notes = (0 ..< 3).map { NoteSummary(id: "s\($0)", title: "Note \($0)", preview: "", editedAt: 0) }
-        return model
     }
 
-    @Test("A search that finds nothing leaves the window its full shape")
-    func noMatchKeepsTheShape() {
-        let model = note()
-        let (window, hosting) = host(model)
+    @Test("A search that finds nothing leaves the window its full shape", arguments: NotesEditorKind.available)
+    func noMatchKeepsTheShape(editor: NotesEditorKind) {
+        let (window, hosting, model) = host(editor)
         defer { window.close() }
         let resting = emptyBands(hosting)
         #expect(resting.top == 0 && resting.bottom == 0, "the note itself fills the window: \(resting)")
@@ -89,10 +87,9 @@ struct NotesOutlineTests {
         #expect(bands.top == 0 && bands.bottom == 0, "the outline pulled in around the list: \(bands)")
     }
 
-    @Test("The keys keep their line while a search goes from matches to none")
-    func hintsStayPut() {
-        let model = note()
-        let (window, hosting) = host(model)
+    @Test("The keys keep their line while a search goes from matches to none", arguments: NotesEditorKind.available)
+    func hintsStayPut(editor: NotesEditorKind) {
+        let (window, hosting, model) = host(editor)
         defer { window.close() }
         model.show(.notes)
         #expect(model.listedNotes.count == 3)
@@ -104,10 +101,9 @@ struct NotesOutlineTests {
         #expect(abs(matching - nothing) < 1, "the hints moved: \(matching) -> \(nothing)")
     }
 
-    @Test("Commands and All Notes are drawn in the window's own shape")
-    func palettesKeepTheShape() {
-        let model = note()
-        let (window, hosting) = host(model)
+    @Test("Commands and All Notes are drawn in the window's own shape", arguments: NotesEditorKind.available)
+    func palettesKeepTheShape(editor: NotesEditorKind) {
+        let (window, hosting, model) = host(editor)
         defer { window.close() }
         for overlay in [NotesOverlay.commands, .notes] {
             model.show(overlay)
@@ -119,3 +115,13 @@ struct NotesOutlineTests {
         }
     }
 }
+
+/// What these tests drive in either editor's model, beyond what the window
+/// itself needs of it.
+@MainActor protocol NotesListing: NotesEditing {
+    var query: String { get set }
+    var listedNotes: [NoteSummary] { get }
+}
+
+extension LegacyNotesEditorModel: NotesListing {}
+@available(macOS 26.0, *) extension NotesEditorModel: NotesListing {}

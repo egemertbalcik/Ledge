@@ -10,12 +10,13 @@ import Testing
 /// bold and italic.
 ///
 /// The editor is the real one, hosted as `NotesUndoTests` hosts it — a real
-/// `NotesPanel` and `NotesEditorView` over a store in a scratch folder, never
-/// key, and ordered in only for the drop, far off every screen. Every fixture
-/// goes on a pasteboard of its own, named for the test and released after it;
-/// the user's clipboard is never read or written. The paste is driven through
-/// `readSelection(from:)`, which is what `paste:` and Services call, so it goes
-/// through everything AppKit and SwiftUI do with a real one.
+/// `NotesPanel` and editor view over a store in a scratch folder, never key,
+/// and ordered in only for the drop, far off every screen — once for each
+/// editor this Mac can run. Every fixture goes on a pasteboard of its own,
+/// named for the test and released after it; the user's clipboard is never
+/// read or written. The paste is driven through `readSelection(from:)`, which
+/// is what `paste:` and Services call, so it goes through everything AppKit
+/// and SwiftUI do with a real one.
 @MainActor
 @Suite("Notes paste", .serialized, .timeLimit(.minutes(5)))
 struct NotesPasteTests {
@@ -128,9 +129,9 @@ struct NotesPasteTests {
     private func idle() async { try? await Task.sleep(for: .milliseconds(300)) }
 
     /// A harness with this note open in it and the text view first responder.
-    private func open(_ text: AttributedString) async throws -> (Harness, NoteBody, NSTextView) {
+    private func open(_ text: AttributedString, in editor: NotesEditorKind) async throws -> (Harness, NoteBody, NSTextView) {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let note = await h.store.create()
         await h.store.update(note.id, text: text)
         await h.store.flush()
@@ -144,7 +145,7 @@ struct NotesPasteTests {
     }
 
     private func paste(_ board: NSPasteboard, into textView: NSTextView, at offset: Int,
-                       model: NotesEditorModel, arrived marker: String) async throws {
+                       model: any NotesEditing, arrived marker: String) async throws {
         textView.setSelectedRange(NSRange(location: offset, length: 0))
         textView.breakUndoCoalescing()
         try #require(textView.readSelection(from: board), "the text view took the paste")
@@ -153,11 +154,47 @@ struct NotesPasteTests {
 
     /// Whether a run carries the intent and face Ledge would give it, and
     /// nothing besides.
-    private func isLedgeOwn(_ run: AttributedString.Runs.Run) -> Bool {
+    ///
+    /// The SwiftUI editor's model holds the face beside the intent, because
+    /// that is what it draws from. The AppKit editor's holds the intent alone,
+    /// as a note is stored, and keeps the face in its text view.
+    private func isLedgeOwn(_ run: AttributedString.Runs.Run, in editor: NotesEditorKind) -> Bool {
         var expected = AttributeContainer()
         if let intent = run.inlinePresentationIntent { expected.inlinePresentationIntent = intent }
-        expected.font = NoteFace.font(for: run.inlinePresentationIntent ?? [])
+        if editor == .swiftUI { expected.font = NoteFace.font(for: run.inlinePresentationIntent ?? []) }
         return run.attributes == expected
+    }
+
+    /// Whether the text view itself draws only what Ledge would.
+    private func drawsOnlyLedgeOwn(_ textView: NSTextView, in editor: NotesEditorKind) -> Bool {
+        // The SwiftUI editor's storage is SwiftUI's to arrange; what it keeps
+        // is held by the model above.
+        guard editor == .appKit, let storage = textView.textStorage else { return true }
+        var clean = true
+        storage.enumerateAttributes(in: NSRange(location: 0, length: storage.length)) { attributes, _, _ in
+            if NoteAppKitBridge.clamped(attributes) != nil { clean = false }
+        }
+        return clean
+    }
+
+    /// Whether the B or I chip would be lit with this stretch selected.
+    private func chipShows(_ intent: InlinePresentationIntent, over range: Range<AttributedString.Index>,
+                           _ h: Harness, _ textView: NSTextView) -> Bool {
+        if #available(macOS 26.0, *), let model = h.model as? NotesEditorModel {
+            model.selection = AttributedTextSelection(range: range)
+            return model.isActive(intent)
+        }
+        guard let model = h.model as? LegacyNotesEditorModel else { return false }
+        textView.setSelectedRange(NSRange(range, in: model.text))
+        return model.isActive(intent)
+    }
+
+    /// A note as it comes back when it is opened again in this editor.
+    private func reopened(_ text: AttributedString, in editor: NotesEditorKind) -> AttributedString {
+        if editor == .swiftUI, #available(macOS 26.0, *) { return NotesEditorModel.rendered(text) }
+        let model = LegacyNotesEditorModel()
+        model.load(NoteBody(id: "reopened", text: text, createdAt: 0, editedAt: 0))
+        return model.text
     }
 
     /// Puts the window away and stops it reporting edits to a harness that
@@ -171,7 +208,7 @@ struct NotesPasteTests {
     }
 
     private func json(_ text: AttributedString) throws -> String {
-        let body = NoteBody(id: "probe", text: NotesEditorModel.stored(text), createdAt: 0, editedAt: 0)
+        let body = NoteBody(id: "probe", text: NoteText.normalized(text), createdAt: 0, editedAt: 0)
         return String(decoding: try JSONEncoder().encode(body), as: UTF8.self)
     }
 
@@ -182,15 +219,16 @@ struct NotesPasteTests {
 
     // MARK: - What comes in
 
-    @Test("A rich paste keeps its words, bold and italic, and nothing else")
-    func richPasteKeepsOnlyLedgeFormatting() async throws {
+    @Test("A rich paste keeps its words, bold and italic, and nothing else", arguments: NotesEditorKind.available)
+    func richPasteKeepsOnlyLedgeFormatting(editor: NotesEditorKind) async throws {
         let b = try rtfBoard()
         defer { b.releaseGlobally() }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "HILITE")
 
-        #expect(h.model.text.runs.allSatisfy(isLedgeOwn),
-                "\(h.model.text.runs.filter { !isLedgeOwn($0) }.map { String(describing: $0.attributes) })")
+        #expect(h.model.text.runs.allSatisfy { isLedgeOwn($0, in: editor) },
+                "\(h.model.text.runs.filter { !isLedgeOwn($0, in: editor) }.map { String(describing: $0.attributes) })")
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
         #expect(foreignKeys(in: try json(h.model.text)) == [])
         let storage = try #require(textView.textStorage)
         let at = (storage.string as NSString).range(of: "HILITE").location
@@ -198,8 +236,8 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("Pasted bold and italic are Ledge's bold and italic", arguments: ["rtf", "html"])
-    func pastedBoldIsLedgeBold(source: String) async throws {
+    @Test("Pasted bold and italic are Ledge's bold and italic", arguments: NotesEditorKind.available, ["rtf", "html"])
+    func pastedBoldIsLedgeBold(editor: NotesEditorKind, source: String) async throws {
         let b = try source == "rtf" ? rtfBoard() : htmlBoard()
         defer { b.releaseGlobally() }
         let bold = source == "rtf" ? "BOLDFONT" : "WEBBOLD"
@@ -210,33 +248,36 @@ struct NotesPasteTests {
                                                    effectiveRange: nil) as? NSFont)
             try #require(NSFontManager.shared.traits(of: font).contains(.boldFontMask), "the fixture really is bold")
         }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: bold)
 
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
+        #expect(!textView.string.contains("\u{FFFC}"))
         let boldRange = try #require(h.model.text.range(of: bold))
         let italicRange = try #require(h.model.text.range(of: italic))
         #expect(h.model.text[boldRange].runs.allSatisfy { $0.inlinePresentationIntent == .stronglyEmphasized })
         #expect(h.model.text[italicRange].runs.allSatisfy { $0.inlinePresentationIntent == .emphasized })
-        h.model.selection = AttributedTextSelection(range: boldRange)
-        #expect(h.model.isActive(.stronglyEmphasized), "the B chip shows it")
-        let stored = NotesEditorModel.stored(h.model.text)
+        #expect(chipShows(.stronglyEmphasized, over: boldRange, h, textView), "the B chip shows it")
+        let stored = NoteText.normalized(h.model.text)
         #expect(NoteMarkdown.render(stored).contains("**\(bold)**"))
         #expect(NoteHTML.render(stored).contains("<b>\(bold)</b>"))
 
         let back = try JSONDecoder().decode(NoteBody.self, from: Data(try json(h.model.text).utf8))
-        let reopened = NotesEditorModel.rendered(back.text)
+        let reopened = reopened(back.text, in: editor)
         let again = try #require(reopened.range(of: bold))
         #expect(reopened[again].runs.allSatisfy { $0.inlinePresentationIntent == .stronglyEmphasized },
                 "still bold after a reopen")
         done(h)
     }
 
-    @Test("A pasted highlight never reaches the note's file")
-    func highlightNeverReachesDisk() async throws {
+    @Test("A pasted highlight never reaches the note's file", arguments: NotesEditorKind.available)
+    func highlightNeverReachesDisk(editor: NotesEditorKind) async throws {
         let b = try rtfBoard()
         defer { b.releaseGlobally() }
-        let (h, body, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, body, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "HILITE")
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
+        #expect(!textView.string.contains("\u{FFFC}"))
         await h.closeFlush()
 
         let file = h.dir.appendingPathComponent("\(body.id).json")
@@ -249,8 +290,8 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("Images in a paste are dropped, not kept as a placeholder")
-    func imagesAreDroppedNotPersisted() async throws {
+    @Test("Images in a paste are dropped, not kept as a placeholder", arguments: NotesEditorKind.available)
+    func imagesAreDroppedNotPersisted(editor: NotesEditorKind) async throws {
         let source = NSMutableAttributedString(string: "IMGBEFORE ")
         let wrapper = FileWrapper(regularFileWithContents: png())
         wrapper.preferredFilename = "dot.png"
@@ -269,17 +310,19 @@ struct NotesPasteTests {
         }
         try #require(attachments == 1, "the board carries an image")
 
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "IMGAFTER")
         #expect(!String(h.model.text.characters).contains("\u{FFFC}"))
+        #expect(!textView.string.contains("\u{FFFC}"), "nor in what is drawn, where it would be a box")
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
         done(h)
     }
 
-    @Test("A drop is held to the same rule as a paste")
-    func dragGoesThroughTheSameRule() async throws {
+    @Test("A drop is held to the same rule as a paste", arguments: NotesEditorKind.available)
+    func dragGoesThroughTheSameRule(editor: NotesEditorKind) async throws {
         let b = try htmlBoard()
         defer { b.releaseGlobally() }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         // The drop needs a window that is on a screen to land in.
         h.panel.orderFrontRegardless()
         let rect = textView.firstRect(forCharacterRange: NSRange(location: 7, length: 0), actualRange: nil)
@@ -292,20 +335,21 @@ struct NotesPasteTests {
         textView.concludeDragOperation(drag)
         try #require(await arrive { String(h.model.text.characters).contains("WEBHILITE") }, "the drop reached the model")
 
-        #expect(h.model.text.runs.allSatisfy(isLedgeOwn))
+        #expect(h.model.text.runs.allSatisfy { isLedgeOwn($0, in: editor) })
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
         #expect(foreignKeys(in: try json(h.model.text)) == [])
         let bold = try #require(h.model.text.range(of: "WEBBOLD"))
         #expect(h.model.text[bold].runs.allSatisfy { $0.inlinePresentationIntent == .stronglyEmphasized })
         done(h)
     }
 
-    @Test("A pasted list arrives with the bullet a person types")
-    func pastedListIsBulleted() async throws {
+    @Test("A pasted list arrives with the bullet a person types", arguments: NotesEditorKind.available)
+    func pastedListIsBulleted(editor: NotesEditorKind) async throws {
         let b = try htmlBoard()
         defer { b.releaseGlobally() }
         let read = try #require(NSAttributedString(html: Data(html.utf8), documentAttributes: nil))
         try #require(read.string.contains("\t•\tUL ONE"), "AppKit spells the list out as tab, bullet, tab")
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "UL ONE")
 
         #expect(await arrive { String(h.model.text.characters).contains("• UL ONE\n• UL TWO") })
@@ -317,8 +361,8 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("Rich text pasted into a bold run keeps its own bold and plain")
-    func richPasteIntoBoldKeepsItsOwn() async throws {
+    @Test("Rich text pasted into a bold run keeps its own bold and plain", arguments: NotesEditorKind.available)
+    func richPasteIntoBoldKeepsItsOwn(editor: NotesEditorKind) async throws {
         let source = NSMutableAttributedString(string: "PLAINPASTE ", attributes: [.font: NSFont.systemFont(ofSize: 13)])
         source.append(NSAttributedString(string: "BOLDPASTE", attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]))
         let b = board("into-bold")
@@ -329,7 +373,7 @@ struct NotesPasteTests {
 
         var start = AttributedString("plain BOLDRUN plain")
         start[try #require(start.range(of: "BOLDRUN"))].inlinePresentationIntent = .stronglyEmphasized
-        let (h, _, textView) = try await open(start)
+        let (h, _, textView) = try await open(start, in: editor)
         try #require(h.model.text[try #require(h.model.text.range(of: "BOLDRUN"))].inlinePresentationIntent == .stronglyEmphasized)
         try await paste(b, into: textView, at: 10, model: h.model, arrived: "BOLDPASTE")
 
@@ -340,8 +384,8 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("Typing after a paste that ends highlighted comes out plain")
-    func typingAfterAHighlightedPasteIsPlain() async throws {
+    @Test("Typing after a paste that ends highlighted comes out plain", arguments: NotesEditorKind.available)
+    func typingAfterAHighlightedPasteIsPlain(editor: NotesEditorKind) async throws {
         let source = NSMutableAttributedString(string: "plain ")
         source.append(NSAttributedString(string: "HILITE", attributes: [
             .backgroundColor: NSColor.white, .foregroundColor: NSColor.black,
@@ -356,13 +400,13 @@ struct NotesPasteTests {
         try #require(read.attribute(.backgroundColor, at: read.length - 1, effectiveRange: nil) != nil,
                      "the last pasted character is highlighted on the board")
 
-        let (h, _, textView) = try await open(AttributedString("Start "))
+        let (h, _, textView) = try await open(AttributedString("Start "), in: editor)
         try await paste(b, into: textView, at: 6, model: h.model, arrived: "HILITE")
         textView.insertText("ZZ", replacementRange: NSRange(location: NSNotFound, length: 0))
         try #require(await arrive { String(h.model.text.characters).hasSuffix("HILITEZZ") }, "the typing reached the model")
 
         let typed = try #require(h.model.text.range(of: "ZZ"))
-        #expect(h.model.text[typed].runs.allSatisfy(isLedgeOwn))
+        #expect(h.model.text[typed].runs.allSatisfy { isLedgeOwn($0, in: editor) })
         #expect(h.model.text[typed].runs.allSatisfy { $0.inlinePresentationIntent == nil })
         let storage = try #require(textView.textStorage)
         let at = (storage.string as NSString).range(of: "ZZ").location
@@ -371,25 +415,26 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("Formatting from the right-click menu does not stick")
-    func contextMenuFormattingIsInert() async throws {
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+    @Test("Formatting from the right-click menu does not stick", arguments: NotesEditorKind.available)
+    func contextMenuFormattingIsInert(editor: NotesEditorKind) async throws {
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         textView.setSelectedRange(NSRange(location: 0, length: 6))
         textView.underline(nil)
         await idle()
         try #require(String(h.model.text.characters) == "Before AFTER")
-        #expect(h.model.text.runs.allSatisfy(isLedgeOwn))
+        #expect(h.model.text.runs.allSatisfy { isLedgeOwn($0, in: editor) })
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
         #expect(foreignKeys(in: try json(h.model.text)) == [])
         done(h)
     }
 
     // MARK: - Undo and the caret
 
-    @Test("A paste is one undo")
-    func pasteIsOneUndo() async throws {
+    @Test("A paste is one undo", arguments: NotesEditorKind.available)
+    func pasteIsOneUndo(editor: NotesEditorKind) async throws {
         let b = try rtfBoard()
         defer { b.releaseGlobally() }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "HILITE")
         try #require(textView.undoManager?.canUndo == true, "the paste is undoable")
 
@@ -399,11 +444,11 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("A pasted list is still one undo")
-    func pastedListIsOneUndo() async throws {
+    @Test("A pasted list is still one undo", arguments: NotesEditorKind.available)
+    func pastedListIsOneUndo(editor: NotesEditorKind) async throws {
         let b = try htmlBoard()
         defer { b.releaseGlobally() }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "UL ONE")
         try #require(await arrive { String(h.model.text.characters).contains("• UL ONE") }, "the list was tidied")
         #expect(h.pressUndo())
@@ -412,14 +457,14 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("The caret lands after what was pasted")
-    func caretFollowsThePastedText() async throws {
+    @Test("The caret lands after what was pasted", arguments: NotesEditorKind.available)
+    func caretFollowsThePastedText(editor: NotesEditorKind) async throws {
         let b = board("caret")
         defer { b.releaseGlobally() }
         b.declareTypes([.string], owner: nil)
         b.setString("PP", forType: .string)
         try #require(b.string(forType: .string) == "PP")
-        let (h, _, textView) = try await open(AttributedString("0123456789 tail of the note"))
+        let (h, _, textView) = try await open(AttributedString("0123456789 tail of the note"), in: editor)
         try await paste(b, into: textView, at: 5, model: h.model, arrived: "PP")
         await idle()
 
@@ -430,11 +475,11 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("The caret lands after a rich paste too")
-    func caretFollowsARichPaste() async throws {
+    @Test("The caret lands after a rich paste too", arguments: NotesEditorKind.available)
+    func caretFollowsARichPaste(editor: NotesEditorKind) async throws {
         let b = try rtfBoard()
         defer { b.releaseGlobally() }
-        let (h, _, textView) = try await open(AttributedString("Before AFTER"))
+        let (h, _, textView) = try await open(AttributedString("Before AFTER"), in: editor)
         try await paste(b, into: textView, at: 7, model: h.model, arrived: "HILITE")
         await idle()
 
@@ -444,9 +489,9 @@ struct NotesPasteTests {
         done(h)
     }
 
-    @Test("The first keystroke after a note opens stays where it was typed")
-    func firstKeystrokeAfterLoadStaysPut() async throws {
-        let (h, _, textView) = try await open(AttributedString("0123456789 tail of the note"))
+    @Test("The first keystroke after a note opens stays where it was typed", arguments: NotesEditorKind.available)
+    func firstKeystrokeAfterLoadStaysPut(editor: NotesEditorKind) async throws {
+        let (h, _, textView) = try await open(AttributedString("0123456789 tail of the note"), in: editor)
         textView.setSelectedRange(NSRange(location: 3, length: 0))
         textView.insertText("Q", replacementRange: NSRange(location: NSNotFound, length: 0))
         try #require(await arrive { String(h.model.text.characters).contains("Q") }, "the keystroke reached the model")
@@ -476,10 +521,11 @@ struct NotesPasteTests {
         return json
     }
 
-    @Test("A note saved with a pasted highlight opens clean and is written back clean")
-    func pollutedNoteHeals() async throws {
+    @Test("A note saved with a pasted highlight opens clean and is written back clean",
+          arguments: NotesEditorKind.available)
+    func pollutedNoteHeals(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         try FileManager.default.createDirectory(at: h.dir, withIntermediateDirectories: true)
         let id = UUID().uuidString
         let file = h.dir.appendingPathComponent("\(id).json")
@@ -491,7 +537,8 @@ struct NotesPasteTests {
         h.present(body)
         let textView = try #require(h.textView())
         try #require(await arrive { textView.string == "old HILITE note" }, "the note is on screen")
-        #expect(h.model.text.runs.allSatisfy(isLedgeOwn))
+        #expect(h.model.text.runs.allSatisfy { isLedgeOwn($0, in: editor) })
+        #expect(drawsOnlyLedgeOwn(textView, in: editor))
         await h.closeFlush()
 
         let written = String(decoding: try Data(contentsOf: file), as: UTF8.self)
@@ -502,6 +549,7 @@ struct NotesPasteTests {
         done(h)
     }
 
+    @available(macOS 26.0, *)
     @Test("Whatever the model holds, only characters and intent are stored")
     func storedIsIntentOnly() throws {
         // The definition keeps a paste out of the model; this is the edge that
@@ -523,9 +571,9 @@ struct NotesPasteTests {
         #expect(stored[try #require(stored.range(of: "bold"))].inlinePresentationIntent == .stronglyEmphasized)
     }
 
-    @Test("A list an earlier build pasted opens with its bullets")
-    func oldPastedListOpensBulleted() {
-        let opened = NotesEditorModel.rendered(AttributedString("Shopping\n\t•\tmilk\n\t•\teggs"))
+    @Test("A list an earlier build pasted opens with its bullets", arguments: NotesEditorKind.available)
+    func oldPastedListOpensBulleted(editor: NotesEditorKind) {
+        let opened = reopened(AttributedString("Shopping\n\t•\tmilk\n\t•\teggs"), in: editor)
         #expect(String(opened.characters) == "Shopping\n• milk\n• eggs")
     }
 

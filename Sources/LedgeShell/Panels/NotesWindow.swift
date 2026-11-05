@@ -232,7 +232,7 @@ final class NotesWindowController {
     static let windowCornerRadius: CGFloat = 14
 
     private var panel: NotesPanel?
-    private var hosting: NSHostingView<NotesEditorView>?
+    private var hosting: NSView?
     private var closeObserver: (any NSObjectProtocol)?
     private var resignObserver: (any NSObjectProtocol)?
 
@@ -249,11 +249,46 @@ final class NotesWindowController {
     /// hidden without rebuilding the hosting view — rebuilding one resets
     /// SwiftUI state, which here would drop the selection and scroll position
     /// mid-sentence.
-    private let model = NotesEditorModel()
+    private let model: any NotesEditing
+
+    /// Builds the hosting view for the editor `init` chose, the one decision
+    /// about which editor this window has.
+    private let hostEditor: @MainActor (_ onClose: @escaping () -> Void) -> NSView
 
     init(store: NotesStore, preferences: Preferences) {
         self.store = store
         self.preferences = preferences
+        // SwiftUI's rich `TextEditor` is macOS 26 and later; before that the
+        // same window is drawn around an AppKit text view.
+        if #available(macOS 26.0, *), !Self.prefersLegacyEditor {
+            let model = NotesEditorModel()
+            self.model = model
+            hostEditor = { Self.host(NotesEditorView(model: model, onClose: $0)) }
+        } else {
+            let model = LegacyNotesEditorModel()
+            self.model = model
+            hostEditor = { Self.host(LegacyNotesEditorView(model: model, onClose: $0)) }
+        }
+    }
+
+    /// `LEDGE_LEGACY_NOTES=1` puts the macOS 15 editor in the window on a Mac
+    /// that has the other, so it can be tried without a second machine. Debug
+    /// builds only: a release build does not contain the switch at all.
+    private static var prefersLegacyEditor: Bool {
+        #if DEBUG
+        return DebugSwitches.isOn("LEDGE_LEGACY_NOTES")
+        #else
+        return false
+        #endif
+    }
+
+    private static func host(_ view: some View) -> NSView {
+        let hosting = NSHostingView(rootView: view)
+        // SwiftUI hands a hosting view's ideal size up to its window, and a
+        // text view grows with its content — without this the window would
+        // resize itself under the user as they typed.
+        hosting.sizingOptions = []
+        return hosting
     }
 
     var isOpen: Bool { panel?.isVisible ?? false }
@@ -405,7 +440,8 @@ final class NotesWindowController {
         // back off the editor every time the window was raised. Measured: the
         // panel was key and the app active, and the first responder was
         // `NSHostingView<NotesEditorView>`, with no insertion point anywhere in
-        // the window. The editor's own `@FocusState` owns this.
+        // the window. The editor owns this: the SwiftUI one through its
+        // `@FocusState`, the AppKit one by putting its text view first.
         model.requestFocus()
         captureEditorFrames()
     }
@@ -455,7 +491,7 @@ final class NotesWindowController {
     /// first and not as part of the swap.
     private func retire(before next: String?) {
         guard let leaving = openNoteID, leaving != next else { return }
-        let text = NotesEditorModel.stored(model.text)
+        let text = NoteText.normalized(model.text)
         let store = store
         Task {
             await store.update(leaving, text: text)
@@ -493,12 +529,12 @@ final class NotesWindowController {
         case .italic:
             model.toggle(.emphasized)
         case .copyMarkdown:
-            copy(NoteMarkdown.render(NotesEditorModel.stored(model.text)))
+            copy(NoteMarkdown.render(NoteText.normalized(model.text)))
         case .copyPlainText:
             copy(String(model.text.characters))
         case .exportToNotes:
             let title = model.title
-            let text = NotesEditorModel.stored(model.text)
+            let text = NoteText.normalized(model.text)
             Task { [weak self] in
                 if let failure = await NotesExport.send(title: title, text: text) {
                     await MainActor.run { self?.report(failure) }
@@ -608,7 +644,7 @@ final class NotesWindowController {
         let id = openNoteID
         // Stored form, not what is on screen: the font is derived from the
         // intent for the editor's benefit and is never the truth about a note.
-        let text = NotesEditorModel.stored(model.text)
+        let text = NoteText.normalized(model.text)
         let store = self.store
         Task {
             if let id { await store.update(id, text: text) }
@@ -704,14 +740,7 @@ final class NotesWindowController {
         panel.isEditingNote = { [weak self] in self?.model.overlay == NotesOverlay.none }
         panel.onClose = { [weak self] in self?.close() }
 
-        let hosting = NSHostingView(rootView: NotesEditorView(
-            model: model,
-            onClose: { [weak self] in self?.close() }
-        ))
-        // SwiftUI hands a hosting view's ideal size up to its window, and a
-        // text view grows with its content — without this the window would
-        // resize itself under the user as they typed.
-        hosting.sizingOptions = []
+        let hosting = hostEditor({ [weak self] in self?.close() })
         hosting.frame = panel.contentView?.bounds ?? .zero
         hosting.autoresizingMask = [.width, .height]
         panel.contentView?.addSubview(hosting)

@@ -9,24 +9,26 @@ import Testing
 /// ⌘Z in the note window only ever reaches the note that is open.
 ///
 /// The editor is hosted the way `NotesWindowController.makePanel` hosts it — a
-/// real `NotesPanel`, the real `NotesEditorView` in an `NSHostingView` — over a
-/// real store in a scratch folder. The panel is never ordered in and never
-/// key. The switch and the close flush are the controller's, line for line,
-/// because `present` is private and the controller's own open raises a window
-/// on the user's screen.
+/// real `NotesPanel`, the real editor view in an `NSHostingView` — over a real
+/// store in a scratch folder, once for each editor this Mac can run. The panel
+/// is never ordered in and never key. The switch and the close flush are the
+/// controller's, line for line, because `present` is private and the
+/// controller's own open raises a window on the user's screen.
 @MainActor
 @Suite("Notes undo", .serialized)
 struct NotesUndoTests {
 
     @MainActor final class Harness {
+        let kind: NotesEditorKind
         let dir: URL
         let store: NotesStore
-        let model = NotesEditorModel()
+        let model: any NotesEditing
         let panel: NotesPanel
-        let hosting: NSHostingView<NotesEditorView>
+        let hosting: NSView
         var openNoteID: String?
 
-        init() {
+        init(_ kind: NotesEditorKind) {
+            self.kind = kind
             dir = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("ledge-notes-undo-tests/\(UUID().uuidString)", isDirectory: true)
             store = NotesStore(directory: dir)
@@ -34,8 +36,7 @@ struct NotesUndoTests {
                                styleMask: [.borderless, .nonactivatingPanel, .utilityWindow],
                                backing: .buffered, defer: false)
             panel.isReleasedWhenClosed = false
-            hosting = NSHostingView(rootView: NotesEditorView(model: model, onClose: {}))
-            hosting.sizingOptions = []
+            (model, hosting) = kind.host()
             hosting.frame = panel.contentView?.bounds ?? .zero
             hosting.autoresizingMask = [.width, .height]
             panel.contentView?.addSubview(hosting)
@@ -49,7 +50,7 @@ struct NotesUndoTests {
         /// The controller's `present`: retire the note being left, then load.
         func present(_ body: NoteBody) {
             if let leaving = openNoteID, leaving != body.id {
-                let text = NotesEditorModel.stored(model.text)
+                let text = NoteText.normalized(model.text)
                 let store = store
                 Task {
                     await store.update(leaving, text: text)
@@ -64,7 +65,7 @@ struct NotesUndoTests {
         /// The controller's `flush`, as closing the window runs it.
         func closeFlush() async {
             let id = openNoteID
-            let text = NotesEditorModel.stored(model.text)
+            let text = NoteText.normalized(model.text)
             if let id { await store.update(id, text: text) }
             await store.flush()
             if let id { await store.discardIfEmpty(id) }
@@ -77,14 +78,7 @@ struct NotesUndoTests {
             return textView.tryToPerform(Selector(("undo:")), with: nil)
         }
 
-        func textView() -> NSTextView? {
-            func find(_ view: NSView) -> NSTextView? {
-                if let textView = view as? NSTextView { return textView }
-                for sub in view.subviews { if let found = find(sub) { return found } }
-                return nil
-            }
-            return find(hosting)
-        }
+        func textView() -> NSTextView? { noteTextView(in: hosting) }
 
         func note(_ text: String) async -> NoteBody {
             let note = await store.create()
@@ -102,10 +96,10 @@ struct NotesUndoTests {
 
     private func settle() async throws { try await Task.sleep(for: .milliseconds(250)) }
 
-    @Test("⌘Z right after switching notes leaves the open note's text alone")
-    func undoAfterSwitch() async throws {
+    @Test("⌘Z right after switching notes leaves the open note's text alone", arguments: NotesEditorKind.available)
+    func undoAfterSwitch(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let a = await h.note("Alpha title\nalpha body")
         let b = await h.note("Bravo title\nbravo body")
         h.hosting.layoutSubtreeIfNeeded()
@@ -115,7 +109,15 @@ struct NotesUndoTests {
         h.present(b); try await settle()
         let textView = try #require(h.textView())
         try #require(textView.string == "Bravo title\nbravo body", "B is the note on screen")
-        try #require(textView.undoManager === h.panel.undoManager, "⌘Z goes to the window's own history")
+        // The SwiftUI editor's text view keeps its history in the window's;
+        // the AppKit editor's keeps one of its own, so a search field's ⌘Z
+        // can never run on into the note.
+        if h.kind == .swiftUI {
+            try #require(textView.undoManager === h.panel.undoManager, "⌘Z goes to the window's own history")
+        } else {
+            try #require(textView.undoManager != nil && textView.undoManager !== h.panel.undoManager,
+                         "⌘Z goes to the note's own history")
+        }
 
         _ = h.pressUndo(); try await settle()
         #expect(String(h.model.text.characters) == "Bravo title\nbravo body")
@@ -125,10 +127,10 @@ struct NotesUndoTests {
         h.panel.close()
     }
 
-    @Test("⌘Z on the first note of the session, then closing, keeps the note")
-    func undoOnFirstNote() async throws {
+    @Test("⌘Z on the first note of the session, then closing, keeps the note", arguments: NotesEditorKind.available)
+    func undoOnFirstNote(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let a = await h.note("Only note\nkeep me")
         h.hosting.layoutSubtreeIfNeeded()
         try await settle()
@@ -144,10 +146,10 @@ struct NotesUndoTests {
         #expect(await h.store.list().map(\.id) == [a.id])
     }
 
-    @Test("What was typed in one note cannot be undone into the next")
-    func typingStaysWithItsNote() async throws {
+    @Test("What was typed in one note cannot be undone into the next", arguments: NotesEditorKind.available)
+    func typingStaysWithItsNote(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let a = await h.note("note A")
         let b = await h.note("note B")
         h.hosting.layoutSubtreeIfNeeded()
@@ -175,10 +177,10 @@ struct NotesUndoTests {
         h.panel.close()
     }
 
-    @Test("What was typed in one note cannot be undone into one picked from All Notes")
-    func typingStaysWithItsNoteThroughList() async throws {
+    @Test("What was typed in one note cannot be undone into one picked from All Notes", arguments: NotesEditorKind.available)
+    func typingStaysWithItsNoteThroughList(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let a = await h.note("note A")
         let b = await h.note("note B")
         h.hosting.layoutSubtreeIfNeeded()
@@ -208,10 +210,10 @@ struct NotesUndoTests {
         h.panel.close()
     }
 
-    @Test("Typing in the next note can still be undone, and only back to how it opened")
-    func ownTypingStillUndoes() async throws {
+    @Test("Typing in the next note can still be undone, and only back to how it opened", arguments: NotesEditorKind.available)
+    func ownTypingStillUndoes(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
-        let h = Harness()
+        let h = Harness(editor)
         let a = await h.note("note A")
         let b = await h.note("note B")
         h.hosting.layoutSubtreeIfNeeded()
@@ -239,6 +241,78 @@ struct NotesUndoTests {
         #expect(String(h.model.text.characters) == "note B")
         _ = h.pressUndo(); try await settle()
         #expect(String(h.model.text.characters) == "note B")
+        h.panel.close()
+    }
+
+    /// The search field of whatever is laid over the note: the find bar's or
+    /// a list's.
+    private func searchField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for sub in view.subviews { if let found = searchField(in: sub) { return found } }
+        return nil
+    }
+
+    @Test("⌘Z in the find bar or a list never reaches the note, however far it goes",
+          arguments: NotesEditorKind.available, [NotesOverlay.commands, .notes, .find])
+    func undoInAFieldStaysInTheField(editor: NotesEditorKind, overlay: NotesOverlay) async throws {
+        _ = NSApplication.shared
+        let h = Harness(editor)
+        let a = await h.note("note A")
+        h.hosting.layoutSubtreeIfNeeded()
+        h.present(a); try await settle()
+        let textView = try #require(h.textView())
+        _ = h.panel.makeFirstResponder(textView)
+        textView.setSelectedRange(NSRange(location: 6, length: 0))
+        textView.insertText(" typed", replacementRange: NSRange(location: NSNotFound, length: 0))
+        textView.breakUndoCoalescing()
+        try await settle()
+        try #require(String(h.model.text.characters) == "note A typed", "the typing reached the note")
+
+        h.model.notes = [NoteSummary(id: "x", title: "X", preview: "", editedAt: 0)]
+        h.model.show(overlay); try await settle()
+        let field = try #require(searchField(in: h.hosting), "\(overlay) has its field")
+        try #require(h.panel.makeFirstResponder(field))
+        let editing = try #require(field.currentEditor(), "the field is being edited")
+        editing.insertText("q")
+        try await settle()
+        try #require(field.stringValue == "q", "typed into the field")
+
+        // ⌘Z is the panel's to dispatch; it sends `undo:` up the chain from
+        // whatever has the keyboard, which here is the field.
+        let commandZ = try #require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6))
+        let undo = try #require(NotesPanel.editingAction(for: commandZ))
+        for _ in 0 ..< 4 {
+            _ = (h.panel.firstResponder ?? h.panel).tryToPerform(undo, with: nil)
+            try await settle()
+        }
+        #expect(field.stringValue.isEmpty, "the field's own typing was undone")
+        #expect(String(h.model.text.characters) == "note A typed", "the note was never touched")
+        await h.store.flush()
+        #expect(await h.store.body(a.id)?.plainText == "note A typed", "nor what the store holds for it")
+        h.model.onEdit = nil
+        h.panel.close()
+    }
+
+    @Test("A load starts the window's history over too", arguments: NotesEditorKind.available)
+    func loadClearsTheWindowsHistory(editor: NotesEditorKind) async throws {
+        _ = NSApplication.shared
+        let h = Harness(editor)
+        let a = await h.note("note A")
+        let b = await h.note("note B")
+        h.hosting.layoutSubtreeIfNeeded()
+        h.present(a); try await settle()
+        // Something left in the window's own history, as a field that kept its
+        // history there would leave it. SwiftUI's fields keep theirs apart on
+        // this Mac, so the test puts it there itself.
+        let window = try #require(h.panel.undoManager)
+        window.registerUndo(withTarget: h.panel) { _ in }
+        try await settle()
+        try #require(window.canUndo, "the window has something to undo")
+        h.present(b); try await settle()
+        #expect(!window.canUndo, "the history went with the note it belonged to")
+        h.model.onEdit = nil
         h.panel.close()
     }
 }
