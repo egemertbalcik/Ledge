@@ -40,6 +40,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var started = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard enforceSingleInstance() else { return }
+        continueLaunching()
+    }
+
+    /// The rest of a launch once no other copy stands in the way. Split out
+    /// so a copy that waited for an older one to quit can carry on from here.
+    private func continueLaunching() {
         // A second copy asks the running one to show Settings before it
         // exits, so double-clicking Ledge.app again is never a silent no-op.
         observeShowSettingsRequests()
@@ -139,15 +145,115 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let path = url.path
             return !(path.hasPrefix("/Volumes/") || path.contains("/AppTranslocation/"))
         }
-        guard rivals.isEmpty else {
-            Self.log.error("another instance is already running — handing off and exiting")
-            DistributedNotificationCenter.default().postNotificationName(
-                Self.showSettingsRequest, object: nil, userInfo: nil, deliverImmediately: true
-            )
-            NSApp.terminate(nil)
-            return false
+        let decision = RunningCopy.decide(
+            rivals: rivals.map { rival in
+                let url = rival.bundleURL
+                return RunningCopy.Rival(bundleURL: url) {
+                    url.flatMap { Bundle(url: $0) }?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+                }
+            },
+            own: Bundle.main.bundleURL,
+            ownBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        )
+        switch decision {
+        case .proceed:
+            return true
+        case .ask where askToReplace(rivals):
+            replace(rivals)
+        case .ask, .handOff:
+            handOff()
         }
-        return true
+        return false
+    }
+
+    /// The old answer to a second copy: show the running one's Settings and go.
+    private func handOff() {
+        Self.log.error("another instance is already running — handing off and exiting")
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.showSettingsRequest, object: nil, userInfo: nil, deliverImmediately: true
+        )
+        NSApp.terminate(nil)
+    }
+
+    /// Asked only when the running copy is an older build, or this bundle was
+    /// replaced underneath it. Not Now is the old hand-off, unchanged.
+    private func askToReplace(_ rivals: [NSRunningApplication]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Another copy of Ledge is already open"
+        let ours = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        // Only a copy at another path can say which version it is: at this
+        // path the plist on disk is already ours.
+        let theirs = rivals.count == 1
+            ? rivals[0].bundleURL
+                .flatMap { $0.resolvingSymlinksInPath().path == Bundle.main.bundleURL.resolvingSymlinksInPath().path ? nil : $0 }
+                .flatMap { Bundle(url: $0) }?
+                .object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            : nil
+        switch (theirs, ours) {
+        case let (theirs?, ours?):
+            alert.informativeText = "Ledge \(theirs) is running. Quit it and open Ledge \(ours)?"
+        case let (nil, ours?):
+            alert.informativeText = "Quit it and open Ledge \(ours)?"
+        default:
+            alert.informativeText = "Quit it and open this one?"
+        }
+        alert.addButton(withTitle: "Quit and Open")
+        alert.addButton(withTitle: "Not Now")
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Asks the older copies to quit, then carries on launching. They quit the
+    /// ordinary way, so whatever they owe the disk is written first.
+    ///
+    /// Never hands off to a copy that has agreed to quit: it would show
+    /// Settings on its way out, and then nothing would be running at all. A
+    /// refusal gets the hand-off at once, to the copy that refused and is
+    /// staying. One that is slow gets asked about, as many times as the user
+    /// wants to keep waiting.
+    private func replace(_ rivals: [NSRunningApplication]) {
+        Self.log.notice("an older instance is running — asking it to quit")
+        let accepted = rivals.map { $0.terminate() }
+        guard RunningCopy.allAgreedToQuit(accepted) else {
+            Self.log.error("the older instance would not quit")
+            handOff()
+            return
+        }
+        Task { @MainActor in
+            while !(await RunningCopy.waitForExit(
+                allTerminated: { rivals.allSatisfy(\.isTerminated) },
+                sleep: { try? await Task.sleep(for: $0) }
+            )) {
+                Self.log.error("the older instance is still quitting")
+                guard self.askToKeepWaiting(rivals) else {
+                    NSApp.terminate(nil)
+                    return
+                }
+            }
+            self.continueLaunching()
+        }
+    }
+
+    /// The older copy agreed to quit and has not yet. Stop leaves it to finish
+    /// on its own; Ledge can be opened again once it has.
+    ///
+    /// Takes itself down when the old copy goes while it is up, and that
+    /// counts as Keep Waiting: the wait that follows ends at once.
+    private func askToKeepWaiting(_ rivals: [NSRunningApplication]) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "The other copy of Ledge is still closing"
+        alert.informativeText = "It is finishing what it was doing. Keep waiting, or stop and open Ledge again in a moment."
+        alert.addButton(withTitle: "Keep Waiting")
+        alert.addButton(withTitle: "Stop Opening")
+        let watch = Timer(timeInterval: 0.25, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if rivals.allSatisfy(\.isTerminated) { NSApp.abortModal() }
+            }
+        }
+        RunLoop.main.add(watch, forMode: .modalPanel)
+        defer { watch.invalidate() }
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() != .alertSecondButtonReturn
     }
 
     /// Named after *this* bundle, so a development build and the installed app
@@ -267,6 +373,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// unreachable once its status item is pushed off a full menu bar (or under
     /// the notch), with no other way in.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        // Not before the launch has started anything. A copy waiting for an
+        // older one to quit has no coordinator yet, and building one here
+        // would start a second Ledge's worth of state beside the first.
+        guard started else { return false }
         coordinator.showSettings()
         return true
     }

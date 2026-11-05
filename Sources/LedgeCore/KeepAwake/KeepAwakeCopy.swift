@@ -356,6 +356,12 @@ public enum KeepAwakeCopy {
     /// `SMAppService` will not register a daemon out of an ad-hoc signed
     /// bundle, so this is a fact about the build rather than a failure to fix.
     /// It names the one thing that changes it.
+    /// Set Up pressed in a copy that must not register the helper. Ledge's
+    /// own refusal, so it is not worded as macOS refusing.
+    public static let lidNotInstallableHere =
+        "Ledge is running from a disk image, an external drive or a temporary copy, "
+            + "so the helper was not set up. Move Ledge to Applications, open it from there and try again."
+
     public static let lidUnsignedBuild =
         "This build isn't signed, so macOS won't install the helper. A release build can."
 

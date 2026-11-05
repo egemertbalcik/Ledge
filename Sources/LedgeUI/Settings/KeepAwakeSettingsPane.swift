@@ -162,6 +162,9 @@ struct KeepAwakeSettingsPane: View {
         if case .refused(let reason) = setup, !reason.isEmpty {
             SettingsStatus("macOS refused the setup: \(reason) Nothing was installed.", .problem)
         }
+        if setup == .notInstallableHere {
+            SettingsStatus(KeepAwakeCopy.lidNotInstallableHere, .attention)
+        }
     }
 
     private func remove() {

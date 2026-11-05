@@ -114,6 +114,19 @@ enum KeepAwakeHelperInstall {
         return true
     }
 
+    /// Whether this copy of Ledge is somewhere a daemon can be registered from.
+    ///
+    /// Not from anything under /Volumes or a translocated path. launchd keeps
+    /// pointing at the copy it was registered from, and all of those can
+    /// vanish: an image is ejected, an external drive unplugged, a translocated
+    /// copy cleaned up. That includes a second internal volume, which is
+    /// refused too, as it is for the Accessibility entry. A helper registered there
+    /// and holding the Mac awake at that moment could no longer be started to
+    /// let it sleep again, and nothing would be left to undo the hold.
+    static func isInstallableLocation(_ bundleURL: URL = Bundle.main.bundleURL) -> Bool {
+        AppLocation.isLasting(bundleURL)
+    }
+
     /// Whether the daemon is even in this bundle to be installed from.
     ///
     /// A build made before the packaging scripts learnt to put it there has
@@ -152,6 +165,8 @@ enum KeepAwakeHelperSetup {
         case needsApproval
         /// macOS refused, with its own words kept.
         case refused(String)
+        /// Not asked at all: this copy runs from somewhere that goes away.
+        case notInstallableHere
     }
 
     /// Asks macOS to install the daemon.
@@ -160,6 +175,10 @@ enum KeepAwakeHelperSetup {
     /// act: macOS puts the daemon in front of the user in System Settings and
     /// nothing runs as root until they allow it there.
     static func register() -> Outcome {
+        guard KeepAwakeHelperInstall.isInstallableLocation() else {
+            log.notice("keep awake: not registering the helper from \(Bundle.main.bundlePath, privacy: .public)")
+            return .notInstallableHere
+        }
         let service = SMAppService.daemon(plistName: KeepAwakeHelperInstall.plistName)
         do {
             try service.register()

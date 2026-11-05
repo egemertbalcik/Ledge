@@ -46,10 +46,41 @@ struct UpdaterLaunchTests {
         // Only through startNormally(), which runs after the single-instance
         // guard: a second copy that hands off and exits never starts one.
         let finished = try Self.body(of: "func applicationDidFinishLaunching", in: delegate)
-        let single = try #require(finished.range(of: "enforceSingleInstance()"))
-        let normal = try #require(finished.range(of: "startNormally()"))
-        #expect(single.upperBound <= normal.lowerBound)
+        let single = try #require(finished.range(of: "guard enforceSingleInstance() else { return }"))
+        let rest = try #require(finished.range(of: "continueLaunching()"))
+        #expect(single.upperBound <= rest.lowerBound)
         #expect(!finished.contains("_ = updater"))
+        #expect(!finished.contains("startNormally()"))
+
+        let continuing = try Self.body(of: "private func continueLaunching()", in: delegate)
+        let moved = try #require(continuing.range(of: "guard offerMoveToApplicationsIfNeeded() else { return }"))
+        let normal = try #require(continuing.range(of: "startNormally()"))
+        #expect(moved.upperBound <= normal.lowerBound)
+
+        // The other way into the rest of a launch: after an older copy has
+        // been asked to quit, and only once it has gone. A refusal hands off
+        // at once; a copy that agreed is never handed off to, because it would
+        // show Settings on its way out and leave nothing running.
+        let replacing = try Self.body(of: "private func replace(", in: delegate)
+        let refused = try #require(replacing.range(of: "guard RunningCopy.allAgreedToQuit(accepted) else {"))
+        let fallback = try #require(replacing.range(of: "handOff()"))
+        let waiting = try #require(replacing.range(of: "RunningCopy.waitForExit("))
+        let carryOn = try #require(replacing.range(of: "self.continueLaunching()"))
+        #expect(refused.upperBound <= fallback.lowerBound)
+        #expect(fallback.upperBound <= waiting.lowerBound)
+        #expect(waiting.upperBound <= carryOn.lowerBound)
+        #expect(!replacing[waiting.lowerBound...].contains("handOff()"))
+    }
+
+    /// A copy waiting for an older one to quit has started nothing, so a
+    /// reopen then must not build the coordinator.
+    @Test("Reopening before the launch has started leaves the coordinator unbuilt")
+    func reopenWaitsForStart() throws {
+        let delegate = try Self.source("Sources/LedgeApp/AppDelegate.swift")
+        let reopen = try Self.body(of: "func applicationShouldHandleReopen", in: delegate)
+        let gate = try #require(reopen.range(of: "guard started else { return false }"))
+        let show = try #require(reopen.range(of: "coordinator.showSettings()"))
+        #expect(gate.upperBound <= show.lowerBound)
     }
 
     /// Starting it is only half: the shipped bundle has to say where to look

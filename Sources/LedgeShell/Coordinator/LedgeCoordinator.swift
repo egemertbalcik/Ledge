@@ -4780,7 +4780,7 @@ public final class LedgeCoordinator {
         case .refused(let why):
             refreshSettingsModel()
             return .failed(why)
-        case .installed, .needsApproval:
+        case .installed, .needsApproval, .notInstallableHere:
             refreshSettingsModel()
             return .failed("macOS did not take the helper out.")
         }
@@ -4835,6 +4835,7 @@ public final class LedgeCoordinator {
                 case .needsApproval: outcome = .needsApproval
                 case .removed: outcome = .unavailable
                 case .refused(let why): outcome = .refused(why)
+                case .notInstallableHere: outcome = .notInstallableHere
                 }
                 // The pane's own reading is a separate fact from the outcome
                 // of this press, and it is the one the rest of the section is

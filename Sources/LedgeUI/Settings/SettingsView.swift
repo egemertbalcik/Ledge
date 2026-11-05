@@ -16,6 +16,10 @@ public enum KeepAwakeHelperSetupOutcome: Equatable, Sendable {
     /// macOS will not install a privileged helper out of this build at all.
     case unavailable
     case refused(String)
+    /// Ledge did not ask: it is running from a disk image, an external drive
+    /// or a temporary copy, and a helper registered there could vanish while
+    /// it holds the Mac awake.
+    case notInstallableHere
 }
 
 /// What taking the helper back out came to.
