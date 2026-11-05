@@ -93,6 +93,9 @@ struct UpdaterLaunchTests {
             try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
         #expect(plist["SUEnableAutomaticChecks"] as? Bool == true)
+        // The default for somebody who has never chosen: updates install by
+        // themselves. A choice made in Sparkle's own window still wins.
+        #expect(plist["SUAutomaticallyUpdate"] as? Bool == true)
         let feed = try #require(plist["SUFeedURL"] as? String)
         #expect(feed.hasPrefix("https://"))
         #expect(feed.hasSuffix("appcast.xml"))

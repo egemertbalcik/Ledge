@@ -124,10 +124,20 @@ if [[ "${LEDGE_DIST:-0}" != "1" ]]; then
     /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Ledge (debug)" "$PLIST" 2>/dev/null || \
         /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Ledge (debug)" "$PLIST"
     # And it must never update itself into the real app.
-    for key in SUFeedURL SUEnableAutomaticChecks; do
+    for key in SUFeedURL SUEnableAutomaticChecks SUAutomaticallyUpdate; do
         /usr/libexec/PlistBuddy -c "Delete :$key" "$PLIST" 2>/dev/null || true
     done
     echo "CFBundleIdentifier com.egemert.ledge.debug (development build)"
+fi
+
+# A beta never installs updates by itself. Until betas have their own channel,
+# the feed it reads is the stable one, and a later stable build with a higher
+# number would replace the beta on quit without asking. The beta still checks
+# and offers; the tester decides.
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PLIST")"
+if [[ "$VERSION" == *-* ]]; then
+    /usr/libexec/PlistBuddy -c "Delete :SUAutomaticallyUpdate" "$PLIST" 2>/dev/null || true
+    echo "SUAutomaticallyUpdate removed ($VERSION is a pre-release)"
 fi
 
 # A distribution bundle must run on both Intel and Apple Silicon. Checked here,

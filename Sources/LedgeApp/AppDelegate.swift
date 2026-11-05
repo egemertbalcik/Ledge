@@ -62,6 +62,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         Self.log.notice("\(SystemCapabilities.probe().summary, privacy: .public)")
 
+        // A new install starts at login, once. Before the reconcile below, so
+        // the switch in General shows what this launch did.
+        if LoginItemService.shouldTurnOnForNewInstall(
+            alreadyOffered: preferences.launchAtLoginOffered,
+            hasStoredLaunchAtLogin: preferences.hasStoredValue(Prefs.launchAtLogin.name),
+            hasCompletedOnboarding: preferences.hasCompletedOnboarding,
+            bundleURL: Bundle.main.bundleURL,
+            isReleaseBuild: Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
+        ) {
+            preferences.launchAtLoginOffered = true
+            LoginItemService.setEnabled(true)
+        }
+
         // The login item can be revoked in System Settings without telling us,
         // so the stored preference is reconciled with reality at every launch.
         preferences.launchAtLogin = LoginItemService.isEnabled

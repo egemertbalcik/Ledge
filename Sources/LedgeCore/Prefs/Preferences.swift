@@ -244,6 +244,12 @@ public enum Prefs {
     /// from a launch that failed; the first one always opens one.
     public static let hasBeenIntroduced = PrefKey<Bool>("general.introduced", default: false)
 
+    /// True once launch at login has been turned on for a new install.
+    ///
+    /// Spent once and never reset, so switching it off sticks: the default is
+    /// offered to somebody who has never chosen, and only once.
+    public static let launchAtLoginOffered = PrefKey<Bool>("general.launchAtLoginOffered", default: false)
+
     /// The tour step the user last reached, as `TourStep.rawValue`.
     ///
     /// Written as you go on a first visit, and read only while
@@ -462,6 +468,7 @@ public final class Preferences {
 
     public var hasCompletedOnboarding: Bool { didSet { persist(hasCompletedOnboarding, Prefs.hasCompletedOnboarding) } }
     public var hasBeenIntroduced: Bool { didSet { persist(hasBeenIntroduced, Prefs.hasBeenIntroduced) } }
+    public var launchAtLoginOffered: Bool { didSet { persist(launchAtLoginOffered, Prefs.launchAtLoginOffered) } }
     public var tourPage: Double { didSet { persist(tourPage, Prefs.tourPage) } }
     public var accessibilityWasAsked: Bool { didSet { persist(accessibilityWasAsked, Prefs.accessibilityWasAsked) } }
     public var automationWasAsked: Bool { didSet { persist(automationWasAsked, Prefs.automationWasAsked) } }
@@ -527,6 +534,7 @@ public final class Preferences {
         advanced = store.value(for: Prefs.advanced)
         hasCompletedOnboarding = store.value(for: Prefs.hasCompletedOnboarding)
         hasBeenIntroduced = store.value(for: Prefs.hasBeenIntroduced)
+        launchAtLoginOffered = store.value(for: Prefs.launchAtLoginOffered)
         tourPage = store.value(for: Prefs.tourPage)
         accessibilityWasAsked = store.value(for: Prefs.accessibilityWasAsked)
         automationWasAsked = store.value(for: Prefs.automationWasAsked)

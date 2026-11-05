@@ -42,6 +42,26 @@ public enum LoginItemService {
         }
     }
 
+    /// Whether this launch should turn launch at login on by itself.
+    ///
+    /// Only for a new install, once. An existing user's "off" cannot be told
+    /// apart from a choice, so it is left alone; and once offered, switching
+    /// it off sticks. Only from a release build in a place that lasts: a
+    /// login item pointing into a disk image or a translocated copy opens
+    /// nothing, and a development build must never add itself.
+    ///
+    /// A new install is told by the stored login preference, not by the tour.
+    /// Every launch since 1.0.0 has written it, so its absence means Ledge has
+    /// never really started here. The tour alone is not enough: one still open
+    /// when an earlier version quit leaves onboarding unfinished for somebody
+    /// who has used Ledge for months.
+    public static func shouldTurnOnForNewInstall(alreadyOffered: Bool, hasStoredLaunchAtLogin: Bool,
+                                                 hasCompletedOnboarding: Bool,
+                                                 bundleURL: URL, isReleaseBuild: Bool) -> Bool {
+        !alreadyOffered && !hasStoredLaunchAtLogin && !hasCompletedOnboarding
+            && isReleaseBuild && AppLocation.isLasting(bundleURL)
+    }
+
     /// Why the toggle may be refusing to stick, in words a settings pane can show.
     public static var statusDescription: String {
         switch SMAppService.mainApp.status {

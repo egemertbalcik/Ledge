@@ -62,11 +62,15 @@ struct PreferencesTests {
         // `automationWasAsked` is another: the Automation answer it led to
         // lives in TCC and survives a reset, so forgetting the press would
         // only switch Music and Spotify off until it was made again.
+        //
+        // `launchAtLoginOffered` too: launch at login is offered to a new
+        // install once. Forgetting that on reset would switch it back on for
+        // somebody who had switched it off.
         let mirror = Mirror(reflecting: Preferences(store: MemoryPreferenceStore()))
         let excluded: Set<String> = [
             "_store", "_isLoading", "_hasCompletedOnboarding", "_hasBeenIntroduced",
             "_tourPage", "_focusFolderBookmark", "_accessibilityWasAsked",
-            "_automationWasAsked",
+            "_automationWasAsked", "_launchAtLoginOffered",
         ]
         let stored = mirror.children.compactMap { child -> String? in
             guard let label = child.label,
