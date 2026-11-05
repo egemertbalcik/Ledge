@@ -79,8 +79,16 @@ static BOOL LoadMediaRemote(NSString **failure) {
 
     // Everything below is optional: the adapter degrades rather than failing if
     // a future macOS drops one.
-    gGetInfoWithoutArtwork = (MRGetNowPlayingInfoWithOptionalArtwork)dlsym(
-        gMediaRemote, "MRMediaRemoteGetNowPlayingInfoWithOptionalArtwork");
+    //
+    // The artwork-optional read is taken only on macOS 26 and later. Its
+    // signature was read from the 26.4 disassembly and never checked on 15,
+    // where a different one would crash the host. Left unset, every read goes
+    // through `MRMediaRemoteGetNowPlayingInfo`, the path already used when the
+    // symbol is missing.
+    if ([NSProcessInfo.processInfo isOperatingSystemAtLeastVersion:(NSOperatingSystemVersion){26, 0, 0}]) {
+        gGetInfoWithoutArtwork = (MRGetNowPlayingInfoWithOptionalArtwork)dlsym(
+            gMediaRemote, "MRMediaRemoteGetNowPlayingInfoWithOptionalArtwork");
+    }
     gGetIsPlaying = (MRGetIsPlaying)dlsym(gMediaRemote, "MRMediaRemoteGetNowPlayingApplicationIsPlaying");
     gGetClient = (MRGetClient)dlsym(gMediaRemote, "MRMediaRemoteGetNowPlayingClient");
     gClientBundleID = (MRClientString)dlsym(gMediaRemote, "MRNowPlayingClientGetBundleIdentifier");

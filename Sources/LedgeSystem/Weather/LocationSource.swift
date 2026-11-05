@@ -4,6 +4,42 @@ import MapKit
 import os
 
 /// Where you are, coarsely, plus the name of the place.
+/// One reverse-geocoding request on macOS 15, and its cancel, ordered.
+///
+/// Starting the request and cancelling it happen under the same lock: a
+/// cancel that comes first means the request never starts, and one that comes
+/// after reaches the geocoder that is running it. `CLGeocoder` is not
+/// `Sendable`; it is only touched here, and under the lock.
+final class GeocodeCall: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var geocoder: CLGeocoder?
+
+    /// Starts the request unless the call was already cancelled. Returns
+    /// whether it started; when it did, `done` runs exactly once, with the
+    /// first placemark's city, or nil if it was cancelled or failed.
+    func start(
+        _ geocoder: CLGeocoder,
+        _ location: CLLocation,
+        done: @escaping @Sendable (String?) -> Void
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        self.geocoder = geocoder
+        geocoder.reverseGeocodeLocation(location) { placemarks, _ in done(placemarks?.first?.locality) }
+        return true
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let running = geocoder
+        lock.unlock()
+        running?.cancelGeocode()
+    }
+}
+
 public struct PlaceFix: Equatable, Sendable {
     public var latitude: Double
     public var longitude: Double
@@ -107,7 +143,8 @@ public final class CoreLocationSource: NSObject, LocationProviding, CLLocationMa
     }
 
     /// `MKReverseGeocodingRequest` rather than `CLGeocoder`, which macOS 26
-    /// deprecates. A failure here costs the card its title, nothing more.
+    /// deprecates. Before 26 that request does not exist, so `CLGeocoder` it
+    /// is there. A failure here costs the card its title, nothing more.
     ///
     /// `nonisolated` and returning a plain `String` on purpose: `MKMapItem` is
     /// not `Sendable`, so the result has to be reduced to something that is
@@ -119,6 +156,9 @@ public final class CoreLocationSource: NSObject, LocationProviding, CLLocationMa
         // the forecast simply goes untitled.
         await withTaskGroup(of: String?.self) { group in
             group.addTask {
+                guard #available(macOS 26.0, *) else {
+                    return await Self.legacyPlaceName(for: location)
+                }
                 guard let request = MKReverseGeocodingRequest(location: location),
                       let items = try? await request.mapItems,
                       let item = items.first
@@ -133,6 +173,38 @@ public final class CoreLocationSource: NSObject, LocationProviding, CLLocationMa
             group.cancelAll()
             return first ?? ""
         }
+    }
+
+    /// The same city, asked of `CLGeocoder` on macOS 15. The placemark's
+    /// `locality` is the city, the field `cityName` reads on 26.
+    ///
+    /// The geocoder is cancelled with the task, so when the two-second bound
+    /// wins the lookup is torn down instead of left running — the task group
+    /// waits for this child, so a lookup left running would hold the forecast
+    /// back after all.
+    ///
+    /// The cancel can arrive before the request has started: the timer can
+    /// win before this child is first scheduled. A cancel on an idle
+    /// `CLGeocoder` does nothing, so the request would then start anyway and
+    /// run uncancelled. `GeocodeCall` starts the request and takes the cancel
+    /// under one lock, so a cancel that comes first stops the request from
+    /// starting at all.
+    nonisolated static func legacyPlaceName(
+        for location: CLLocation,
+        geocoder makeGeocoder: @escaping @Sendable () -> CLGeocoder = { CLGeocoder() }
+    ) async -> String {
+        let call = GeocodeCall()
+        let city: String? = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let started = call.start(makeGeocoder(), location) { city in
+                    continuation.resume(returning: city)
+                }
+                if !started { continuation.resume(returning: nil) }
+            }
+        } onCancel: {
+            call.cancel()
+        }
+        return placeTitle(city: city)
     }
 
     /// The city a forecast is about, and nothing finer.
