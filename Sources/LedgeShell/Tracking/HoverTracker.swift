@@ -124,7 +124,7 @@ public final class HoverTracker<Key: Equatable> {
     /// While a HUD slider drag is in flight the coordinator swallows exits, but
     /// this tracker has already committed `insideKey = nil` — and from nil it
     /// only ever notices *entries into closed regions*, so a cursor resting on
-    /// the widened open bar produces no further events and no exit ever fires.
+    /// the open readout produces no further events and no exit ever fires.
     /// The coordinator re-derives the true key when the drag ends and hands it
     /// back here.
     public func resync(to key: Key?) {

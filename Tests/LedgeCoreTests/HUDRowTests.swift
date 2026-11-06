@@ -27,13 +27,11 @@ struct HUDRowTests {
     private func layout(
         _ phase: NotchPhase,
         _ geometry: NotchGeometry,
-        radius: CGFloat = 30,
-        interactive: Bool = false
+        radius: CGFloat = 30
     ) -> NotchLayout {
         .layout(
             for: phase, geometry: geometry, expandedSize: CGSize(width: 420, height: 160),
-            bottomRadius: radius, closedBottomRadius: 10, gutterRadius: 10,
-            isHudInteractive: interactive
+            bottomRadius: radius, closedBottomRadius: 10, gutterRadius: 10
         )
     }
 
@@ -84,16 +82,6 @@ struct HUDRowTests {
         #expect(layout(.hud, geometry).bodySize.width == layout(.companion, geometry).bodySize.width)
     }
 
-    /// The panel the pointer opens grows out of this shape, and must still be
-    /// the bigger of the two.
-    @Test("The hover panel is untouched and still taller than the readout")
-    func hoverPanelTaller() {
-        let geometry = geometry()
-        let panel = layout(.hud, geometry, interactive: true).bodySize.height
-        #expect(panel == geometry.notchSize.height + 0.5 + NotchLayout.hudAdjustHeight)
-        #expect(panel > layout(.hud, geometry).bodySize.height)
-    }
-
     // MARK: - The row
 
     @Test("The approved measurements")
@@ -133,6 +121,60 @@ struct HUDRowTests {
             #expect(row.barLeading > row.iconLeading)
             #expect(row.barLeading + row.barWidth < body)
         }
+    }
+
+    // MARK: - Where the pointer lands
+
+    @Test("A point in the row is a level along the bar, at every scale and offset", arguments: [
+        (CGFloat(1), CGFloat(0)),
+        (CGFloat(1.18), CGFloat(0)),
+        (CGFloat(1), CGFloat(10)),
+        (CGFloat(1), CGFloat(-8)),
+    ])
+    func levelAlongTheBar(scale: CGFloat, offset: CGFloat) throws {
+        let metrics = HUDRowMetrics(geometry: geometry(scale: scale), bodyWidth: body, contentOffset: offset)
+        #expect(metrics.level(atRowX: metrics.barLeading) == 0)
+        #expect(metrics.level(atRowX: metrics.barLeading + metrics.barWidth) == 1)
+        let middle = try #require(metrics.level(atRowX: metrics.barLeading + metrics.barWidth / 2))
+        #expect(abs(middle - 0.5) < 0.0001)
+    }
+
+    @Test("Past either end of the bar is that end")
+    func levelPastTheEnds() {
+        let metrics = HUDRowMetrics(geometry: geometry(), bodyWidth: body)
+        #expect(metrics.level(atRowX: -500) == 0)
+        #expect(metrics.level(atRowX: 0) == 0)
+        #expect(metrics.level(atRowX: body) == 1)
+        #expect(metrics.level(atRowX: 5000) == 1)
+    }
+
+    @Test("Nothing to measure against, or nonsense to measure, is no level")
+    func levelFromNothing() {
+        let metrics = HUDRowMetrics(geometry: geometry(), bodyWidth: body)
+        #expect(metrics.level(atRowX: .nan) == nil)
+        #expect(metrics.level(atRowX: .infinity) == nil)
+        #expect(HUDRowMetrics(geometry: geometry(), bodyWidth: 0).level(atRowX: 40) == nil)
+    }
+
+    @Test("A row acts on the display it is showing, not the one under the pointer")
+    func rowsDisplay() {
+        #expect(HUDRowDisplay.target(shown: 2, underCursor: 1, available: [1, 2]) == 2)
+    }
+
+    @Test("A readout that names no display, or one that has gone, falls back to the pointer's", arguments: [
+        (UInt32?.none, [UInt32(1), 2]),
+        (UInt32?.some(9), [UInt32(1), 2]),
+    ])
+    func rowsDisplayFallback(shown: UInt32?, available: [UInt32]) {
+        #expect(HUDRowDisplay.target(shown: shown, underCursor: 1, available: available) == 1)
+        #expect(HUDRowDisplay.target(shown: shown, underCursor: nil, available: available) == nil)
+    }
+
+    @Test("The pointer can set sound and brightness, and not the keyboard's backlight")
+    func whatThePointerCanSet() {
+        #expect(HUDReadout.Kind.volume.canBeSetFromTheRow)
+        #expect(HUDReadout.Kind.brightness.canBeSetFromTheRow)
+        #expect(!HUDReadout.Kind.keyboardBacklight.canBeSetFromTheRow)
     }
 
     @Test("The offset moves the glyph and the bar together and shortens the bar")

@@ -21,6 +21,13 @@ public struct HUDReadout: Equatable, Sendable {
             case .keyboardBacklight: "Keyboard"
             }
         }
+
+        /// Whether the pointer can set this level. Nothing can write the
+        /// keyboard's backlight yet, and a bar that takes a drag and doesn't
+        /// move is worse than one that doesn't take it.
+        public var canBeSetFromTheRow: Bool {
+            self != .keyboardBacklight
+        }
     }
 
     public let kind: Kind
@@ -32,8 +39,7 @@ public struct HUDReadout: Equatable, Sendable {
     public let isMuted: Bool
 
     /// Where the level applies — the output device's name for volume ("AirPods
-    /// Pro", "MacBook Air Speakers"). The panel shows it instead of a generic
-    /// "Sound" when known.
+    /// Pro", "MacBook Air Speakers").
     public let deviceName: String?
 
     public init(kind: Kind, level: Double, isMuted: Bool = false, deviceName: String? = nil) {

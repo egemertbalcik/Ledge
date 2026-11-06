@@ -36,7 +36,7 @@ public struct AudioOutputOption: Identifiable, Equatable, Sendable {
     }
 }
 
-/// One display in the expanded brightness panel.
+/// One display on the Levels card.
 ///
 /// Deliberately a separate type from `AudioOutputOption` despite the similar
 /// shape: audio has a single *route* and tapping another switches to it, whereas

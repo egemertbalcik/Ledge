@@ -32,20 +32,19 @@ struct ReadoutOverCardTests {
         )
     }
 
-    /// The weather card open, the hovered readout, and the closed notch.
+    /// The weather card open, the readout, and the closed notch.
     private static func regions() -> (card: CGRect, readout: CGRect, resting: CGRect) {
         let size = NotchLayout.cardSize(
             kind: .weather, phase: .hover, base: CGSize(width: 420, height: 160),
             geometry: geometry, routePickerRows: 0, hasSelection: true, earWidth: 53
         )
-        func layout(_ phase: NotchPhase, interactive: Bool = false) -> CGRect {
+        func layout(_ phase: NotchPhase) -> CGRect {
             onScreen(NotchLayout.layout(
                 for: phase, geometry: geometry, expandedSize: size,
-                bottomRadius: 22, closedBottomRadius: 10, gutterRadius: 6,
-                isHudInteractive: interactive, hudExtraHeight: 0
+                bottomRadius: 22, closedBottomRadius: 10, gutterRadius: 6
             ))
         }
-        return (layout(.hover), layout(.hud, interactive: true), layout(.idle))
+        return (layout(.hover), layout(.hud), layout(.idle))
     }
 
     private func run(_ state: inout NotchState, _ events: NotchEvent...) {
@@ -75,7 +74,7 @@ struct ReadoutOverCardTests {
         #expect(stillInside(pointer, region: region), "the pointer has not left anything")
 
         // The readout's timer, under a pointer that is still inside: held,
-        // then handed back because the pointer is on the card, not the slider.
+        // then handed back because the pointer is on the card, not the row.
         run(&state, .timerFired(.hud))
         try #require(state.phase == .hud && state.isHovering)
         #expect(ReadoutOverCard.handsCardBack(pointer: pointer, readout: readout, card: card))
@@ -86,7 +85,7 @@ struct ReadoutOverCardTests {
     @Test("Parked inside the readout, over the card: a real hover, so the card comes back")
     func pointerParkedOnTheReadout() throws {
         let (card, readout, resting) = Self.regions()
-        let pointer = CGPoint(x: Self.geometry.notchCenterX, y: Self.geometry.screenSize.height - 70)
+        let pointer = CGPoint(x: Self.geometry.notchCenterX, y: Self.geometry.screenSize.height - 50)
         try #require(card.contains(pointer) && readout.contains(pointer))
         try #require(!resting.insetBy(dx: 0, dy: -DisplayHitTest.slack).contains(pointer),
                      "below the closed notch, where the old check called it an artifact")
@@ -95,7 +94,7 @@ struct ReadoutOverCardTests {
         run(&state, .hoverChanged(true), .hudRequested(1.4), .timerFired(.hud))
         try #require(state.phase == .hud && state.isHovering, "held under the pointer")
         #expect(!ReadoutOverCard.handsCardBack(pointer: pointer, readout: readout, card: card),
-                "on the readout, the hold stands so the slider can be used")
+                "on the readout, the hold stands so the row can be used")
 
         // The shell's parked-pointer release.
         let genuine = ReadoutOverCard.restsOnCard(pointer: pointer, card: card)

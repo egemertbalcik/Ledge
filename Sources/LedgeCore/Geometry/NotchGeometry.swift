@@ -712,32 +712,7 @@ public struct NotchLayout: Sendable, Equatable {
             + CGFloat(max(0, capped - 1)) * routeRowSpacing
     }
 
-    /// How far the hovered HUD hangs below the cutout for its Control-Centre
-    /// style panel: a title line plus the full slider row.
-    public static let hudAdjustHeight: CGFloat = 64
-
-    /// Extra width each side while the panel is open. Kept minimal: the hovered
-    /// HUD grows *downward* — its footprint should stay essentially the compact
-    /// width, not swell sideways.
-    public static let hudAdjustExtraWidth: CGFloat = 8
-
-    /// Height of one *live-slider* section in the hovered panel: the name
-    /// line (~15pt) plus its 5pt gap, the slider row (~18pt), and the 10pt
-    /// spacing to the next section. Every brightness row is one of these.
-    /// Undercounting it (it was 36) made the bottom-anchored stack overflow
-    /// upward and clip the *top* rows behind the hardware cutout.
-    public static let hudDeviceRowHeight: CGFloat = 48
-
-    /// Height of one *faded* section — a name line and a 5pt read-only bar.
-    /// The sound panel's non-current routes are these; budgeting them at the
-    /// live-row height opened a dead black band above the list.
-    public static let hudFadedRowHeight: CGFloat = 36
-
     /// The single place a phase becomes numbers.
-    ///
-    /// `isHudInteractive` is true while the pointer is on a level readout: the
-    /// HUD then grows *downward*, making room for the big draggable bar under
-    /// the hardware cutout.
     public static func layout(
         for phase: NotchPhase,
         geometry: NotchGeometry,
@@ -745,8 +720,6 @@ public struct NotchLayout: Sendable, Equatable {
         bottomRadius: CGFloat,
         closedBottomRadius: CGFloat,
         gutterRadius: CGFloat,
-        isHudInteractive: Bool = false,
-        hudExtraHeight: CGFloat = 0,
         isAnnouncing: Bool = false
     ) -> NotchLayout {
         // The radii are preference-driven and a corrupted defaults database
@@ -774,21 +747,6 @@ public struct NotchLayout: Sendable, Equatable {
                 bottomRadius: bottomRadius,
                 gutterRadius: gutterRadius,
                 announcing: isAnnouncing
-            )
-        case .hud where isHudInteractive:
-            // Hovered: grow downward by the extra sections' measured height —
-            // a *point* budget, because a live brightness row and a faded
-            // audio route cost different amounts.
-            return expanded(
-                geometry,
-                size: CGSize(
-                    width: geometry.notchSize.width
-                        + (Self.earWidth(for: geometry) + hudAdjustExtraWidth) * 2,
-                    height: geometry.notchSize.height + compactExtraHeight + hudAdjustHeight
-                        + max(0, hudExtraHeight.isFinite ? hudExtraHeight : 0)
-                ),
-                bottomRadius: bottomRadius,
-                gutterRadius: gutterRadius
             )
         case .hud:
             return .hudReadout(geometry, bottomRadius: bottomRadius, gutterRadius: gutterRadius)

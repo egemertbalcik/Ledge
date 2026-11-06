@@ -266,7 +266,7 @@ public final class DisplayBrightnessController {
         for pair in encoded.split(separator: ",") {
             let parts = pair.split(separator: "=")
             // `Double("nan")` parses, and min/max pass NaN straight through —
-            // a hand-edited default then reached `Int()` in the HUD panel and
+            // a hand-edited default then reached `Int()` in the HUD and
             // the Levels card and took the app down on every launch.
             guard parts.count == 2, let value = Double(parts[1]), value.isFinite else { continue }
             rememberedLevels[String(parts[0])] = min(max(value, Self.gammaFloor), 1)

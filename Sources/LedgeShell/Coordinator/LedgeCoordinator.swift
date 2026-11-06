@@ -1244,12 +1244,8 @@ public final class LedgeCoordinator {
             selfViewActions: makeSelfViewActions(),
             onDropFiles: { [weak self] urls in self?.acceptDroppedFiles(urls) ?? false },
             onHUDAdjust: { [weak self] kind, level in self?.hud.adjust(kind, to: level) },
-            onHUDAdjustDisplay: { [weak self] id, level in
-                self?.hud.adjustBrightness(of: id, to: level)
-                // The row that moved is not the only thing on screen: redraw the
-                // list so its bar tracks the drag.
-                self?.presentation.hudDisplays = self?.hud.brightnessDisplays() ?? []
-            },
+            onHUDToggleMute: { [weak self] in self?.toggleMuteFromRow() },
+            onHUDRowDragging: { [weak self] dragging in self?.setRowDragging(dragging) },
             onHUDDragging: { [weak self] dragging in self?.setHUDDragging(dragging) }
         )
         return controller
@@ -2502,15 +2498,6 @@ public final class LedgeCoordinator {
                     self.send(.hudRequested(self.preferences.hudDuration))
                 }
             }
-            // The sound panel's active row reads its level straight off the
-            // readout, so the keys move it for free. The brightness panel draws
-            // a row per display out of `hudDisplays`, which was only rebuilt
-            // when the panel opened — so pressing the keys with it open changed
-            // the screen but left the bar sitting still. Rebuild it while it is
-            // actually on show.
-            if readout.kind == .brightness, self.wasHudHovered {
-                self.presentation.hudDisplays = self.hud.brightnessDisplays()
-            }
         }
         hud.start()
         observeHUDPreferences()
@@ -2555,18 +2542,8 @@ public final class LedgeCoordinator {
                 }
             },
             outputs: { [weak self] in self?.currentOutputs() ?? [] },
-            selectOutput: { [weak self] id in
+            selectOutput: { id in
                 VolumeController.setDefaultOutputDevice(id)
-                guard let self else { return }
-                // Refresh the open panel: new checkmark order, new title, and a
-                // readout for the new device's own level. The route change takes
-                // a beat to land, hence the short delay.
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .milliseconds(200))
-                    guard let self, self.wasHudHovered else { return }
-                    self.presentation.hudOutputs = self.currentOutputs()
-                    self.hud.refreshVolumeReadout()
-                }
             },
             setOutputVolume: { id, level in
                 // Any device, not just the current route — CoreAudio can set a
@@ -2741,7 +2718,6 @@ public final class LedgeCoordinator {
         guard let display = hud.brightnessDisplays().first(where: { "display-\($0.id)" == id })
         else { return nil }
         hud.adjustBrightness(of: display.id, to: level)
-        presentation.hudDisplays = hud.brightnessDisplays()
         // Read back rather than assumed: the controller clamps an external
         // panel at its floor, and the number on the card is the panel's.
         guard let after = hud.brightnessDisplays().first(where: { $0.id == display.id })
@@ -2772,16 +2748,6 @@ public final class LedgeCoordinator {
     /// the level changes they cause. Each drag tick re-arms it; release
     /// shortens it to a two-second echo tail.
     private var levelsCardQuietUntil: TimeInterval = 0
-
-    /// Extra height the hovered panel's device rows add, for the hit region.
-    /// This must agree with `NotchOverlayView.hudExtraHeight` or the shape
-    /// and the clickable area drift apart: live brightness rows cost 48pt,
-    /// faded audio routes 36pt.
-    private var hudExtraHeight: CGFloat {
-        presentation.hudExtraHeight(hovered: state.phase == .hud && state.isHovering)
-    }
-
-    private var wasHudHovered = false
 
     /// The selectable outputs right now, current one flagged, each with its own
     /// level for the faded bars.
@@ -3384,6 +3350,7 @@ public final class LedgeCoordinator {
         // mid-drag. Left latched, the flag suppressed every hover exit forever.
         if case .forceCollapse = event {
             isAdjustingHUD = false
+            hud.setRowDragging(false)
             // A farewell cut short must give `hasNowPlaying` back before the
             // rebuild keeps it: left borrowed, the collapse settled into a
             // companion drawing the departed card until the next real fact.
@@ -3450,9 +3417,8 @@ public final class LedgeCoordinator {
             break
         }
 
-        // The HUD reads this to widen into a draggable slider, and a hover can
-        // change without the phase changing (holding a HUD open), so it is
-        // mirrored before the phase guard below.
+        // A hover can change without the phase changing (holding a HUD open),
+        // so it is mirrored before the phase guard below.
         presentation.isHovering = state.isHovering
 
         // The self-view's minute only runs while the pointer is away, and
@@ -3466,19 +3432,6 @@ public final class LedgeCoordinator {
         // event rather than only on a phase change, since a guest can leave
         // without the phase moving at all.
         flushRestingRelease()
-
-        // Populate the sound panel's output list exactly once per opening, so
-        // the device enumeration never runs on a per-tick hover path.
-        let hudHovered = state.phase == .hud && state.isHovering
-        if hudHovered != wasHudHovered {
-            wasHudHovered = hudHovered
-            presentation.hudOutputs = hudHovered ? currentOutputs() : []
-            // Same one-shot rule for displays: enumerating screens per hover
-            // tick would be wasteful, and the set cannot change mid-hover
-            // without a reconfiguration that redraws anyway.
-            presentation.hudDisplays = hudHovered ? hud.brightnessDisplays() : []
-        }
-
     }
 
     /// Whether a phase is one where the notch is open under the pointer.
@@ -3498,14 +3451,14 @@ public final class LedgeCoordinator {
             tellTheTour(.closed)
         }
         // A slider drag lives on an open surface — the Levels card, the route
-        // menu, the widened HUD. When the phase leaves all of them (a pin
+        // menu, a hovered HUD. When the phase leaves all of them (a pin
         // release dismissing the card mid-drag, a peek), the gesture's view is
         // torn down and its onEnded never fires; left latched, the flag
         // swallowed every hover exit from then on. Settle it on the next turn,
         // outside this transaction.
         let openSurface = state.phase == .hover || state.phase == .expanded || state.phase == .hud
         if isAdjustingHUD, !openSurface {
-            Task { @MainActor [weak self] in self?.setHUDDragging(false) }
+            Task { @MainActor [weak self] in self?.setRowDragging(false) }
         }
         // The card is gone — collapsed by a display change, a shut lid, a
         // swipe, a click. Whatever closed it, the camera goes with it: a
@@ -3746,11 +3699,10 @@ public final class LedgeCoordinator {
                         // and asks for its card; the cutout and leading ear ask
                         // for the resident's.
                         if let readout = self.satelliteReadout(on: key) {
-                            // A level readout in the ear opens the panel that
-                            // readout belongs to — the same rows the full-width
-                            // HUD opens when the pointer reaches it. It used to
-                            // open the Levels card instead: press the brightness
-                            // key, get a card that also does sound.
+                            // A level readout in the ear opens that readout at
+                            // full width, where it can be used. It used to open
+                            // the Levels card instead: press the brightness key,
+                            // get a card that also does sound.
                             self.presentation.hud = readout
                             self.send(.hudRequested(self.preferences.hudDuration, fromCompanion: true))
                         } else if let target = self.trailingDuoTarget(on: key) {
@@ -3904,7 +3856,7 @@ public final class LedgeCoordinator {
     /// the HUD all show 53pt ears beyond the cutout on every display, and an
     /// entry region narrower than the pixels meant a cursor arriving straight
     /// on the album art or the level bar never registered — the panel stayed
-    /// click-through and the HUD never widened until the pointer crossed the
+    /// click-through and the HUD never answered until the pointer crossed the
     /// idle-sized centre.
     /// The phase the shape is resting at, for the purpose of where it answers
     /// the pointer: an open card demotes to whatever it would show if the
@@ -3920,7 +3872,7 @@ public final class LedgeCoordinator {
     private func closedRegions() -> [(key: CGDirectDisplayID, rect: CGRect)] {
         let resting = restingPhase
         // The display whose overlay is drawn *open* — a hovered/pinned card,
-        // or the widened HUD panel — offers its whole drawn shape as the entry
+        // or a hovered readout — offers its whole drawn shape as the entry
         // region, not the demoted strip. After an exit the tracker holds no
         // current key, so the sticky branch cannot answer; without this a
         // pointer overshooting a card's bottom edge and coming straight back
@@ -3974,7 +3926,7 @@ public final class LedgeCoordinator {
     }
 
     /// The display drawing an open overlay right now, if any: the hover owner
-    /// while a card is up (hovered or pinned) or the HUD panel is widened.
+    /// while a card is up (hovered or pinned) or a readout is under the pointer.
     private var drawnOpenDisplay: CGDirectDisplayID? {
         let open = state.phase == .hover || state.phase == .expanded
             || (state.phase == .hud && state.isHovering)
@@ -3988,11 +3940,7 @@ public final class LedgeCoordinator {
     /// too: the pointer resting on the card body has not left just because
     /// the readout drawn over it is smaller. See `ReadoutOverCard`.
     private func openRegion(_ key: CGDirectDisplayID) -> CGRect? {
-        let drawn = displayPanels.controller(for: key)?.shapeRect(
-            for: state.phase,
-            hudHovered: state.phase == .hud && state.isHovering,
-            hudExtraHeight: hudExtraHeight
-        )
+        let drawn = displayPanels.controller(for: key)?.shapeRect(for: state.phase)
         return ReadoutOverCard.trackingRegion(readout: drawn, card: coveredCardRegion(key))
     }
 
@@ -4009,9 +3957,7 @@ public final class LedgeCoordinator {
     /// one place a held readout has no reason to stay.
     private func readoutHandsCardBack() -> Bool {
         guard let key = presentation.hoveredDisplayID.map({ CGDirectDisplayID($0) }) else { return false }
-        let readout = displayPanels.controller(for: key)?.shapeRect(
-            for: .hud, hudHovered: true, hudExtraHeight: hudExtraHeight
-        )
+        let readout = displayPanels.controller(for: key)?.shapeRect(for: .hud)
         return ReadoutOverCard.handsCardBack(
             pointer: NSEvent.mouseLocation, readout: readout, card: coveredCardRegion(key)
         )
@@ -4124,6 +4070,28 @@ public final class LedgeCoordinator {
         release: { [weak self] in self?.send(.hudReleased) }
     )
 
+    /// A drag on the readout's own bar.
+    private func setRowDragging(_ dragging: Bool) {
+        hud.setRowDragging(dragging)
+        setHUDDragging(dragging)
+        if dragging { holdReadoutUnderThePointer() }
+    }
+
+    /// The speaker in the readout.
+    private func toggleMuteFromRow() {
+        hud.toggleMute()
+        holdReadoutUnderThePointer()
+    }
+
+    /// The pointer reaches the row before the tracker has settled on a hover,
+    /// so a quick press can land first. The readout's timer is still running
+    /// then and would take the row away from under the button.
+    private func holdReadoutUnderThePointer() {
+        if state.phase == .hud, !state.isHovering {
+            send(.hoverChanged(true))
+        }
+    }
+
     private func setHUDDragging(_ dragging: Bool) {
         guard dragging != isAdjustingHUD else { return }
         isAdjustingHUD = dragging
@@ -4131,7 +4099,7 @@ public final class LedgeCoordinator {
         // Drag over: settle to wherever the cursor actually is now — and tell
         // the tracker, whose own idea of "inside" went stale while its exits
         // were being swallowed. Without the resync it never fires the exit
-        // for a cursor resting on the widened bar, and the readout stays
+        // for a cursor resting on the bar, and the readout stays
         // open and click-eating until the cursor recrosses the idle notch.
         let key = currentDisplayUnderCursor()
         hoverTracker?.resync(to: key)

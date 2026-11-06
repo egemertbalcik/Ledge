@@ -136,7 +136,8 @@ public final class LedgePanelController {
     private let selfViewActions: SelfViewActions
     private let onDropFiles: ([URL]) -> Bool
     private let onHUDAdjust: (HUDReadout.Kind, Double) -> Void
-    private let onHUDAdjustDisplay: (UInt32, Double) -> Void
+    private let onHUDToggleMute: () -> Void
+    private let onHUDRowDragging: (Bool) -> Void
     private let onHUDDragging: (Bool) -> Void
     private var panel: LedgePanel?
     private var screen: NSScreen?
@@ -165,7 +166,8 @@ public final class LedgePanelController {
         selfViewActions: SelfViewActions = SelfViewActions(),
         onDropFiles: @escaping ([URL]) -> Bool = { _ in false },
         onHUDAdjust: @escaping (HUDReadout.Kind, Double) -> Void = { _, _ in },
-        onHUDAdjustDisplay: @escaping (UInt32, Double) -> Void = { _, _ in },
+        onHUDToggleMute: @escaping () -> Void = {},
+        onHUDRowDragging: @escaping (Bool) -> Void = { _ in },
         onHUDDragging: @escaping (Bool) -> Void = { _ in }
     ) {
         self.preferences = preferences
@@ -180,7 +182,8 @@ public final class LedgePanelController {
         self.selfViewActions = selfViewActions
         self.onDropFiles = onDropFiles
         self.onHUDAdjust = onHUDAdjust
-        self.onHUDAdjustDisplay = onHUDAdjustDisplay
+        self.onHUDToggleMute = onHUDToggleMute
+        self.onHUDRowDragging = onHUDRowDragging
         self.onHUDDragging = onHUDDragging
         self.displayID = displayID
         self.screen = screen
@@ -218,7 +221,8 @@ public final class LedgePanelController {
             selfViewActions: selfViewActions,
             onDropFiles: onDropFiles,
             onHUDAdjust: onHUDAdjust,
-            onHUDAdjustDisplay: onHUDAdjustDisplay,
+            onHUDToggleMute: onHUDToggleMute,
+            onHUDRowDragging: onHUDRowDragging,
             displayID: displayID,
             onHUDDragging: onHUDDragging
         )
@@ -372,11 +376,10 @@ public final class LedgePanelController {
     }
 
     /// The drawn shape in global screen coordinates, for hover and click routing.
-    public func shapeRect(for phase: NotchPhase, hudHovered: Bool = false, hudExtraHeight: CGFloat = 0) -> CGRect? {
+    public func shapeRect(for phase: NotchPhase) -> CGRect? {
         guard let screen else { return nil }
         let layout = presentation.layout(
-            preferences: preferences, geometry: geometry, phase: phase,
-            hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
+            preferences: preferences, geometry: geometry, phase: phase
         )
         let size = layout.boundingSize
         let rect = CGRect(
@@ -393,18 +396,13 @@ public final class LedgePanelController {
     /// Never their union: the space between them is bare desktop, and a
     /// bounding box would also move the island's midpoint, which is what the
     /// leading/cutout/trailing split measures from.
-    public func compactRegions(
-        for phase: NotchPhase, hudHovered: Bool = false, hudExtraHeight: CGFloat = 0
-    ) -> CompactRegions? {
-        guard let island = shapeRect(
-            for: phase, hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
-        ) else { return nil }
+    public func compactRegions(for phase: NotchPhase) -> CompactRegions? {
+        guard let island = shapeRect(for: phase) else { return nil }
         guard presentation.satellite(phase: phase) != nil else {
             return CompactRegions(island: island)
         }
         let layout = presentation.layout(
-            preferences: preferences, geometry: geometry, phase: phase,
-            hudHovered: hudHovered, hudExtraHeight: hudExtraHeight
+            preferences: preferences, geometry: geometry, phase: phase
         )
         let seat = NotchLayout.satelliteRect(
             islandSize: layout.boundingSize,

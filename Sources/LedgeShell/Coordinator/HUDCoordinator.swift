@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import Foundation
 import LedgeCore
 import LedgeSystem
@@ -261,19 +262,42 @@ public final class HUDCoordinator {
         if wanted { brightness.startWatching() } else { brightness.stopWatching() }
     }
 
-    /// Re-reads the current output's level and shows it — used after the user
-    /// switches the route from the panel, so the slider tracks the new device.
-    public func refreshVolumeReadout() {
-        guard let readout = volume.readout() else { return }
-        show(readout)
+    /// Fixes what a drag on the row acts on, at the first touch. Asking again
+    /// on every tick meant headphones plugged in mid-drag took the drag with
+    /// them, and a pointer sliding onto the next screen started dimming that one.
+    public func setRowDragging(_ dragging: Bool) {
+        rowDrag = dragging
+            ? RowDrag(
+                output: VolumeController.defaultOutputDevice(),
+                display: brightnessDisplayForTheRow()
+            )
+            : nil
     }
+
+    private func brightnessDisplayForTheRow() -> CGDirectDisplayID? {
+        HUDRowDisplay.target(
+            shown: shownBrightnessDisplay,
+            underCursor: displayBrightness.displayUnderCursor()?.id,
+            available: displayBrightness.displays().filter(\.canDim).map(\.id)
+        )
+    }
+
+    private struct RowDrag {
+        let output: AudioDeviceID?
+        let display: CGDirectDisplayID?
+    }
+
+    private var rowDrag: RowDrag?
+
+    /// The display the last brightness readout was about, when it named one.
+    private var shownBrightnessDisplay: CGDirectDisplayID?
 
     /// Applies a level set directly from the HUD's draggable bar.
     public func adjust(_ kind: HUDReadout.Kind, to level: Double) {
         let clamped = min(max(level, 0), 1)
         switch kind {
         case .volume:
-            guard let device = VolumeController.defaultOutputDevice() else { return }
+            guard let device = rowDrag?.output ?? VolumeController.defaultOutputDevice() else { return }
             // One operation: scalar and mute together, in the order that makes
             // no sound, and the readout comes from what the hardware says
             // afterwards rather than from what was asked for.
@@ -285,15 +309,14 @@ public final class HUDCoordinator {
                 deviceName: VolumeController.defaultOutputName()
             ))
         case .brightness:
-            // No display named: the one the pointer is on, matching the keys.
-            guard let display = displayBrightness.displayUnderCursor() else { return }
-            adjustBrightness(of: display.id, to: clamped)
+            guard let display = rowDrag?.display ?? brightnessDisplayForTheRow() else { return }
+            adjustBrightness(of: display, to: clamped)
         case .keyboardBacklight:
             break
         }
     }
 
-    /// Sets one display's brightness from its own row in the expanded panel.
+    /// Sets one display's brightness.
     public func adjustBrightness(of displayID: CGDirectDisplayID, to level: Double) {
         guard let display = displayBrightness.displays().first(where: { $0.id == displayID }),
               displayBrightness.setLevel(level, on: display)
@@ -303,12 +326,12 @@ public final class HUDCoordinator {
             kind: .brightness,
             level: displayBrightness.level(of: display) ?? level,
             deviceName: display.name
-        ))
+        ), about: display.id)
     }
 
-    /// Every attached display with its current level, for the expanded panel.
+    /// Every attached display with its current level, for the Levels card.
     /// The display under the pointer is marked current — it is the one the keys
-    /// and the plain slider act on.
+    /// act on.
     public func brightnessDisplays() -> [DisplayLevelOption] {
         let cursor = displayBrightness.displayUnderCursor()?.id
         // Only displays a slider can actually move. A Sidecar iPad and an
@@ -388,20 +411,7 @@ public final class HUDCoordinator {
             // only Ledge's own readout shows. If the device has no settable mute
             // (some digital outputs), fall through untouched so the key still
             // does whatever it always did.
-            //
-            // Toggles the *user's* mute, which is the thing the red pill
-            // follows. The device's own property is not the state here: an
-            // output turned all the way down is muted underneath to make it
-            // genuinely silent, and pressing mute down there has nothing left
-            // to silence — but it still has something to say, and the result
-            // reports that as a change even when no write went out.
-            let result = VolumeController.apply(muted: !VolumeController.userMuted(device), on: device)
-            guard result.didSomething else { return false }
-            show(HUDReadout(
-                kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
-                deviceName: VolumeController.defaultOutputName()
-            ))
-            return true
+            return toggleMute(on: device)
         }
 
         // Volume up/down while muted has to unmute, or the scalar moves and
@@ -422,6 +432,29 @@ public final class HUDCoordinator {
         // dying. This is what stops the native sound OSD flickering in.
         guard result.didSomething else { return false }
 
+        show(HUDReadout(
+            kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
+            deviceName: VolumeController.defaultOutputName()
+        ))
+        return true
+    }
+
+    /// The speaker in the readout: the same thing as the mute key.
+    public func toggleMute() {
+        guard let device = VolumeController.defaultOutputDevice() else { return }
+        toggleMute(on: device)
+    }
+
+    /// Toggles the *user's* mute, which is the thing the readout's struck
+    /// speaker follows. The device's own property is not the state here: an
+    /// output turned all the way down is muted underneath to make it genuinely
+    /// silent, and pressing mute down there has nothing left to silence — but
+    /// it still has something to say, and the result reports that as a change
+    /// even when no write went out.
+    @discardableResult
+    private func toggleMute(on device: AudioDeviceID) -> Bool {
+        let result = VolumeController.apply(muted: !VolumeController.userMuted(device), on: device)
+        guard result.didSomething else { return false }
         show(HUDReadout(
             kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
             deviceName: VolumeController.defaultOutputName()
@@ -456,13 +489,14 @@ public final class HUDCoordinator {
             persistBrightnessSoon()
         }
 
-        show(HUDReadout(kind: .brightness, level: target, deviceName: display.name))
+        show(HUDReadout(kind: .brightness, level: target, deviceName: display.name), about: display.id)
         return true
     }
 
     // MARK: - Presenting
 
-    private func show(_ readout: HUDReadout) {
+    private func show(_ readout: HUDReadout, about display: CGDirectDisplayID? = nil) {
+        if readout.kind == .brightness { shownBrightnessDisplay = display }
         presentation.hud = readout
         onReadout(readout)
     }

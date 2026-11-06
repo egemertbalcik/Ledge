@@ -133,17 +133,8 @@ public final class NotchPresentation {
     /// snap instantly to the music.
     public var farewell: Activity?
 
-    /// Whether the cursor is over the shape. The HUD uses it to widen its bar
-    /// into a directly draggable slider.
+    /// Whether the cursor is over the shape.
     public var isHovering: Bool = false
-
-    /// The audio outputs shown in the hovered sound panel, current device
-    /// first. Populated by the coordinator when the panel opens, so the device
-    /// enumeration does not run on every hover tick.
-    public var hudOutputs: [AudioOutputOption] = []
-    /// Attached displays, for the expanded brightness panel. Empty, or a single
-    /// entry, keeps the panel in its plain one-slider form.
-    public var hudDisplays: [DisplayLevelOption] = []
 
     /// Which display the pointer is on, when Ledge is drawn on more than one.
     /// `nil` means "no display is hovered", not "all of them".
@@ -409,7 +400,8 @@ public struct NotchOverlayView: View {
     /// Files dropped on the notch. Returns whether they were taken.
     private let onDropFiles: ([URL]) -> Bool
     private let onHUDAdjust: (HUDReadout.Kind, Double) -> Void
-    private let onHUDAdjustDisplay: (UInt32, Double) -> Void
+    private let onHUDToggleMute: () -> Void
+    private let onHUDRowDragging: (Bool) -> Void
     /// This panel's display. `nil` on the single-display path, where every
     /// hover is necessarily this panel's.
     private let displayID: UInt32?
@@ -429,7 +421,8 @@ public struct NotchOverlayView: View {
         selfViewActions: SelfViewActions = SelfViewActions(),
         onDropFiles: @escaping ([URL]) -> Bool = { _ in false },
         onHUDAdjust: @escaping (HUDReadout.Kind, Double) -> Void = { _, _ in },
-        onHUDAdjustDisplay: @escaping (UInt32, Double) -> Void = { _, _ in },
+        onHUDToggleMute: @escaping () -> Void = {},
+        onHUDRowDragging: @escaping (Bool) -> Void = { _ in },
         displayID: UInt32? = nil,
         onHUDDragging: @escaping (Bool) -> Void = { _ in }
     ) {
@@ -446,7 +439,8 @@ public struct NotchOverlayView: View {
         self.selfViewActions = selfViewActions
         self.onDropFiles = onDropFiles
         self.onHUDAdjust = onHUDAdjust
-        self.onHUDAdjustDisplay = onHUDAdjustDisplay
+        self.onHUDToggleMute = onHUDToggleMute
+        self.onHUDRowDragging = onHUDRowDragging
         self.displayID = displayID
         self.onHUDDragging = onHUDDragging
     }
@@ -483,10 +477,6 @@ public struct NotchOverlayView: View {
 
     private var expandedSize: CGSize {
         presentation.cardSize(preferences: preferences, geometry: geometry, phase: phase)
-    }
-
-    private var hudExtraHeight: CGFloat {
-        presentation.hudExtraHeight(hovered: isHovering)
     }
 
     /// Whether the pointer is on *this* panel's display.
@@ -545,8 +535,7 @@ public struct NotchOverlayView: View {
 
     private var layout: NotchLayout {
         return presentation.layout(
-            preferences: preferences, geometry: geometry, phase: phase,
-            hudHovered: isHovering, hudExtraHeight: hudExtraHeight
+            preferences: preferences, geometry: geometry, phase: phase
         )
     }
 
@@ -756,6 +745,9 @@ public struct NotchOverlayView: View {
         // so choosing a device also toggled the card's pinned state, which is
         // what made the menu feel like it stuck and fought back.
         .onTapGesture {
+            // A readout is a control now, and this tap pins a card. Missing the
+            // speaker by a few points must not turn the volume into the calendar.
+            guard phase != .hud else { return }
             guard presentation.routePickerRows == 0 else { return }
             // Same reason as above: a click on a note tile would otherwise open
             // the note *and* collapse the island it was about to come out of.
@@ -948,43 +940,25 @@ public struct NotchOverlayView: View {
 
         case .hud:
             if let readout = presentation.hud {
-                if isHovering {
-                    // Hovered: the compact glyph-and-bar gives way entirely to a
-                    // Control-Centre style panel below the hardware cutout.
-                    VStack(spacing: 0) {
-                        // One extra point below the hardware cutout so the title
-                        // never reads as touching it.
-                        Color.clear
-                            .frame(height: geometry.notchSize.height + NotchLayout.compactExtraHeight + 1)
-                        HUDAdjustPanel(
-                            readout: readout,
-                            glowing: preferences.hudGlowBar,
-                            outputs: readout.kind == .volume ? presentation.hudOutputs : [],
-                            displays: readout.kind == .brightness ? presentation.hudDisplays : [],
-                            onAdjust: { level in onHUDAdjust(readout.kind, level) },
-                            onDragging: onHUDDragging,
-                            onSelectOutput: { id in nowPlayingActions.selectOutput(id) },
-                            onAdjustDisplay: onHUDAdjustDisplay
-                        )
-                        .frame(height: NotchLayout.hudAdjustHeight + hudExtraHeight)
-                    }
-                    .transition(.opacity)
-                } else {
-                    // Nothing here may change identity with the reading: a
-                    // held key has to retarget the level spring, not restart
-                    // the arrival sixteen times.
-                    HUDRowView(
-                        readout: readout,
-                        metrics: HUDRowMetrics(
-                            geometry: geometry,
-                            bodyWidth: layout.bodySize.width,
-                            contentOffset: preferences.hudContentOffset
-                        ),
-                        glowing: preferences.hudGlowBar
+                // Nothing here may change identity with the reading or with the
+                // pointer: a held key has to retarget the level spring, not
+                // restart the arrival sixteen times, and hovering changes nothing.
+                HUDRowView(
+                    readout: readout,
+                    metrics: HUDRowMetrics(
+                        geometry: geometry,
+                        bodyWidth: layout.bodySize.width,
+                        contentOffset: preferences.hudContentOffset
+                    ),
+                    glowing: preferences.hudGlowBar,
+                    actions: HUDRowActions(
+                        setLevel: onHUDAdjust,
+                        toggleMute: onHUDToggleMute,
+                        setDragging: onHUDRowDragging
                     )
-                    .padding(.top, geometry.notchSize.height)
-                    .transition(Motion.hudRow(reduced: reduceMotion))
-                }
+                )
+                .padding(.top, geometry.notchSize.height)
+                .transition(Motion.hudRow(reduced: reduceMotion))
             }
 
         case .hover, .expanded:

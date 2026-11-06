@@ -3,10 +3,10 @@ import Foundation
 /// The glyph for an audio device, chosen from its name.
 ///
 /// macOS gives no icon for an output device, only a string, so the name is all
-/// there is to go on. Kept in one place because three surfaces need the same
-/// answer — the route list in the media card, the sound panel's rows, and the
-/// peek that says where sound just went — and two of them had already drifted
-/// into being separate copies of the same ladder.
+/// there is to go on. Kept in one place because two surfaces need the same
+/// answer — the route list in the media card and the peek that says where sound
+/// just went — and they had already drifted into being separate copies of the
+/// same ladder.
 /// Names that no SF Symbol answers to, drawn by the app instead.
 ///
 /// A payload speaks in symbol names, so a glyph the system does not ship needs

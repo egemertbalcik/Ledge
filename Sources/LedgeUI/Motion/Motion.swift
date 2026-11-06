@@ -134,6 +134,10 @@ public enum Motion {
     /// slide.
     public static let levelChange: Animation = .spring(response: 0.2, dampingFraction: 0.85)
 
+    /// A level under the pointer. It has to stay with the hand, so this is too
+    /// quick to see and doesn't overshoot.
+    public static let levelDrag: Animation = .spring(response: 0.08, dampingFraction: 1)
+
     /// How one *expanded* card gives way to another — media to weather, timer
     /// to shelf.
     ///

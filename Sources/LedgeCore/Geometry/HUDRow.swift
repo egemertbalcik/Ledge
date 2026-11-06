@@ -85,6 +85,28 @@ public struct HUDRowMetrics: Equatable, Sendable {
         self.innerCornerRadius = 0.5 * scale
         self.height = (Self.rowHeight * scale) + NotchLayout.compactExtraHeight
     }
+
+    /// The level a point in the row stands for. Past either end of the bar it
+    /// is that end, so a drag can run off the bar and still arrive there.
+    public func level(atRowX x: CGFloat) -> Double? {
+        guard barWidth > 0, x.isFinite else { return nil }
+        return Double(min(max((x - barLeading) / barWidth, 0), 1))
+    }
+}
+
+/// Which display a brightness row acts on.
+public enum HUDRowDisplay {
+
+    /// The display the row is showing the level of, while it can still be set.
+    ///
+    /// Not simply the one under the pointer. A brightness key pressed with the
+    /// pointer on an external monitor shows that monitor's level in the notch,
+    /// and reaching the notch moves the pointer onto the built-in screen, so
+    /// the drag changed a screen other than the one the bar was showing.
+    public static func target(shown: UInt32?, underCursor: UInt32?, available: [UInt32]) -> UInt32? {
+        if let shown, available.contains(shown) { return shown }
+        return underCursor
+    }
 }
 
 /// The bar's segments, as rectangles.

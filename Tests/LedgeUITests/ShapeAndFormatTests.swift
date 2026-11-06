@@ -100,61 +100,6 @@ struct CardFormattingTests {
     }
 }
 
-@Suite("Rows hold the order they opened in")
-@MainActor
-struct HeldOrderTests {
-
-    private struct Row: Identifiable, Equatable {
-        let id: UInt32
-        let name: String
-    }
-
-    private let opened: [Row] = [
-        Row(id: 1, name: "MacBook Speakers"),
-        Row(id: 2, name: "AirPods Pro"),
-        Row(id: 3, name: "Studio Display"),
-    ]
-
-    /// The list is sorted current-route-first, which is right when it is drawn
-    /// and wrong the instant it is used: touching another output makes it the
-    /// current one, and the row leapt to the top from under the pointer.
-    @Test("A row that becomes current stays where it was")
-    func currentRowDoesNotJump() {
-        let order = opened.map(\.id)
-        // AirPods just became the route, so the fresh sort puts it first.
-        let resorted = [opened[1], opened[0], opened[2]]
-        #expect(HUDAdjustPanel.held(resorted, in: order).map(\.id) == [1, 2, 3])
-    }
-
-    @Test("With no captured order, the sort stands")
-    func emptyOrderIsATransparentPassThrough() {
-        let resorted = [opened[2], opened[0], opened[1]]
-        #expect(HUDAdjustPanel.held(resorted, in: []).map(\.id) == [3, 1, 2])
-    }
-
-    @Test("A device arriving mid-panel goes on the end, not to the top")
-    func newDeviceDoesNotJumpTheQueue() {
-        let order = opened.map(\.id)
-        let arrived = Row(id: 9, name: "AirPlay TV")
-        // It plugged in and took the route, so the sort puts it first.
-        let resorted = [arrived] + opened
-        #expect(HUDAdjustPanel.held(resorted, in: order).map(\.id) == [1, 2, 3, 9])
-    }
-
-    @Test("Two new devices keep the order the sort gave them")
-    func newDevicesKeepTheirRelativeSort() {
-        let order = [opened[0].id]
-        let resorted = [opened[0], Row(id: 8, name: "A"), Row(id: 9, name: "B")]
-        #expect(HUDAdjustPanel.held(resorted, in: order).map(\.id) == [1, 8, 9])
-    }
-
-    @Test("A device that left is simply absent")
-    func departedDeviceIsDropped() {
-        let order = opened.map(\.id)
-        #expect(HUDAdjustPanel.held([opened[2], opened[0]], in: order).map(\.id) == [1, 3])
-    }
-}
-
 @Suite("What counts as the same card")
 @MainActor
 struct CardIdentityTests {

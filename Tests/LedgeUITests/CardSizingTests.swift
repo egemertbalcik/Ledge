@@ -59,23 +59,6 @@ struct CardSizingTests {
             #expect(asked == direct)
         }
     }
-
-    @Test("The readout's extra height follows the rows, and only while hovered")
-    func readoutHeightFollowsItsRows() {
-        let presentation = presentation {
-            $0.hud = HUDReadout(kind: .volume, level: 0.5)
-            $0.hudOutputs = [
-                AudioOutputOption(id: 1, name: "MacBook Air Speakers", isCurrent: true, level: 0.5),
-                AudioOutputOption(id: 2, name: "AirPods", isCurrent: false, level: 0.3),
-                AudioOutputOption(id: 3, name: "Display", isCurrent: false, level: 0.7),
-            ]
-        }
-        // Three routes, two of them extra rows.
-        #expect(presentation.hudExtraHeight(hovered: true) == NotchLayout.hudFadedRowHeight * 2)
-        // Not hovered, no rows: the caller's own guard decides that, and both
-        // callers guard differently — which is exactly why it is a parameter.
-        #expect(presentation.hudExtraHeight(hovered: false) == 0)
-    }
 }
 
 @Suite("Announcement interaction layout")
