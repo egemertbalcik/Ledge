@@ -395,7 +395,10 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
 
     /// Prompts, where prompting is possible. Returns the status afterwards.
     @discardableResult
-    public func request(_ permission: PermissionKind) async -> PermissionStatus {
+    public func request(
+        _ permission: PermissionKind,
+        accessibilityAlertMayAppear: Bool = false
+    ) async -> PermissionStatus {
         guard permission.isRequestable else {
             // Full Disk Access cannot be asked for at all — the only remedy is
             // System Settings.
@@ -410,8 +413,20 @@ public final class PermissionCenter: NSObject, CLLocationManagerDelegate {
             // once per app — after it has been dismissed, later calls do
             // nothing at all. A button that silently does nothing is how this
             // permission became impossible to turn on from inside the app, so
-            // the pane is opened as well, every time.
+            // the pane is opened every time the dialog does not come up.
+            //
+            // When it does come up, its own button opens the pane. Opening
+            // both at once put two system windows on screen together, over the
+            // window that asked. If the dialog is not seen in time, the pane
+            // opens anyway: the worst this can do is both at once again.
             MediaKeyInterceptor.requestTrust()
+            if accessibilityAlertMayAppear {
+                let alertIsUp = await AccessibilityAlert.appears(
+                    isUp: AccessibilityAlert.isUp,
+                    sleep: { try? await Task.sleep(for: $0) }
+                )
+                if alertIsUp { return status(of: .accessibility) }
+            }
             openSettings(for: .accessibility)
 
         case .calendars:
@@ -591,5 +606,54 @@ private final class BluetoothPromptDelegate: NSObject, CBCentralManagerDelegate,
         case .unknown, .resetting: break
         default: onDecided()
         }
+    }
+}
+
+/// macOS's one-time Accessibility message, seen from outside.
+enum AccessibilityAlert {
+
+    /// The small app macOS shows it from. It keeps running long after the
+    /// message has gone, so only a window on screen means the message is up.
+    /// Bounds and owner are all that can be read without Screen Recording, and
+    /// all this needs.
+    static let bundleIdentifier = "com.apple.accessibility.universalAccessAuthWarn"
+
+    static func isUp() -> Bool {
+        let owners = Set(
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+                .map(\.processIdentifier)
+        )
+        guard !owners.isEmpty,
+              let windows = CGWindowListCopyWindowInfo(
+                  [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+              ) as? [[String: Any]]
+        else { return false }
+        return hasWindow(in: windows, ownedBy: owners)
+    }
+
+    /// Separate so it can be checked without a message on screen.
+    static func hasWindow(in windows: [[String: Any]], ownedBy owners: Set<pid_t>) -> Bool {
+        windows.contains { window in
+            guard let owner = window[kCGWindowOwnerPID as String] as? pid_t else { return false }
+            return owners.contains(owner)
+        }
+    }
+
+    /// Looks for it for up to 0.7 s, which is as long as a press can reasonably
+    /// go with nothing happening on screen.
+    static func appears(
+        isolation: isolated (any Actor)? = #isolation,
+        within deadline: Duration = .milliseconds(700),
+        poll: Duration = .milliseconds(100),
+        isUp: () -> Bool,
+        sleep: (Duration) async -> Void
+    ) async -> Bool {
+        var waited: Duration = .zero
+        while !isUp() {
+            guard waited < deadline else { return false }
+            await sleep(poll)
+            waited += poll
+        }
+        return true
     }
 }

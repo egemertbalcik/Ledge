@@ -17,10 +17,11 @@ public enum PermissionGuideCopy {
     }
 
     /// macOS's own one-time Accessibility message, mentioned once because it
-    /// is what puts Ledge in the list at all.
+    /// is what puts Ledge in the list at all. It comes first and on its own:
+    /// System Settings waits for its button.
     public static let firstTime = """
-        The first time, macOS also shows its own Accessibility message on top. \
-        Either of its buttons leaves you at this same list.
+        macOS asks first with its own Accessibility message. Choose Open System \
+        Settings there to get to the list.
         """
 
     /// Said under the diagram, every time. Drawing a copy of another app's
@@ -72,6 +73,29 @@ public enum PermissionGuideCopy {
         """
 
     public static func copied(_ path: String) -> String { "Copied \(path)" }
+
+    // MARK: The panel beside System Settings
+
+    public static func companionTitle(_ kind: PermissionKind) -> String {
+        "Turn on \(PermissionCopy.settingsPaneName(kind))"
+    }
+
+    /// The way back from the panel once there is nothing left to do beside
+    /// System Settings. Ledge has no Dock icon to go looking for.
+    public static let backToLedge = "Back to Ledge"
+
+    /// Short, because it is said beside the list it means.
+    public static let companionWaiting = "Waiting for you"
+
+    /// Asked while the person is still standing in System Settings. The inline
+    /// guide only gets to say this after they have come back to Ledge, and by
+    /// then the person who saw Ledge switched on with nothing happening has
+    /// already given up on the list.
+    public static let companionRescue = "Not in the list, or already on and nothing happens?"
+    public static let companionRescueBody = """
+        Drag this into the list. If the list already shows Ledge switched on, \
+        it's an older copy: select it, press −, then drag this one in.
+        """
 
     // MARK: What the notch says during a handoff
 

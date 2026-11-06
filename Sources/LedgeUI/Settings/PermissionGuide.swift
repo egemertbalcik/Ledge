@@ -21,7 +21,7 @@ struct PermissionGuide: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(.init(bolded(PermissionGuideCopy.caption(handoff.kind))))
+            Text(.init(Self.bolded(PermissionGuideCopy.caption(handoff.kind))))
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -66,7 +66,7 @@ struct PermissionGuide: View {
     /// The first sentence carries the instruction, so it is the bold one.
     /// Markdown rather than two concatenated `Text`s, which wrapped as two
     /// paragraphs at this width.
-    private func bolded(_ caption: String) -> String {
+    static func bolded(_ caption: String) -> String {
         guard let stop = caption.firstIndex(of: ".") else { return caption }
         let lead = caption[caption.startIndex...stop]
         let rest = caption[caption.index(after: stop)...]
@@ -171,7 +171,7 @@ private struct SystemSettingsDiagram: View {
 /// operation, so the worst a stray drop can leave anywhere is an alias. Copy
 /// Location is the same thing for the keyboard and for VoiceOver, and it is
 /// visible for everybody rather than hidden behind the drag.
-private struct MissingFromTheList: View {
+struct MissingFromTheList: View {
 
     let model: SettingsModel
     let actions: SettingsActions
@@ -226,7 +226,7 @@ private struct MissingFromTheList: View {
         .onChange(of: model.appLocation) { _, _ in saidCopied = false }
     }
 
-    private static func sentence(for outcome: AppDragOutcome) -> String {
+    static func sentence(for outcome: AppDragOutcome) -> String {
         switch outcome {
         case .missed: PermissionGuideCopy.dropMissed
         case .landedElsewhere: PermissionGuideCopy.dropLandedElsewhere

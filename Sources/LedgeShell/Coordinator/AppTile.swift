@@ -29,6 +29,7 @@ final class AppTileView: NSView, NSDraggingSource {
     private let name: String
     private let onDragEnded: (AppDragOutcome?) -> Void
     private let onCopyLocation: () -> Void
+    private let worksWithoutKey: Bool
 
     private let icon = NSImageView()
     private var mouseDownAt: NSPoint?
@@ -43,8 +44,10 @@ final class AppTileView: NSView, NSDraggingSource {
         url: URL,
         name: String,
         onDragEnded: @escaping (AppDragOutcome?) -> Void,
-        onCopyLocation: @escaping () -> Void
+        onCopyLocation: @escaping () -> Void,
+        worksWithoutKey: Bool = false
     ) {
+        self.worksWithoutKey = worksWithoutKey
         self.url = url
         self.name = name
         self.onDragEnded = onDragEnded
@@ -89,7 +92,7 @@ final class AppTileView: NSView, NSDraggingSource {
         for area in trackingAreas { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow, .cursorUpdate],
+            options: [.mouseEnteredAndExited, worksWithoutKey ? .activeAlways : .activeInKeyWindow, .cursorUpdate],
             owner: self
         ))
     }
@@ -117,6 +120,12 @@ final class AppTileView: NSView, NSDraggingSource {
     }
 
     // MARK: - The drag
+
+    /// The panel beside System Settings never becomes key, so every press on
+    /// the tile there is a first click.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        worksWithoutKey
+    }
 
     override func mouseDown(with event: NSEvent) {
         mouseDownAt = convert(event.locationInWindow, from: nil)
@@ -181,13 +190,15 @@ struct AppTile: NSViewRepresentable {
     let name: String
     let onDragEnded: (AppDragOutcome?) -> Void
     let onCopyLocation: () -> Void
+    var worksWithoutKey = false
 
     func makeNSView(context: Context) -> AppTileView {
         AppTileView(
             url: url,
             name: name,
             onDragEnded: onDragEnded,
-            onCopyLocation: onCopyLocation
+            onCopyLocation: onCopyLocation,
+            worksWithoutKey: worksWithoutKey
         )
     }
 

@@ -113,17 +113,49 @@ public final class MediaKeyInterceptor {
     /// *swallow* a key press rather than watch it go by. Torn down at once;
     /// this is a question, not a subscription. Cheap enough for the settings
     /// pane's poll, and the only thing any decision here consults.
+    ///
+    /// It has one cost, which is why it waits to be allowed. macOS answers a
+    /// tap it will not hand over by putting up its own Accessibility message,
+    /// once in an app's life. Probing at launch showed that message to every
+    /// new user before Ledge had shown them anything, with no press behind it.
     public static var isTrusted: Bool {
-        guard let probe = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(1 << systemDefinedType.rawValue),
-            callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
-            userInfo: nil
-        ) else { return false }
-        CFMachPortInvalidate(probe)
-        return true
+        answer(
+            hasBeenAsked: hasBeenAsked,
+            axSaysTrusted: AXIsProcessTrusted() || CGPreflightPostEventAccess(),
+            tapIsHandedOver: {
+                guard let probe = CGEvent.tapCreate(
+                    tap: .cghidEventTap,
+                    place: .headInsertEventTap,
+                    options: .defaultTap,
+                    eventsOfInterest: CGEventMask(1 << systemDefinedType.rawValue),
+                    callback: { _, _, event, _ in Unmanaged.passUnretained(event) },
+                    userInfo: nil
+                ) else { return false }
+                CFMachPortInvalidate(probe)
+                return true
+            }
+        )
+    }
+
+    /// Whether anybody has pressed the button that asks for Accessibility.
+    ///
+    /// Set once at launch from the saved answer and again at the press. True
+    /// until told otherwise, so nothing changes for anything that never says.
+    public static var hasBeenAsked = true
+
+    /// Whether the probe may run. A tap that succeeds raises no message, so it
+    /// may as soon as macOS says it would. Until then the answer is no, and
+    /// that is true.
+    ///
+    /// The list changing is not a reason. It fires for any app's switch, and
+    /// somebody granting another app must not get a message about this one.
+    /// It only prompts another look at `axSaysTrusted`, which cannot raise one.
+    static func mayProbe(hasBeenAsked: Bool, axSaysTrusted: Bool) -> Bool {
+        hasBeenAsked || axSaysTrusted
+    }
+
+    static func answer(hasBeenAsked: Bool, axSaysTrusted: Bool, tapIsHandedOver: () -> Bool) -> Bool {
+        mayProbe(hasBeenAsked: hasBeenAsked, axSaysTrusted: axSaysTrusted) && tapIsHandedOver()
     }
 
     /// Prompts for Accessibility. Shows the system dialogue, so only call it
@@ -288,5 +320,71 @@ public final class MediaKeyInterceptor {
     private func reArm() {
         guard let eventTap else { return }
         CGEvent.tapEnable(tap: eventTap, enable: true)
+    }
+}
+
+/// Hears the Accessibility list changing, in any app's row.
+///
+/// Delivered immediately, because of when it matters: System Settings is in
+/// front and Ledge is not active, and AppKit otherwise holds distributed
+/// notifications back until it is.
+///
+/// Looks again a few times after each change, because the notification can
+/// arrive before the new answer can be read.
+@MainActor
+public final class AccessibilityListWatcher: NSObject {
+
+    /// macOS's own, posted when a switch in that list is flipped.
+    public static let systemNotification = Notification.Name("com.apple.accessibility.api")
+
+    public static let settlingDelays: [Duration] = [.milliseconds(250), .seconds(1), .seconds(3)]
+
+    private let name: Notification.Name
+    private let delays: [Duration]
+    private let sleep: @MainActor (Duration) async -> Void
+    private var onChange: (@MainActor () -> Void)?
+    private var settling: Task<Void, Never>?
+
+    public init(
+        name: Notification.Name = AccessibilityListWatcher.systemNotification,
+        delays: [Duration] = AccessibilityListWatcher.settlingDelays,
+        sleep: @escaping @MainActor (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    ) {
+        self.name = name
+        self.delays = delays
+        self.sleep = sleep
+        super.init()
+    }
+
+    public func start(_ onChange: @escaping @MainActor () -> Void) {
+        stop()
+        self.onChange = onChange
+        DistributedNotificationCenter.default().addObserver(
+            self,
+            selector: #selector(listChanged),
+            name: name,
+            object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
+    }
+
+    public func stop() {
+        settling?.cancel()
+        settling = nil
+        guard onChange != nil else { return }
+        onChange = nil
+        DistributedNotificationCenter.default().removeObserver(self, name: name, object: nil)
+    }
+
+    @objc private func listChanged() {
+        onChange?()
+        settling?.cancel()
+        settling = Task { @MainActor [weak self, delays, sleep] in
+            for delay in delays {
+                await sleep(delay)
+                guard !Task.isCancelled else { return }
+                self?.onChange?()
+            }
+        }
     }
 }

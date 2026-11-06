@@ -27,48 +27,84 @@ public final class LedgeCoordinator {
     )
     private var hoverTracker: HoverTracker<CGDirectDisplayID>?
     private var settingsWindow: NSWindow?
-    private var permissionWatch: Task<Void, Never>?
-
-    /// What the standing watch owes whoever started it.
-    ///
-    /// Held beside the task rather than only inside it, because a watch can
-    /// end by being replaced — a second request made while the first is still
-    /// out — and a cancelled task's own `defer` cannot be the thing that
-    /// reports the end: cancellation skips it, which left the row that was
-    /// saying "Waiting for your answer…" saying it forever.
-    private var permissionWatchEnd: (@MainActor () -> Void)?
 
     /// The notch's half of a grant that happens in System Settings.
     private let handoffCard = HandoffProvider()
 
-    /// Which window sent somebody out to grant something.
-    ///
-    /// `raiseAfterGrant` used to be exactly that — settings only — so
-    /// a grant made from the tour raised nothing: the tour had been lowered to
-    /// stand aside for System Settings, and it sat behind it afterwards, in an
-    /// app with no Dock icon to go looking for.
-    private enum WhoAsked { case settings, tour }
+    /// One press on a permission button, from the press to whichever window
+    /// ends up in front.
+    private lazy var permissionFlow: PermissionFlow = PermissionFlow(
+        model: settingsModel,
+        world: PermissionFlowWorld(
+            status: { [weak self] in self?.permissions.status(of: $0) ?? .notDetermined },
+            request: { [weak self] kind, alertMayAppear in
+                await self?.permissions.request(kind, accessibilityAlertMayAppear: alertMayAppear) ?? .notDetermined
+            },
+            openSettings: { [weak self] in self?.permissions.openSettings(for: $0) },
+            reread: { [weak self] in self?.revalidatePermissions() },
+            answered: { [weak self] kind, status in
+                // Granting the calendar is the reason to switch the calendar
+                // card on, and anybody who just allowed it did not do it to
+                // leave the card hidden. About the answer rather than about
+                // the press, so it happens whoever owns the attempt by now.
+                guard let self, kind == .calendars, status == .granted else { return }
+                self.activities.setProvider("calendar", enabled: true)
+                self.refreshSettingsModel()
+            },
+            settingsIsVisible: { [weak self] in self?.settingsWindow?.isVisible == true },
+            tourIsVisible: { [weak self] in self?.onboarding.isVisible == true },
+            presentSettings: { [weak self] in
+                guard let self, let settingsWindow = self.settingsWindow else { return }
+                self.present(settingsWindow)
+            },
+            raiseTour: { [weak self] in self?.onboarding.raise() },
+            reclaimFront: { [weak self] in self?.reclaimFront() },
+            standAside: { [weak self] in self?.standAsideForSystemUI() },
+            systemSettingsHoldsTheFront: { SystemSettingsWindow.holdsTheFront() },
+            panelIsUp: { [weak self] in self?.permissionCompanion.isUp == true },
+            endPanelArrival: { [weak self] in self?.permissionCompanion.endArrival() },
+            watchComingBack: { PermissionFlow.watchComingBack($0) },
+            accessibilityWasAsked: { [weak self] in self?.preferences.accessibilityWasAsked ?? true },
+            markAccessibilityAsked: { [weak self] in
+                self?.preferences.accessibilityWasAsked = true
+                self?.settingsModel.accessibilityWasAskedBefore = true
+                MediaKeyInterceptor.hasBeenAsked = true
+            },
+            sayWaiting: { [weak self] in self?.handoffCard.waiting(for: $0.displayName) },
+            sayArrived: { [weak self] kind in
+                self?.handoffCard.arrived(
+                    kind.displayName,
+                    detail: PermissionGuideCopy.arrivedDetail(kind),
+                    holding: PermissionGuideCopy.arrivalHold(
+                        reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                    )
+                )
+            },
+            clearLock: { [weak self] in self?.handoffCard.clear() }
+        )
+    )
 
-    /// One press that is still waiting for an answer.
-    ///
-    /// Owned here rather than read back from `SettingsModel`, and identified
-    /// by a token rather than by its permission. Both for the same reason:
-    /// this is what the notch's lock and the arrival card hang off, and the
-    /// model's copy is derived — it folds itself away the moment the
-    /// permissions are re-read, which is the line *before* the grant is
-    /// announced. Asking the model afterwards left the lock in the ears with
-    /// no watch behind it and no arrival ever said. The token is what tells
-    /// one press from the next: "Open System Settings Again" is a second
-    /// attempt at the same permission, and the first attempt's ending must
-    /// not tear down the second attempt's guide.
-    private struct PermissionAttempt {
-        let token = UUID()
-        let kind: PermissionKind
-        /// Which window to bring back. Nil when nobody left the app — a
-        /// prompt is answered in front of the window that asked.
-        let who: WhoAsked?
-    }
-    private var attempt: PermissionAttempt?
+    /// The panel beside System Settings. A view of `settingsModel.handoff`,
+    /// so nothing here tells it when to open or close.
+    private lazy var permissionCompanion: PermissionCompanion = PermissionCompanion(
+        model: settingsModel,
+        surface: PermissionCompanionWindow(
+            hidesFromCapture: { [weak self] in self?.preferences.hideFromScreenCapture ?? true },
+            makeContent: { [weak self] content in
+                guard let self else { return AnyView(EmptyView()) }
+                return AnyView(PermissionCompanionView(
+                    content: content,
+                    model: self.settingsModel,
+                    actions: self.makeSettingsActions(),
+                    tile: self.appTile(worksWithoutKey: true),
+                    backToLedge: { [weak self] in self?.permissionFlow.goBackToTheAskingWindow() }
+                ))
+            }
+        ),
+        arrivalStaysUp: { [weak self] in self?.permissionFlow.isOwedTheFront ?? false }
+    )
+
+    private let accessibilityList = AccessibilityListWatcher()
 
     /// The one folder Ledge ever asks for by name, and the reason it does not
     /// ask for Full Disk Access to get at the same thing.
@@ -250,6 +286,16 @@ public final class LedgeCoordinator {
 
     /// Told by the Sparkle delegate just before an update relaunch.
     public func willRelaunchForUpdate() {
+        terminationKind = .updateRelaunch
+    }
+
+    /// A newer copy of Ledge is taking over, and this one is about to quit
+    /// for it. The same as an update to Keep Awake: nobody said they were
+    /// finished, so the session is left for the new copy to resume. Called
+    /// right before the quit, which can't be cancelled once it has begun, so
+    /// this never has to be taken back.
+    public func beingReplacedByNewerCopy() {
+        guard terminationKind == .quit else { return }
         terminationKind = .updateRelaunch
     }
 
@@ -475,47 +521,7 @@ public final class LedgeCoordinator {
         activities.permissionChanged(kind, isGranted: true)
         if kind == .focusStatus { syncFocusQuietState() }
         refreshSettingsModel()
-        raiseAfterGrant(for: kind)
-    }
-
-    /// Brings the settings window back after the user has granted something.
-    ///
-    /// The grant happens in System Settings, which opens *over* Ledge's
-    /// window, and Ledge is an accessory app: once it is behind something
-    /// there is no Dock icon and no Cmd-Tab entry to get back to it, so the
-    /// window had to be hunted for among everything else on screen. Only when
-    /// the window was already open — a grant made from the tour, or from
-    /// System Settings with nothing of ours on screen, moves nothing.
-    /// - Parameter kind: the permission whose answer arrived, or nil when the
-    ///   caller is the watch for the press itself. Checked against the press
-    ///   that is outstanding: a Calendar grant landing while somebody is in
-    ///   System Settings over *Bluetooth* is not a reason to take the
-    ///   foreground away from them — and a permission can appear to flap
-    ///   several times a minute.
-    private func raiseAfterGrant(for kind: PermissionKind? = nil) {
-        // Only while the user is out granting something they asked for from
-        // this window. Any gain at all used to bring the window forward, and
-        // since a permission could appear to flap several times a minute, the
-        // app repeatedly stole focus from whatever the user was doing —
-        // including from System Settings, where they were trying to grant.
-        guard permissionWatch != nil else { return }
-        guard let open = attempt else { return }
-        if let kind, kind != open.kind { return }
-        // Whichever window asked. The tour is the one that cannot be found
-        // again: it was lowered to stand aside for System Settings, and
-        // nothing but an activation floats it back.
-        switch open.who {
-        case .tour where onboarding.isVisible:
-            onboarding.raise()
-        case .settings, .tour, nil:
-            guard let settingsWindow, settingsWindow.isVisible else {
-                // The tour is the only other window that asks, so it is the
-                // fallback when Settings is not up.
-                if onboarding.isVisible { onboarding.raise() }
-                return
-            }
-            present(settingsWindow)
-        }
+        permissionFlow.grantArrived(kind)
     }
 
     /// Gets Ledge's own windows out of the way of a system dialog.
@@ -533,158 +539,6 @@ public final class LedgeCoordinator {
     private func reclaimFront() {
         if settingsWindow?.isVisible == true { settingsWindow?.level = .floating }
         onboarding.setFloating(true)
-    }
-
-    /// How long to keep looking for a permission the user was just sent to
-    /// System Settings to grant.
-    private static let permissionWatchWindow: TimeInterval = 240
-
-    /// Watches for the answer while the user is away in System Settings.
-    ///
-    /// TCC broadcasts nothing, so without this the grant is only noticed when
-    /// Ledge next becomes active — which is the very thing the user cannot do
-    /// without first finding the window. Bounded, and only ever running while
-    /// a request the user made is outstanding and the settings window is up.
-    /// Watches for an answer that arrives somewhere else.
-    ///
-    /// - Parameter onEnd: called however the watch ends — an answer, the
-    ///   window closing, or the four minutes running out. Whatever the row
-    ///   was saying while it waited stops being true at all three.
-    private func watchForPermission(
-        _ kind: PermissionKind,
-        onEnd: (@MainActor () -> Void)? = nil
-    ) {
-        stopWatchingForPermission()
-        permissionWatchEnd = onEnd
-        let before = permissions.status(of: kind)
-        // Automation is read by sending an Apple Event to a player, so it is
-        // asked for less often than the rest, which are local reads.
-        let interval: TimeInterval = kind == .automation ? 2 : 1
-        permissionWatch = Task { @MainActor [weak self] in
-            // Whichever way this ends — an answer, the window closing, the
-            // four minutes running out — the watch stops being "the user is
-            // out granting something". It is what `raiseAfterGrant`
-            // reads, so a watch left standing meant a grant made an hour later
-            // for some other reason could pull the settings window in front of
-            // whatever the user was doing.
-            defer {
-                if !Task.isCancelled {
-                    self?.permissionWatch = nil
-                    self?.permissionWatchEnd = nil
-                    onEnd?()
-                }
-            }
-            for _ in 0..<Int(Self.permissionWatchWindow / interval) {
-                try? await Task.sleep(for: .seconds(interval))
-                guard let self, !Task.isCancelled else { return }
-                guard self.settingsWindow?.isVisible == true || self.onboarding.isVisible else { return }
-                guard self.permissions.status(of: kind) != before else { continue }
-                self.revalidatePermissions()
-                self.sayTheAnswerArrived(for: kind)
-                self.raiseAfterGrant(for: kind)
-                return
-            }
-        }
-    }
-
-    /// A press is waiting for an answer. Returns the token that owns it.
-    ///
-    /// - Parameter handingOff: whether the answer happens in another
-    ///   application. Only then does the notch pick up the thread.
-    @discardableResult
-    private func beganAttempt(for kind: PermissionKind, handingOff: Bool) -> UUID {
-        // One at a time, and the one being replaced is retired here rather
-        // than left for its own ending: that ending is fenced by a token
-        // which is no longer current, so nothing else would ever come back
-        // for it. What exactly that means for the row, the guide and the
-        // notch is decided by `PermissionAttempts`, where it can be read and
-        // tested on its own.
-        let change = PermissionAttempts.replacing(
-            attempt.map { (kind: $0.kind, handedOff: $0.who != nil) },
-            with: kind,
-            handingOff: handingOff,
-            guideShows: settingsModel.handoff?.kind
-        )
-        if let ending = change.endWaitFor { settingsModel.endedWaiting(for: ending) }
-        if change.clearsTheLock { handoffCard.clear() }
-        if change.endsTheGuide { settingsModel.endedHandoff() }
-        let started = PermissionAttempt(
-            kind: kind,
-            who: handingOff ? (onboarding.isVisible ? .tour : .settings) : nil
-        )
-        attempt = started
-        if handingOff {
-            handoffCard.waiting(for: kind.displayName)
-            // macOS shows its one-time Accessibility message at most once in
-            // an app's life and says nothing about having done so, so the
-            // fact that it can still appear is written down here, at the one
-            // press that can raise it.
-            if kind == .accessibility, !preferences.accessibilityWasAsked {
-                preferences.accessibilityWasAsked = true
-                settingsModel.accessibilityWasAskedBefore = true
-            }
-        }
-        return started.token
-    }
-
-    /// One press is over, however it ended: an answer, Stop Waiting, or the
-    /// watch running out.
-    ///
-    /// - Parameter token: which press ended. A watch being *replaced* runs the
-    ///   old one's ending, so without this a second attempt — at another
-    ///   permission, or another go at the same one — would be torn down one
-    ///   line after it began, leaving somebody in System Settings with no
-    ///   guide and nothing in the notch.
-    private func endedAttempt(_ token: UUID) {
-        guard attempt?.token == token else { return }
-        endedCurrentAttempt()
-    }
-
-    /// Ends whatever press is outstanding, whichever it is.
-    private func endedCurrentAttempt() {
-        guard let open = attempt else { return }
-        attempt = nil
-        settingsModel.endedWaiting(for: open.kind)
-        if open.who != nil {
-            handoffCard.clear()
-            settingsModel.endedHandoff()
-        }
-    }
-
-    /// Says a grant landed, in the notch.
-    ///
-    /// Only for a grant somebody went out to get: an answer they are standing
-    /// in front of needs no announcement, and a permission that changed for
-    /// some other reason is not news. Read from this object's own record of
-    /// the press rather than from the model, whose copy has already folded
-    /// itself away by the time the watch gets here — the re-read of the
-    /// permissions is the line before this one.
-    private func sayTheAnswerArrived(for kind: PermissionKind) {
-        guard let open = attempt, open.kind == kind, open.who != nil else { return }
-        // A refusal is the one state Ledge cannot undo. The row says so once,
-        // plainly, and the notch says nothing at all — the lock simply goes,
-        // which the ending after this does.
-        guard permissions.status(of: kind) == .granted else { return }
-        handoffCard.arrived(
-            kind.displayName,
-            detail: PermissionGuideCopy.arrivedDetail(kind),
-            holding: PermissionGuideCopy.arrivalHold(
-                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            )
-        )
-    }
-
-    /// Ends the standing watch and tells whoever started it that it is over.
-    ///
-    /// The row that waits has to stop waiting on every ending, including the
-    /// ones it did not cause: a second permission asked for while the first
-    /// is still out replaces the watch, and Ledge going away takes it with it.
-    private func stopWatchingForPermission() {
-        let end = permissionWatchEnd
-        permissionWatchEnd = nil
-        permissionWatch?.cancel()
-        permissionWatch = nil
-        end?()
     }
 
     /// Which card-switch request is the newest.
@@ -1186,6 +1040,14 @@ public final class LedgeCoordinator {
     }
 
     public func start() {
+        // First, before anything can ask whether Accessibility is on. Asking
+        // the honest way raises macOS's own message, and a new user must meet
+        // that at the press, not before Ledge has shown them anything.
+        MediaKeyInterceptor.hasBeenAsked = preferences.accessibilityWasAsked
+        // Any app's switch can fire this. It only ever prompts a fresh check
+        // that cannot raise macOS's message, so an unrelated switch changes
+        // nothing and a switch for Ledge starts the tap.
+        accessibilityList.start { [weak self] in self?.revalidatePermissions() }
         // Out of the way of launch, and well before anybody can click a tile.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(1200))
@@ -1360,10 +1222,15 @@ public final class LedgeCoordinator {
                 // announcing and a readout draws the HUD, and in both the
                 // lock is merely what is underneath.
                 let restIsOnScreen = self.state.phase == .idle || self.state.phase == .companion
-                if self.permissionWatch != nil,
+                if self.permissionFlow.isWatching,
                    restIsOnScreen,
                    self.restingContent()?.id == HandoffProvider.waitingID {
-                    self.raiseAfterGrant()
+                    self.permissionFlow.grantArrived(nil)
+                    return
+                }
+                // The way back after a grant, for a window with no Dock icon.
+                if self.permissionFlow.isOwedTheFront, restIsOnScreen {
+                    self.permissionFlow.goBackToTheAskingWindow()
                     return
                 }
                 self.send(.clicked)
@@ -1816,6 +1683,7 @@ public final class LedgeCoordinator {
                 // their button back.
                 self?.settingsModel.cameBackFromSystemSettings()
                 self?.reclaimFront()
+                self?.permissionFlow.personCameBack()
             }
         })
 
@@ -3193,6 +3061,7 @@ public final class LedgeCoordinator {
         gestures.start()
         observeInteractionPreferences()
         observeLiveEffectPreferences()
+        permissionCompanion.start()
         observeMediaPreferences()
         observeCalendarChoice()
     }
@@ -3417,6 +3286,8 @@ public final class LedgeCoordinator {
         calendarListSource?.stopWatching()
         calendarListSource = nil
         notesWindow.tearDown()
+        permissionCompanion.stop()
+        accessibilityList.stop()
         greeting?.cancel()
         greeting = nil
         presentation.greeting = false
@@ -3430,13 +3301,11 @@ public final class LedgeCoordinator {
         restingHold = false
         parkedHUDCheck?.cancel()
         parkedHUDCheck = nil
-        stopWatchingForPermission()
+        permissionFlow.stop()
         // A window closing because Ledge is going away is not an answer to
         // the tour. It is the one case the tour *should* come back from.
         onboarding.appIsQuitting()
         tourListeners.removeAll()
-        attempt = nil
-        handoffCard.clear()
         preferences.onReset = {}
         focusBaseline?.stopWatching()
         focusBaseline = nil
@@ -4595,80 +4464,6 @@ public final class LedgeCoordinator {
     /// come back", which is only ever true after a press.
     private var updateCheckInFlight = false
 
-    /// Both permission entry points use the same window and grant lifecycle.
-    private func requestPermission(_ kind: PermissionKind) {
-        // Usually seeded at startup. Also establish a before-reading if an
-        // explicit request is the first entry point, so its grant is a change.
-        if lastPermissionSnapshot.isEmpty { revalidatePermissions() }
-        standAsideForSystemUI()
-        // Accessibility's request *is* a handoff: `AXIsProcessTrustedWithOptions`
-        // puts Ledge in the list and opens that list, and the switch is
-        // flipped there rather than in a prompt. It goes through the request
-        // rather than through the pane alone because only that call puts
-        // Ledge in the list at all.
-        // Every press is an attempt, whether or not it leaves the app: it is
-        // the token, not the permission, that decides whose ending is whose.
-        let token = beganAttempt(for: kind, handingOff: kind.isGrantedInSystemSettings)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            // A press can be overtaken before this task has had a turn —
-            // the attempt is made synchronously, the request is not — and
-            // macOS cannot be asked to take a request back. Accessibility's
-            // opens a System Settings pane, so a stale one sends somebody
-            // towards the permission they have already moved on from.
-            guard self.attempt?.token == token else { return }
-            let status = await self.permissions.request(kind)
-            // Update the snapshot as well as providers, so the next poll does
-            // not treat this same answer as a second grant and restart again.
-            self.revalidatePermissions()
-            // Granting the calendar is the reason to switch the calendar card
-            // on, and anybody who just allowed it did not do it to leave the
-            // card hidden. About the answer rather than about the press, so
-            // it happens whoever owns the attempt by now.
-            if kind == .calendars, status == .granted {
-                self.activities.setProvider("calendar", enabled: true)
-                self.refreshSettingsModel()
-            }
-            // And again on the way back: this press may have been overtaken
-            // while the answer was in flight. Everything below installs a
-            // watch or takes the foreground, either of which would cancel
-            // the newer press's watch or pull the front away from it.
-            guard self.attempt?.token == token else { return }
-            if status == .granted || !kind.isGrantedInSystemSettings {
-                // Location is the exception, and it is an exception twice
-                // over: its request returns as soon as it has *asked*, and
-                // the answer arrives through a delegate. Ending the wait
-                // here would take the spinner away while the dialog is still
-                // up; taking the front back would put Ledge's own window
-                // over that dialog.
-                let stillAsking = !kind.answersBeforeReturning && status == .notDetermined
-                if stillAsking {
-                    self.watchForPermission(kind) { [weak self] in
-                        // Ownership decides the foreground too: a watch whose
-                        // press has been overtaken must not pull the front
-                        // back from whatever replaced it.
-                        guard let self, self.attempt?.token == token else { return }
-                        self.endedAttempt(token)
-                        // The front comes back when the answer does, not
-                        // before it.
-                        self.reclaimFront()
-                    }
-                } else {
-                    // Answered here, whichever way — including the answer
-                    // "nothing changed", which is what macOS declining to
-                    // prompt looks like from here. There is no return from
-                    // System Settings to wait for, and standing aside for a
-                    // dialog that has already closed left the window it was
-                    // asked from sitting among other applications.
-                    self.endedAttempt(token)
-                    self.reclaimFront()
-                }
-            } else {
-                self.watchForPermission(kind) { [weak self] in self?.endedAttempt(token) }
-            }
-        }
-    }
-
     /// Whether anything on this side still needs the helper.
     ///
     /// Checked before the daemon is asked and again after it answers, so a
@@ -4849,17 +4644,15 @@ public final class LedgeCoordinator {
                 return await self.removeKeepAwakeHelper()
             },
             isAccessibilityTrusted: { MediaKeyInterceptor.isTrusted },
-            requestPermission: { [weak self] kind in self?.requestPermission(kind) },
-            openPermissionSettings: { [weak self] kind in
+            requestPermission: { [weak self] kind in
                 guard let self else { return }
-                self.standAsideForSystemUI()
-                let token = self.beganAttempt(for: kind, handingOff: true)
-                self.permissions.openSettings(for: kind)
-                // However this ends — an answer, the window closing, the four
-                // minutes running out — the row stops saying it is waiting
-                // and the notch stops holding the lock.
-                self.watchForPermission(kind) { [weak self] in self?.endedAttempt(token) }
+                // Usually seeded at startup. Also establish a before-reading if
+                // an explicit request is the first entry point, so its grant is
+                // a change.
+                if self.lastPermissionSnapshot.isEmpty { self.revalidatePermissions() }
+                self.permissionFlow.press(kind)
             },
+            openPermissionSettings: { [weak self] in self?.permissionFlow.openSettings(for: $0) },
             // Opening the pane is a third moment worth re-reading at, and it
             // must act on what it finds rather than merely draw it: seeing
             // "Not granted" beside a provider that is still running would be
@@ -4881,34 +4674,31 @@ public final class LedgeCoordinator {
             showOnboarding: { [weak self] in self?.showOnboarding() },
             openSource: { NSWorkspace.shared.open(Self.sourceURL) },
             chooseFocusFolder: { [weak self] in self?.chooseFocusFolder() },
-            stopWaiting: { [weak self] in
-                guard let self else { return }
-                // The one way out that does not depend on System Settings
-                // doing anything. Cancelling the watch runs its own ending,
-                // which is what takes the row's spinner away.
-                self.stopWatchingForPermission()
-                self.endedCurrentAttempt()
-                self.reclaimFront()
-            },
+            stopWaiting: { [weak self] in self?.permissionFlow.stopWaiting() },
             observeNotch: { [weak self] listener in
                 self?.observeNotch(listener) ?? {}
             },
             tourStep: { [weak self] step in self?.tourStepChanged(step) },
-            appTile: { [weak self] in
-                guard let self, let location = self.settingsModel.appLocation else { return nil }
-                return AnyView(AppTile(
-                    url: URL(fileURLWithPath: location),
-                    name: PermissionGuideCopy.tileName,
-                    onDragEnded: { [weak self] outcome in
-                        self?.settingsModel.appDragEnded = outcome
-                    },
-                    onCopyLocation: {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(location, forType: .string)
-                    }
-                ))
-            }
+            appTile: { [weak self] in self?.appTile(worksWithoutKey: false) }
         )
+    }
+
+    /// Ledge's own icon to drag into the list. Nil from a place that does not
+    /// last, where adding it would grant a copy that disappears.
+    private func appTile(worksWithoutKey: Bool) -> AnyView? {
+        guard let location = settingsModel.appLocation else { return nil }
+        return AnyView(AppTile(
+            url: URL(fileURLWithPath: location),
+            name: PermissionGuideCopy.tileName,
+            onDragEnded: { [weak self] outcome in
+                self?.settingsModel.appDragEnded = outcome
+            },
+            onCopyLocation: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(location, forType: .string)
+            },
+            worksWithoutKey: worksWithoutKey
+        ))
     }
 
     /// An `.accessory` app is not in the activation order, so a plain
