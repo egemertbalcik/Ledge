@@ -296,7 +296,7 @@ struct SatelliteTimerLabelTests {
     }
 }
 
-/// The urgency ranking: situational boosts over static ranks.
+/// The urgency ranking: a fixed order, and only news jumps it.
 @Suite("Urgency")
 struct UrgencyTests {
 
@@ -309,7 +309,7 @@ struct UrgencyTests {
         )
     }
 
-    @Test("Playing music outranks a quiet calendar; an imminent meeting outranks playing music")
+    @Test("Music comes before the calendar, playing or paused; a meeting about to start comes before music")
     func situationalOrdering() {
         let playing = make(.nowPlaying(NowPlayingPayload(title: "t", artist: "a", isPlaying: true)), kind: .nowPlaying)
         let paused = make(.nowPlaying(NowPlayingPayload(title: "t", artist: "a", isPlaying: false)), kind: .nowPlaying)
@@ -317,26 +317,25 @@ struct UrgencyTests {
         let imminent = make(.event(EventPayload(title: "Standup", startsIn: 5 * 60, hasEvent: true)), kind: .event)
         let soon = make(.event(EventPayload(title: "Standup", startsIn: 45 * 60, hasEvent: true)), kind: .event)
 
-        #expect(Urgency.score(of: playing) > Urgency.score(of: quietCalendar))
-        #expect(Urgency.score(of: quietCalendar) > Urgency.score(of: paused))
+        #expect(Urgency.score(of: playing) == Urgency.score(of: paused))
+        #expect(Urgency.score(of: paused) > Urgency.score(of: quietCalendar))
+        #expect(Urgency.score(of: soon) == Urgency.score(of: quietCalendar))
         #expect(Urgency.score(of: imminent) > Urgency.score(of: playing))
-        #expect(Urgency.score(of: soon) > Urgency.score(of: playing))
-        #expect(Urgency.score(of: imminent) > Urgency.score(of: soon))
     }
 
-    @Test("A running timer beats music; a finished one beats nearly everything")
+    @Test("A running timer keeps the launcher's place behind music; a finished one beats nearly everything")
     func timerBoosts() {
         let running = make(.timer(TimerPayload(label: "Focus", remaining: 60, total: 300, isRunning: true)), kind: .timer)
         let finished = make(
             .timer(TimerPayload(label: "Focus", remaining: 0, total: 300, isRunning: false, isFinished: true)),
             kind: .timer, priority: ActivityKind.timer.defaultPriority + 25
         )
-        let idle = make(.timer(TimerPayload(label: "Timer", remaining: 300, total: 300, isRunning: false, isIdle: true)), kind: .timer, priority: 18)
+        let idle = make(.timer(TimerPayload(label: "Timer", remaining: 300, total: 300, isRunning: false, isIdle: true)), kind: .timer)
         let playing = make(.nowPlaying(NowPlayingPayload(title: "t", artist: "a", isPlaying: true)), kind: .nowPlaying)
 
-        #expect(Urgency.score(of: running) > Urgency.score(of: playing))
-        #expect(Urgency.score(of: finished) > Urgency.score(of: running))
-        #expect(Urgency.score(of: playing) > Urgency.score(of: idle))
+        #expect(Urgency.score(of: running) == Urgency.score(of: idle))
+        #expect(Urgency.score(of: playing) > Urgency.score(of: running))
+        #expect(Urgency.score(of: finished) > Urgency.score(of: playing))
     }
 
     @Test("Active recording outranks even a finished timer; a pin outranks everything")
@@ -350,11 +349,11 @@ struct UrgencyTests {
         #expect(Urgency.score(of: finished, pinned: .timer) > Urgency.score(of: recording, pinned: .timer))
     }
 
-    @Test("Rain lifts the weather card; a dry forecast leaves it at base")
+    @Test("Rain doesn't move the weather card")
     func weather() {
         let dry = make(.weather(WeatherPayload(temperatureCelsius: 20)), kind: .weather)
         let wet = make(.weather(WeatherPayload(temperatureCelsius: 20, rainSoonMinutes: 20)), kind: .weather)
-        #expect(Urgency.score(of: wet) == Urgency.score(of: dry) + 15)
+        #expect(Urgency.score(of: wet) == Urgency.score(of: dry))
     }
 }
 

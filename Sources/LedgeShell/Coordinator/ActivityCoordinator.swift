@@ -291,6 +291,9 @@ public final class ActivityCoordinator {
     /// were just looking at.
     public func select(_ id: ActivityID) { hub.mutate { $0.select(id) } }
 
+    /// Starts the stack on its first card, for a hover with nothing on screen.
+    public func selectFirst() { hub.mutate { $0.selectFirst() } }
+
     /// Selects an id the moment it lands on the queue — for user actions
     /// whose card arrives asynchronously. Starting a timer from a chip
     /// retracts the ready card and publishes the session across the provider

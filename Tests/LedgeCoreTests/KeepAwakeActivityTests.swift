@@ -151,21 +151,17 @@ struct KeepAwakeActivityTests {
 
     // MARK: - The queue's own order
 
-    @Test("Keep Awake sits one under the timer, and its ending outranks both")
+    @Test("Keep Awake holds its place on or off, and only its ending jumps ahead")
     func priorityOrder() {
-        #expect(ActivityKind.keepAwake.defaultPriority == 44)
-        #expect(ActivityKind.keepAwake.defaultPriority < ActivityKind.timer.defaultPriority)
-        #expect(ActivityKind.keepAwake.defaultPriority > ActivityKind.focus.defaultPriority)
-
         let running = keepAwake(.running, remaining: 3600)
         let finished = keepAwake(.finished(.timeUp))
         let ready = keepAwake(.ready)
-        #expect(Urgency.score(of: ready) == 44)
-        #expect(Urgency.score(of: running) == 64)
-        #expect(Urgency.score(of: finished) == 104)
-        // A running session loses to the running timer it sits under; a
-        // finished one comes ahead of it, because the Mac's power just changed.
-        #expect(Urgency.score(of: running) < Urgency.score(of: timer(idle: false)))
-        #expect(Urgency.score(of: finished) > Urgency.score(of: timer(idle: false)))
+        #expect(Urgency.score(of: ready) == ActivityKind.keepAwake.defaultPriority)
+        #expect(Urgency.score(of: running) == Urgency.score(of: ready))
+        // A finished one comes ahead of everything everyday, because the Mac's
+        // power just changed.
+        #expect(Urgency.score(of: running) < ActivityKind.focus.defaultPriority)
+        #expect(Urgency.score(of: running) > Urgency.score(of: timer(idle: false)))
+        #expect(Urgency.score(of: finished) > ActivityKind.nowPlaying.defaultPriority)
     }
 }

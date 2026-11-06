@@ -3345,6 +3345,11 @@ public final class LedgeCoordinator {
     /// that has to hand its borrowed flag back, the pointer's position at
     /// the moment a readout was asked for.
     private func settleBeforeReducing(_ event: NotchEvent) {
+        // A hover with nothing on screen starts on the first card rather than
+        // the one last read, so what opens doesn't depend on the last visit.
+        if event == .hoverChanged(true), state.phase == .idle {
+            activities.selectFirst()
+        }
         // A collapse can sever a slider drag without its onEnded ever firing —
         // the hosting view is torn down when a display unplugs or repositions
         // mid-drag. Left latched, the flag suppressed every hover exit forever.
@@ -3712,6 +3717,8 @@ public final class LedgeCoordinator {
                             self.activities.select(target)
                         } else if let shown = self.restingContent() {
                             self.activities.select(shown.id)
+                        } else {
+                            self.activities.selectFirst()
                         }
                     } else if self.state.phase == .peek, let peeked = self.presentation.peeked {
                         // An announcement is on screen; opening it is the only

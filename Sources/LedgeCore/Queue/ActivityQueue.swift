@@ -300,6 +300,13 @@ public struct ActivityQueue: Equatable, Sendable {
         eventSteal = nil
     }
 
+    /// Goes back to the front of the order, for a stack opening afresh: it
+    /// starts on the first card rather than the one last read.
+    public mutating func selectFirst() {
+        guard let first = activities.first else { return }
+        select(first.id)
+    }
+
     // MARK: - Expiry
 
     /// Ids whose lifetime has run out at `now`. The shell schedules the actual

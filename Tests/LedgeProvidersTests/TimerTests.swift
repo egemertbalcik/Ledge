@@ -154,7 +154,7 @@ struct TimerProviderStreamTests {
             return
         }
         #expect(activity.id == TimerProvider.idleActivityID)
-        #expect(activity.priority == TimerProvider.idlePriority)
+        #expect(activity.priority == ActivityKind.timer.defaultPriority)
         #expect(activity.expiresAfter == nil)
         guard case .timer(let payload) = activity.payload else {
             Issue.record("expected a timer payload")

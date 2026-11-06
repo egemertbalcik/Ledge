@@ -38,13 +38,6 @@ public final class TimerProvider: ActivityProvider {
     /// leg and fired instantly. The user got the beep and nothing on screen.
     static let finishedActivityID = ActivityID(kind: .timer, source: "finished")
 
-    /// Below everything, weather included (10, +15 when rain is coming).
-    /// The ready card is a launcher, not an announcement — the *last* stop
-    /// in the cycle, never on top. A running or finished session publishes
-    /// under its own id at full timer priority, so only the idle launcher
-    /// sits back here.
-    static let idlePriority = 5
-
     /// How long the "finished" card lingers before it clears itself.
     static let finishedLifetime: TimeInterval = 12
 
@@ -709,7 +702,6 @@ public final class TimerProvider: ActivityProvider {
         let work = durations().length(of: .work)
         continuation?.yield(.publish(Activity(
             id: Self.idleActivityID,
-            priority: Self.idlePriority,
             createdAt: now(),
             // Standing: it is the timer's resting state, not an announcement.
             payload: .timer(TimerPayload(

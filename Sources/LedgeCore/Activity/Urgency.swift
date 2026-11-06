@@ -1,20 +1,16 @@
 import Foundation
 
-/// How much a card matters *right now*.
+/// Where a card goes in the queue.
 ///
-/// The queue used to order cards by a static per-kind rank, which cannot know
-/// that a meeting is five minutes away or that the music is paused. The score
-/// is that rank plus situational boosts read from the payload itself — and
-/// because every provider republishes as its world changes (the calendar each
-/// minute, the player each second), scores refresh with no extra clockwork:
-/// the payload already carries the situation.
+/// Everyday cards keep the fixed order of `ActivityKind.defaultPriority`, so
+/// the order can be learned: music pausing or a keep-awake starting moves
+/// nothing. A card jumps ahead only for news, and only until that news is over.
+/// Every boost here should be expressible as one sentence of the form "X has
+/// just happened, and the user needs to know now".
 ///
-/// Pure and clock-free on purpose: time-dependent facts (startsIn, isPlaying,
-/// rainSoonMinutes) are relative values the providers recompute at each
-/// publish, so the same activity always scores the same — which is what makes
-/// ordering testable and the ranking explainable. Every boost here should be
-/// expressible as one sentence of the form "X is happening, so X's card
-/// matters more".
+/// Pure and clock-free on purpose: time-dependent facts (startsIn) are relative
+/// values the providers recompute at each publish, so the same activity always
+/// scores the same, which is what makes ordering testable and explainable.
 public enum Urgency {
 
     /// A pinned kind outranks every situational boost: the user said "always
@@ -37,38 +33,18 @@ public enum Urgency {
             if payload.cameraActive || payload.micActive { score += 100 }
 
         case .timer(let payload):
-            if payload.isFinished {
-                score += 80
-            } else if !payload.isIdle {
-                score += 40
-            }
+            if payload.isFinished { score += 80 }
 
         case .keepAwake(let payload):
-            switch payload.phase {
             // A session that has ended says something about the Mac's power
-            // that the user did not ask for at that moment, so it outranks
-            // anything merely running — the same shape as the timer's finish.
-            case .finished: score += 60
-            case .running: score += 20
-            case .ready: break
-            }
+            // that the user did not ask for at that moment, the same shape as
+            // the timer's finish. Ready and running stay in their place.
+            if case .finished = payload.phase { score += 60 }
 
         case .event(let payload):
-            if payload.hasEvent {
-                if payload.startsIn <= 15 * 60 {
-                    // Imminent or already under way — this is what the next
-                    // glance at the notch is for (the Join button lives here).
-                    score += 60
-                } else if payload.startsIn <= 60 * 60 {
-                    score += 20
-                }
-            }
-
-        case .nowPlaying(let payload):
-            if payload.isPlaying { score += 30 }
-
-        case .weather(let payload):
-            if payload.rainSoonMinutes != nil { score += 15 }
+            // Imminent or already under way: this is what the next glance at
+            // the notch is for (the Join button lives here).
+            if payload.hasEvent, payload.startsIn <= 15 * 60 { score += 60 }
 
         default:
             break

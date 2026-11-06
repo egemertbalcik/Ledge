@@ -20,8 +20,11 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
 
     /// Default ordering weight. Higher wins a place nearer the front.
     ///
-    /// Transient, interruptive things outrank ambient ones: a device connecting
-    /// is news, whereas what is playing is a standing fact you can cycle to.
+    /// News comes first: a device connecting is something that just happened.
+    /// Everyday cards follow in one fixed order, cards with something to read
+    /// ahead of controls and containers, so moving through them always goes
+    /// the same way. What they are doing does not move them: `Urgency` lets
+    /// only real news jump ahead.
     public var defaultPriority: Int {
         switch self {
         // A recording indicator outranks everything: it is the one card whose
@@ -30,32 +33,25 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .keyboard: 72
         case .message: 70
         // Interruptive and time-bound, like a notification.
-        // A standing container, not news: parked files should be reachable by
-        // cycling, never the first thing the notch shows — at 65 every
-        // screenshot yanked the screen away from whatever mattered.
-        case .shelf: 24
         case .device: 60
         case .power: 55
-        case .event: 50
-        // A running session outranks an ambient Focus card, but a meeting about
-        // to start still wins. The finishing publish overrides this upward.
-        case .timer: 45
-        // One under the timer, because when both are running the countdown is
-        // the one with a deadline the user is waiting on; a keep-awake is a
-        // condition they set and stopped thinking about.
-        case .keepAwake: 44
-        case .focus: 40
-        case .nowPlaying: 30
-        // Ambient by design: a standing widget you cycle to, never something
-        // that pushes in front of actual news.
-        case .weather: 10
-        // A control surface, not information: sound and brightness sliders
-        // for the mouse. Behind weather, ahead of the timer launcher.
-        case .levels: 8
-        // A standing container like the shelf, and quieter still: notes are
-        // only ever news to the person who went looking for them. Nothing
-        // here arrives on its own, so it never competes for the front.
-        case .notes: 6
+
+        // The everyday order. All of it stays under the news above.
+        case .nowPlaying: 50
+        case .event: 48
+        case .weather: 46
+        case .focus: 44
+        // A condition the user set and stopped thinking about, on or off.
+        case .keepAwake: 42
+        case .levels: 40
+        // The launcher and a running session sit in the same place. Only a
+        // finished session is news: see `Urgency`.
+        case .timer: 38
+        case .notes: 36
+        // Parked files should be reachable by moving through the cards, never
+        // the first thing the notch shows. At 65 every screenshot yanked the
+        // screen away from whatever mattered.
+        case .shelf: 34
         }
     }
 }
