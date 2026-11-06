@@ -4,14 +4,13 @@
 # usage: bundle.sh <config> <app-path> [build-dir]
 #
 # <build-dir> is where SwiftPM put the products. It defaults to .build/<config>,
-# which is what a plain `swift build` fills; the universal release build lands
-# in .build/apple/Products/Release instead, and the Makefile passes that. Every
-# piece copied below — executable, dylibs, resource bundles — comes from this
-# one directory, so a stale arm64-only dylib can never ride along with a
-# universal executable.
+# which is what a plain `swift build` fills; the release build lands in
+# .build/arm64-apple-macosx/release, and the Makefile passes that. Every piece
+# copied below — executable, dylibs, resource bundles — comes from this one
+# directory, so a stale dylib from another build can never ride along.
 #
 # LEDGE_DIST=1 builds a distribution bundle: development fixtures are left out,
-# and the result must be universal (arm64 + x86_64) or the script fails.
+# and the result must be arm64 only or the script fails.
 set -euo pipefail
 
 CONFIG="${1:-debug}"
@@ -155,18 +154,19 @@ if [[ "$VERSION" == *-* ]]; then
     echo "SUAutomaticallyUpdate removed ($VERSION is a pre-release)"
 fi
 
-# A distribution bundle must run on both Intel and Apple Silicon. Checked here,
-# on the copies, so an arm64-only executable from a plain `swift build` cannot
-# be shipped by pointing bundle.sh at the wrong directory.
+# A distribution bundle is for Apple Silicon only: no Intel Mac has a notch.
+# Checked here, on the copies, so leftovers from an older universal build cannot
+# be shipped by pointing bundle.sh at the wrong directory. Sparkle.framework is
+# Sparkle's own prebuilt binary and isn't checked.
 if [[ "${LEDGE_DIST:-0}" == "1" ]]; then
     shopt -s nullglob
     for binary in "$APP/Contents/MacOS/Ledge" "$APP"/Contents/MacOS/LedgeKeepAwakeHelper \
                   "$APP"/Contents/Frameworks/*.dylib; do
         [[ -e "$binary" ]] || continue
         ARCHS="$(lipo -archs "$binary")"
-        if [[ "$ARCHS" != *arm64* || "$ARCHS" != *x86_64* ]]; then
-            echo "error: $(basename "$binary") is not universal (archs: $ARCHS)" >&2
-            echo "       distribution needs arm64 + x86_64 — build with 'make release'" >&2
+        if [[ "$ARCHS" != "arm64" ]]; then
+            echo "error: $(basename "$binary") is not arm64 only (archs: $ARCHS)" >&2
+            echo "       distribution is Apple Silicon only — build with 'make release'" >&2
             exit 1
         fi
     done

@@ -37,11 +37,10 @@ TEST_DMG    := $(BUILD_ROOT)/Ledge-$(VERSION)-unnotarized.dmg
 
 XCODE_DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 
-# `swift build` alone emits a native-arch (arm64) binary under .build/release.
-# A universal build needs the Xcode toolchain, and SwiftPM lands its products
-# somewhere else entirely — every piece bundle.sh copies must come from here.
-RELEASE_ARCHS     := --arch arm64 --arch x86_64
-RELEASE_BUILD_DIR := .build/apple/Products/Release
+# Apple Silicon only: every Mac with a notch has it, and no Intel Mac has a notch.
+# Every piece bundle.sh copies must come from this one directory.
+RELEASE_ARCHS     := --arch arm64
+RELEASE_BUILD_DIR := .build/arm64-apple-macosx/release
 
 # Every GitHub release uploads the DMG, appcast.xml and any .delta files under
 # this exact tag, so enclosure URLs stay valid after later releases. The feed
@@ -100,10 +99,10 @@ identity:
 	@echo "selected: $(SIGN_ID)"
 	@test -d $(APP) && codesign -dvvv $(APP) 2>&1 | grep -E 'Identifier|Authority|Signature' || true
 
-## Distribution build: universal (arm64 + x86_64), optimized, no dev fixtures,
-## hardened runtime, secure timestamps. Signed with Developer ID when one
-## exists. bundle.sh refuses a non-universal result under LEDGE_DIST=1; the
-## lipo lines below just make the arches visible in the build log.
+## Distribution build: Apple Silicon, optimized, no dev fixtures, hardened
+## runtime, secure timestamps. Signed with Developer ID when one exists.
+## bundle.sh refuses anything but arm64 under LEDGE_DIST=1; the lipo lines
+## below just make the arches visible in the build log.
 release:
 	@test -f build/AppIcon.icns || swift Scripts/makeicon.swift
 	DEVELOPER_DIR=$(XCODE_DEVELOPER_DIR) swift build -c release $(RELEASE_ARCHS)
@@ -132,6 +131,8 @@ notarize: release
 ## — the app's feed URL reads latest/download/appcast.xml, which GitHub
 ## redirects to whichever release is newest. CFBundleVersion is stamped from
 ## the git commit count by bundle.sh, so it rises on its own.
+## The feed is trimmed by hand afterwards: run Scripts/check-appcast.sh on the
+## trimmed file again before uploading it.
 
 
 appcast:
@@ -140,6 +141,7 @@ appcast:
 	        { echo "error: $$dmg is not notarized — run 'make notarize' first" >&2; exit 1; }; done
 	@./.build/artifacts/sparkle/Sparkle/bin/generate_appcast \
 	    --download-url-prefix $(RELEASE_URL_PREFIX) $(DIST_DIR)
+	@./Scripts/check-appcast.sh $(DIST_DIR)/appcast.xml
 	@echo "appcast at $(DIST_DIR)/appcast.xml"
 
 ## Install to /Applications, not ~/Applications.
