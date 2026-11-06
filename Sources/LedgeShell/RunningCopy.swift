@@ -63,9 +63,10 @@ public enum RunningCopy {
         return theirs < ours
     }
 
-    /// The first build that answers a `CopyReplacement`. Earlier ones treat
-    /// being asked to quit as any other quit, which ends a Keep Awake session.
-    public static let firstBuildAnsweringReplacement = 423
+    /// The first build that answers a `CopyReplacement`: the commit that added
+    /// it. Earlier ones treat being asked to quit as any other quit, which ends
+    /// a Keep Awake session.
+    public static let firstBuildAnsweringReplacement = 426
 
     /// Whether this running copy leaves its Keep Awake session for the new copy
     /// to resume. The hold itself is let go in between, as in an update.

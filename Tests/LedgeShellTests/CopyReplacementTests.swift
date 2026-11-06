@@ -345,7 +345,7 @@ struct CopyReplacementTests {
         let old = OldCopy()
         var slept = 0
         let outcome = await replacement(road).run(
-            rivals: [old.rival(build: "422")], alreadyWarned: true, askAnyway: { _ in false },
+            rivals: [old.rival(build: "425")], alreadyWarned: true, askAnyway: { _ in false },
             sleep: { _ in slept += 1 }
         )
         #expect(outcome == .waitForExit)
@@ -355,7 +355,7 @@ struct CopyReplacementTests {
 
     /// The caller's half of the coverage gap: a new enough build is waited for,
     /// going through the same classification the app uses.
-    @Test("A new enough build is waited for", arguments: ["423", "500"])
+    @Test("A new enough build is waited for", arguments: ["426", "500"])
     func newEnough(build: String) async {
         let road = Road()
         let old = OldCopy()
@@ -375,7 +375,7 @@ struct CopyReplacementTests {
         let old = OldCopy()
         old.refusesQuit = true
         let outcome = await replacement(road).run(
-            rivals: [old.rival(build: "422")], alreadyWarned: true, askAnyway: { _ in true }
+            rivals: [old.rival(build: "425")], alreadyWarned: true, askAnyway: { _ in true }
         )
         #expect(outcome == .handOff)
     }
@@ -388,7 +388,7 @@ struct CopyReplacementTests {
         defer { answering.listener?.stop() }
         let old = OldCopy(pid: 42)
         let outcome = await replacement(road).run(
-            rivals: [answering.rival(), old.rival(build: "422")], alreadyWarned: true, askAnyway: { _ in false }
+            rivals: [answering.rival(), old.rival(build: "425")], alreadyWarned: true, askAnyway: { _ in false }
         )
         #expect(outcome == .waitForExit)
         #expect(answering.quitsFromOutside == 0)

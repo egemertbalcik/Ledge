@@ -87,9 +87,9 @@ struct RunningCopyDecisionTests {
 
     /// Only a copy known to answer the replacement signal keeps its session.
     @Test("Whether Keep Awake carries on depends on the running build", arguments: [
-        ("/Applications/Ledge.app", String?("423"), true),
+        ("/Applications/Ledge.app", String?("426"), true),
         ("/Applications/Ledge.app", String?("500"), true),
-        ("/Applications/Ledge.app", String?("422"), false),
+        ("/Applications/Ledge.app", String?("425"), false),
         ("/Applications/Ledge.app", String?("414"), false),
         ("/Applications/Ledge.app", String?.none, false),
         ("/Applications/Ledge.app", String?("1.2.5"), false),
@@ -116,8 +116,8 @@ struct RunningCopyDecisionTests {
     }
 
     @Test("It's worth waiting for an answer from a new enough build or one that can't be read", arguments: [
-        ("/Applications/Ledge.app", String?("423"), true),
-        ("/Applications/Ledge.app", String?("422"), false),
+        ("/Applications/Ledge.app", String?("426"), true),
+        ("/Applications/Ledge.app", String?("425"), false),
         ("/Applications/Ledge.app", String?.none, false),
         ("/Users/someone/Downloads/Ledge.app", String?("1"), true),
     ])

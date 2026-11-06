@@ -212,7 +212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             alert.informativeText = "Quit it and open this one?"
         }
         if !keepAwakeCarriesOn(rivals) {
-            alert.informativeText += " If Keep Awake is running there, it will stop."
+            // Same path: it may be a build that keeps the session, and there's
+            // no way to know until it answers.
+            alert.informativeText += " If Keep Awake is running there, it may stop."
         }
         alert.addButton(withTitle: "Quit and Open")
         alert.addButton(withTitle: "Not Now")
