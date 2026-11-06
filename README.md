@@ -4,7 +4,7 @@
 
 **Your MacBook's notch, put to work.**
 
-Ledge is a free, open-source notch app for MacBook on macOS 26.
+Ledge is a free, open-source notch app for MacBook on macOS 15 or later.
 
 You already look up there. Ledge puts what you're checking anyway — the song,
 the timer, the next meeting — in the black bar you've been ignoring so far.
@@ -16,7 +16,7 @@ Quiet when nothing is happening, there the moment something is.
 [ledgeapp.dev](https://ledgeapp.dev) · free · open source · no account
 
 <a href="https://github.com/egemertbalcik/Ledge/releases/latest"><img src="https://img.shields.io/github/v/release/egemertbalcik/Ledge?label=release&color=0071e3" alt="Latest release"></a>
-<img src="https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white" alt="macOS 26 or later">
+<img src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white" alt="macOS 15 or later">
 <a href="#install"><img src="https://img.shields.io/badge/Homebrew-egemertbalcik%2Ftap%2Fledge-FBB040?logo=homebrew&logoColor=white" alt="Install with Homebrew: brew install --cask egemertbalcik/tap/ledge"></a>
 <a href="LICENSE"><img src="https://img.shields.io/github/license/egemertbalcik/Ledge?color=555" alt="License: GPL-3.0"></a>
 
@@ -32,7 +32,7 @@ MacBook. It turns the notch into a live status area, like the iPhone's
 timer, your next meeting with a camera mirror on the Join button, weather,
 notes, [Keep Awake](https://ledgeapp.dev/keep-awake/) (lid closed too), AirPods
 battery, plus volume and brightness readouts. It needs a MacBook with a notch on
-macOS 26 or later. It ships signed and notarized, has no account or telemetry
+macOS 15 or later. It ships signed and notarized, has no account or telemetry
 and records no audio or screen.
 
 ---
@@ -178,7 +178,7 @@ brew install --cask egemertbalcik/tap/ledge
 ```
 
 **You'll need** a MacBook with a notch — the 14- or 16-inch Pro from 2021, the
-Air from 2022 — on macOS 26 or later. Ledge draws on that display and nowhere
+Air from 2022 — on macOS 15 or later. Ledge draws on that display and nowhere
 else, on purpose: external monitors come in every shape, and a silhouette cut
 for the notch wouldn't be the same app on them.
 
