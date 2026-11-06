@@ -28,6 +28,21 @@ if [[ ! -x "$BUILD_DIR/Ledge" ]]; then
     exit 1
 fi
 
+# A distribution build is numbered by the commit count and compiled from the
+# working tree, so uncommitted work ships under the number of a commit that
+# doesn't contain it. The next build from that same commit then gets the same
+# number, and Sparkle never offers it. LEDGE_ALLOW_DIRTY=1 is for a build that
+# stays on this Mac or goes to a tester, never for a release.
+if [[ "${LEDGE_DIST:-0}" == "1" && "${LEDGE_ALLOW_DIRTY:-0}" != "1" ]]; then
+    DIRTY="$(git -C "$ROOT" status --porcelain -- Sources Bundle Scripts Package.swift Package.resolved 2>/dev/null || true)"
+    if [[ -n "$DIRTY" ]]; then
+        echo "error: uncommitted changes would ship in this build, under the number of a commit without them:" >&2
+        echo "$DIRTY" | head -20 >&2
+        echo "       commit them first, or set LEDGE_ALLOW_DIRTY=1 for a build that won't be released" >&2
+        exit 1
+    fi
+fi
+
 rm -rf "$APP"
 mkdir -p "$(dirname "$APP")"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
