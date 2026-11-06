@@ -62,8 +62,8 @@ struct UpdaterLaunchTests {
         // at once; a copy that agreed is never handed off to, because it would
         // show Settings on its way out and leave nothing running.
         let replacing = try Self.body(of: "private func replace(", in: delegate)
-        let refused = try #require(replacing.range(of: "guard RunningCopy.allAgreedToQuit(accepted) else {"))
-        let fallback = try #require(replacing.range(of: "handOff()"))
+        let refused = try #require(replacing.range(of: "guard outcome == .waitForExit else {"))
+        let fallback = try #require(replacing[refused.upperBound...].range(of: "handOff()"))
         let waiting = try #require(replacing.range(of: "RunningCopy.waitForExit("))
         let carryOn = try #require(replacing.range(of: "self.continueLaunching()"))
         #expect(refused.upperBound <= fallback.lowerBound)

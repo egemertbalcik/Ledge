@@ -85,6 +85,28 @@ struct RunningCopyDecisionTests {
         #expect(read.count == 0)
     }
 
+    /// Only a copy known to answer the replacement signal keeps its session.
+    @Test("Whether Keep Awake carries on depends on the running build", arguments: [
+        ("/Applications/Ledge.app", String?("423"), true),
+        ("/Applications/Ledge.app", String?("500"), true),
+        ("/Applications/Ledge.app", String?("422"), false),
+        ("/Applications/Ledge.app", String?("414"), false),
+        ("/Applications/Ledge.app", String?.none, false),
+        ("/Applications/Ledge.app", String?("1.2.5"), false),
+        // At our own path the plist is ours, whatever it says.
+        ("/Users/someone/Downloads/Ledge.app", String?("500"), false),
+    ])
+    func keepsKeepAwake(path: String, build: String?, keeps: Bool) {
+        #expect(RunningCopy.keepsKeepAwake(
+            running: URL(fileURLWithPath: path), runningBuild: build, own: Self.own
+        ) == keeps)
+    }
+
+    @Test("A copy with no location gets the warning")
+    func noLocationGetsTheWarning() {
+        #expect(!RunningCopy.keepsKeepAwake(running: nil, runningBuild: "500", own: Self.own))
+    }
+
     /// A copy that refused is staying: waiting for it would ask forever.
     @Test("Every copy has to agree to quit", arguments: [
         ([true], true), ([true, true], true), ([true, false], false), ([false], false), ([], false),
@@ -93,13 +115,26 @@ struct RunningCopyDecisionTests {
         #expect(RunningCopy.allAgreedToQuit(accepted) == waits)
     }
 
+    @Test("It's worth waiting for an answer from a new enough build or one that can't be read", arguments: [
+        ("/Applications/Ledge.app", String?("423"), true),
+        ("/Applications/Ledge.app", String?("422"), false),
+        ("/Applications/Ledge.app", String?.none, false),
+        ("/Users/someone/Downloads/Ledge.app", String?("1"), true),
+    ])
+    func mayAnswer(path: String, build: String?, may: Bool) {
+        #expect(RunningCopy.mayAnswerReplacement(
+            running: URL(fileURLWithPath: path), runningBuild: build, own: Self.own
+        ) == may)
+    }
+
     @Test("Waiting ends as soon as the copies have gone")
     func waitEndsOnExit() async {
+        let clock = FakeClock()
         let polls = Counter()
         let gone = await RunningCopy.waitForExit(
-            deadline: .seconds(30), poll: .milliseconds(100),
+            deadline: .seconds(30), poll: .milliseconds(100), now: clock.read,
             allTerminated: { polls.count >= 3 },
-            sleep: { _ in polls.bump() }
+            sleep: { polls.bump(); clock.advance($0) }
         )
         #expect(gone)
         #expect(polls.count == 3)
@@ -107,14 +142,42 @@ struct RunningCopyDecisionTests {
 
     @Test("Waiting gives up at the deadline, not before")
     func waitGivesUp() async {
+        let clock = FakeClock()
         let polls = Counter()
         let gone = await RunningCopy.waitForExit(
-            deadline: .seconds(30), poll: .milliseconds(100),
+            deadline: .seconds(30), poll: .milliseconds(100), now: clock.read,
             allTerminated: { false },
-            sleep: { _ in polls.bump() }
+            sleep: { polls.bump(); clock.advance($0) }
         )
         #expect(!gone)
         #expect(polls.count == 300)
+    }
+
+    /// A busy main actor serves a 100 ms poll seconds late. Counting polls ran
+    /// on well past the time the person was promised an answer by.
+    @Test("A poll served late counts for the time it took")
+    func latePollsCount() async {
+        let clock = FakeClock()
+        let polls = Counter()
+        let gone = await RunningCopy.waitForExit(
+            deadline: .seconds(30), poll: .milliseconds(100), now: clock.read,
+            allTerminated: { false },
+            sleep: { _ in polls.bump(); clock.advance(.seconds(31)) }
+        )
+        #expect(!gone)
+        #expect(polls.count == 1)
+    }
+
+    @Test("Going during the last poll still counts as gone")
+    func goneDuringLastPoll() async {
+        let clock = FakeClock()
+        let polls = Counter()
+        let gone = await RunningCopy.waitForExit(
+            deadline: .seconds(30), poll: .milliseconds(100), now: clock.read,
+            allTerminated: { polls.count >= 1 },
+            sleep: { _ in polls.bump(); clock.advance(.seconds(31)) }
+        )
+        #expect(gone)
     }
 
     /// Longer than a quit that ends a Keep Awake session can take: three
@@ -127,6 +190,12 @@ struct RunningCopyDecisionTests {
     private final class Counter: @unchecked Sendable {
         private(set) var count = 0
         func bump() { count += 1 }
+    }
+
+    private final class FakeClock: @unchecked Sendable {
+        private var current = ContinuousClock.now
+        func advance(_ by: Duration) { current += by }
+        var read: () -> ContinuousClock.Instant { { self.current } }
     }
 }
 

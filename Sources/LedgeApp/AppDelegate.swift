@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A second copy asks the running one to show Settings before it
         // exits, so double-clicking Ledge.app again is never a silent no-op.
         observeShowSettingsRequests()
+        observeReplacement()
         guard offerMoveToApplicationsIfNeeded() else { return }
         startNormally()
     }
@@ -210,13 +211,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default:
             alert.informativeText = "Quit it and open this one?"
         }
+        if !keepAwakeCarriesOn(rivals) {
+            alert.informativeText += " If Keep Awake is running there, it will stop."
+        }
         alert.addButton(withTitle: "Quit and Open")
         alert.addButton(withTitle: "Not Now")
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    /// Asks the older copies to quit, then carries on launching. They quit the
+    private func keepAwakeCarriesOn(_ rivals: [NSRunningApplication]) -> Bool {
+        rivals.allSatisfy { rival in
+            RunningCopy.keepsKeepAwake(
+                running: rival.bundleURL,
+                runningBuild: Self.build(of: rival),
+                own: Bundle.main.bundleURL
+            )
+        }
+    }
+
+    private static func build(of rival: NSRunningApplication) -> String? {
+        rival.bundleURL.flatMap { Bundle(url: $0) }?.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    }
+
+    /// Asks the older copies to go, then carries on launching. They quit the
     /// ordinary way, so whatever they owe the disk is written first.
     ///
     /// Never hands off to a copy that has agreed to quit: it would show
@@ -226,13 +244,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// wants to keep waiting.
     private func replace(_ rivals: [NSRunningApplication]) {
         Self.log.notice("an older instance is running — asking it to quit")
-        let accepted = rivals.map { $0.terminate() }
-        guard RunningCopy.allAgreedToQuit(accepted) else {
-            Self.log.error("the older instance would not quit")
-            handOff()
-            return
+        let replacement = CopyReplacement(names: Self.replacementNames, channel: .distributed)
+        let copies = rivals.map { rival in
+            CopyReplacement.Rival(
+                pid: rival.processIdentifier,
+                running: rival.bundleURL,
+                runningBuild: Self.build(of: rival),
+                own: Bundle.main.bundleURL,
+                quit: { rival.terminate() },
+                isGone: { rival.isTerminated }
+            )
         }
+        let warned = !keepAwakeCarriesOn(rivals)
         Task { @MainActor in
+            let outcome = await replacement.run(
+                rivals: copies,
+                alreadyWarned: warned,
+                askAnyway: { self.askToQuitWithoutAnAnswer(isSettled: $0) }
+            )
+            guard outcome == .waitForExit else {
+                Self.log.error("the older instance would not quit")
+                self.handOff()
+                return
+            }
             while !(await RunningCopy.waitForExit(
                 allTerminated: { rivals.allSatisfy(\.isTerminated) },
                 sleep: { try? await Task.sleep(for: $0) }
@@ -245,6 +279,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.continueLaunching()
         }
+    }
+
+    /// The older copy can keep Keep Awake going but hasn't answered. Its main
+    /// thread is stuck, so a quit from outside would end the session.
+    ///
+    /// Takes itself down if the answer comes after all: the question is over.
+    private func askToQuitWithoutAnAnswer(isSettled: @escaping @MainActor () -> Bool) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "The other copy of Ledge is not answering"
+        alert.informativeText = "Quit it anyway and open this one? If Keep Awake is running there, it will stop."
+        alert.addButton(withTitle: "Quit and Open")
+        alert.addButton(withTitle: "Not Now")
+        let watch = Timer(timeInterval: 0.25, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if isSettled() { NSApp.abortModal() }
+            }
+        }
+        RunLoop.main.add(watch, forMode: .modalPanel)
+        defer { watch.invalidate() }
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// The older copy agreed to quit and has not yet. Stop leaves it to finish
@@ -276,6 +331,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "\(Bundle.main.bundleIdentifier ?? "com.egemert.ledge").showSettings"
     )
     private var showSettingsToken: (any NSObjectProtocol)?
+
+    private static let replacementNames = ReplacementNames(
+        bundleIdentifier: Bundle.main.bundleIdentifier ?? "com.egemert.ledge"
+    )
+    private var replacementListener: ReplacementListener?
+
+    /// A newer copy asks this one to go. A copy that hasn't started has nothing
+    /// to carry over, so it only goes.
+    private func observeReplacement() {
+        let listener = ReplacementListener(
+            names: Self.replacementNames,
+            channel: .distributed,
+            markSession: { [weak self] in
+                guard let self, self.started else { return }
+                self.coordinator.beingReplacedByNewerCopy()
+            },
+            quit: { NSApp.terminate(nil) }
+        )
+        listener.start()
+        replacementListener = listener
+    }
 
     private func observeShowSettingsRequests() {
         showSettingsToken = DistributedNotificationCenter.default().addObserver(

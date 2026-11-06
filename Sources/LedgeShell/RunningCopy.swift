@@ -63,6 +63,33 @@ public enum RunningCopy {
         return theirs < ours
     }
 
+    /// The first build that answers a `CopyReplacement`. Earlier ones treat
+    /// being asked to quit as any other quit, which ends a Keep Awake session.
+    public static let firstBuildAnsweringReplacement = 423
+
+    /// Whether this running copy leaves its Keep Awake session for the new copy
+    /// to resume. The hold itself is let go in between, as in an update.
+    ///
+    /// Only a build that can be read and is new enough. At the same path the
+    /// plist on disk is ours and says nothing about the one running, so that
+    /// gets the warning too: a warning that wasn't needed costs nothing.
+    public static func keepsKeepAwake(running: URL?, runningBuild: @autoclosure () -> String?, own: URL) -> Bool {
+        guard let running,
+              running.resolvingSymlinksInPath().path != own.resolvingSymlinksInPath().path,
+              let build = runningBuild().flatMap({ Int($0) })
+        else { return false }
+        return build >= firstBuildAnsweringReplacement
+    }
+
+    /// Whether it is worth waiting for this copy to answer. At the same path
+    /// its build can't be read, so it might.
+    public static func mayAnswerReplacement(running: URL?, runningBuild: @autoclosure () -> String?, own: URL) -> Bool {
+        guard let running else { return false }
+        if running.resolvingSymlinksInPath().path == own.resolvingSymlinksInPath().path { return true }
+        guard let build = runningBuild().flatMap({ Int($0) }) else { return false }
+        return build >= firstBuildAnsweringReplacement
+    }
+
     /// Whether every copy that was asked to quit said it would.
     ///
     /// One refusal is enough to hand off: that copy is staying, and waiting
@@ -80,20 +107,33 @@ public enum RunningCopy {
 
     /// Waits until every copy has gone, or the deadline passes.
     ///
-    /// Time is counted in polls rather than read from a clock so the wait can
-    /// be tested without waiting. `sleep` is the only thing that takes time.
     /// Runs on the caller's actor, so the checks it is handed can read
     /// main-actor state without being sent anywhere.
     public static func waitForExit(isolation: isolated (any Actor)? = #isolation,
                                    deadline: Duration = exitDeadline,
                                    poll: Duration = .milliseconds(100),
+                                   now: () -> ContinuousClock.Instant = { ContinuousClock.now },
                                    allTerminated: () -> Bool,
                                    sleep: (Duration) async -> Void) async -> Bool {
-        var waited: Duration = .zero
-        while !allTerminated() {
-            guard waited < deadline else { return false }
+        await wait(until: allTerminated, deadline: deadline, poll: poll, now: now, sleep: sleep)
+    }
+
+    /// Polls until the condition holds or the deadline passes.
+    ///
+    /// Real time, read from a clock: a poll can take far longer than it asked
+    /// for when the main actor is busy, and a count of polls would run on past
+    /// the deadline. The last look comes after the last sleep, so something
+    /// that finished during it still counts.
+    static func wait(isolation: isolated (any Actor)? = #isolation,
+                     until condition: () -> Bool,
+                     deadline: Duration,
+                     poll: Duration,
+                     now: () -> ContinuousClock.Instant,
+                     sleep: (Duration) async -> Void) async -> Bool {
+        let started = now()
+        while !condition() {
+            guard now() - started < deadline else { return false }
             await sleep(poll)
-            waited += poll
         }
         return true
     }
