@@ -213,7 +213,7 @@ public final class VolumeController {
     /// an output has no sound, and the hardware mute cannot carry them: a
     /// device at a clamped logical zero is silent without the user having
     /// muted anything, and restoring it through the user-mute path would hand
-    /// them back the red pill they never pressed.
+    /// them back a mute they never pressed.
     public nonisolated static func restoreReasons(_ reasons: MuteReasons,
                                                   for device: AudioObjectID) {
         intents.withLock { $0.set(reasons, for: device) }

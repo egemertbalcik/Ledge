@@ -52,7 +52,7 @@ public struct CoreAudioLidOutput: LidAudioOutput {
     /// Two things were wrong with going through `VolumeController.apply(muted:)`
     /// here. It sets the *user's* mute intent, so a device that was silent
     /// only because its level was zero came back as a device the user had
-    /// muted — the red pill, which they never pressed. And it reported the
+    /// muted — the mute readout, for a key they never pressed. And it reported the
     /// set operation's status rather than the device's: an acknowledged but
     /// ineffective unmute answered `.master` while the output stayed silent,
     /// and the conserver discarded the only record of it.

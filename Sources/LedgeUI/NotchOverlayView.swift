@@ -8,8 +8,16 @@ import SwiftUI
 @Observable
 public final class NotchPresentation {
     public var phase: NotchPhase = .idle {
-        didSet { if phase != oldValue { noteWhereTheIslandIsHeading() } }
+        didSet {
+            guard phase != oldValue else { return }
+            previousPhase = oldValue
+            noteWhereTheIslandIsHeading()
+        }
     }
+
+    /// Where the phase came from, for the spring that carries the shape away
+    /// from it. Read only together with `phase`, so it is not observed.
+    @ObservationIgnored public private(set) var previousPhase: NotchPhase = .idle
     public var selected: Activity? {
         didSet { if selected?.id != oldValue?.id { noteWhereTheIslandIsHeading() } }
     }
@@ -765,7 +773,9 @@ public struct NotchOverlayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .environment(\.waveformAnimationsEnabled, !presentation.screensAreDark)
         .animation(
-            Motion.expand(
+            Motion.phaseChange(
+                from: presentation.previousPhase,
+                to: phase,
                 response: preferences.springResponse,
                 damping: preferences.springDamping,
                 reduced: reduceMotion
@@ -960,18 +970,20 @@ public struct NotchOverlayView: View {
                     }
                     .transition(.opacity)
                 } else {
-                    HUDEarsView(
+                    // Nothing here may change identity with the reading: a
+                    // held key has to retarget the level spring, not restart
+                    // the arrival sixteen times.
+                    HUDRowView(
                         readout: readout,
-                        cutoutWidth: geometry.notchSize.width,
-                        inset: preferences.gutterRadius,
-                        contentOffset: preferences.hudContentOffset,
+                        metrics: HUDRowMetrics(
+                            geometry: geometry,
+                            bodyWidth: layout.bodySize.width,
+                            contentOffset: preferences.hudContentOffset
+                        ),
                         glowing: preferences.hudGlowBar
                     )
-                    // The same dissolve the ears use, so music giving way to a
-                    // volume or brightness readout reads like the music-to-
-                    // keyboard swap rather than a hard cut. Both live in the
-                    // same strip at the same size; only the contents differ.
-                    .transition(Motion.earSwap(reduced: reduceMotion))
+                    .padding(.top, geometry.notchSize.height)
+                    .transition(Motion.hudRow(reduced: reduceMotion))
                 }
             }
 

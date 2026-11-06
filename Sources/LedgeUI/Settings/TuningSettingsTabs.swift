@@ -202,12 +202,12 @@ struct TuningSettingsTab: View {
                     .searchRow("hudGlowBar", highlighted: highlighted)
                 LabeledSlider(
                     "Glyph & bar offset", value: $preferences.hudContentOffset,
-                    in: -30...30, format: "%.0f"
+                    in: HUDRowMetrics.offsetRange, format: "%.0f"
                 )
             } header: {
                 Text("Readout layout")
             } footer: {
-                SettingsNote("Nudge the glyph and bar horizontally. Positive moves both inward toward the notch; negative toward the edges.")
+                SettingsNote("Nudge the glyph and bar horizontally. Positive moves both in from the edges, which shortens the bar; negative moves them out.")
             }
 
             Section {

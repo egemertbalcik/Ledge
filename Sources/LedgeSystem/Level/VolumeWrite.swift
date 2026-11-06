@@ -252,7 +252,7 @@ extension VolumeHardware {
 /// scalar actually landed, because unmuting into a level that was refused
 /// means the old, louder one comes back.
 ///
-/// None of that reaches the interface as a mute: the red state follows the
+/// None of that reaches the interface as a mute: the muted state follows the
 /// user's own mute, which `VolumeMuteState` holds apart from the silence.
 ///
 /// Five call sites used to do a version of this each: none muted at zero, and

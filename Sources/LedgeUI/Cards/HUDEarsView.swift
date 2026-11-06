@@ -1,31 +1,25 @@
 import LedgeCore
 import SwiftUI
 
-/// The level readout, drawn in the ears either side of the cutout: a glyph on
-/// one side, a short bar on the other. No label and no number — the system's
-/// own HUD is a glyph and a bar, and this matches it.
+/// The level readout: one row under the cutout, the glyph on the left and a
+/// long segmented bar beside it. No label and no number.
 ///
-/// Muted is a distinct state: the glyph sits in a red capsule, echoing the
-/// iPhone's silent-mode indicator, and the bar is dimmed.
-public struct HUDEarsView: View {
+/// Muted is told by the glyph alone: the struck speaker and an empty bar, in
+/// plain white, against a plain speaker and an empty bar at a level of zero.
+/// Those are different statements and stay different. The level is kept
+/// underneath a mute and comes back with it.
+public struct HUDRowView: View {
 
     private let readout: HUDReadout
-    private let cutoutWidth: CGFloat
-    private let inset: CGFloat
-    private let contentOffset: CGFloat
+    private let metrics: HUDRowMetrics
     private let glowing: Bool
 
-    public init(
-        readout: HUDReadout,
-        cutoutWidth: CGFloat,
-        inset: CGFloat,
-        contentOffset: CGFloat = 0,
-        glowing: Bool = false
-    ) {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    public init(readout: HUDReadout, metrics: HUDRowMetrics, glowing: Bool = false) {
         self.readout = readout
-        self.cutoutWidth = cutoutWidth
-        self.inset = inset
-        self.contentOffset = contentOffset
+        self.metrics = metrics
         self.glowing = glowing
     }
 
@@ -39,48 +33,12 @@ public struct HUDEarsView: View {
         }
     }
 
-    /// One point further from the ear's outer edge, for the bar alone.
-    ///
-    /// The glyph and the bar are mirrored about the cutout and share an
-    /// offset, which is right for keeping them balanced and wrong for this:
-    /// the bar reads a point too close to the shape's trailing edge, and
-    /// moving the pair would take the glyph with it. By the owner's eye, and
-    /// only the bar moves — the island keeps its width.
-    static let barNudge: CGFloat = 1
-
-    /// The same inward nudge the companion ears take, and for the same reason:
-    /// a narrower ear centres its content in less room, which would eat half
-    /// the outer margin. All of a narrowing comes off the gap beside the
-    /// cutout instead. See `NotchLayout.referenceEarWidth`.
-    static var inwardNudge: CGFloat {
-        max(0, (NotchLayout.referenceEarWidth - NotchLayout.hudEarWidth) / 2)
-    }
-
     public var body: some View {
-        HStack(spacing: 0) {
-            // A positive offset moves both toward the cutout: the glyph right,
-            // the bar left, so the two stay mirrored. User-tunable.
-            // Clamped: the stored offset is only slider-bounded, and NaN or a
-            // huge value in a transform draws the content off-screen or not at
-            // all.
-            let safeOffset = (contentOffset.isFinite
-                ? min(max(contentOffset, -60), 60) : 0) + Self.inwardNudge
-            leading
-                .frame(maxWidth: .infinity, alignment: .center)
-                .offset(x: safeOffset)
-
-            Color.clear.frame(width: cutoutWidth)
-
-            trailing
-                .frame(maxWidth: .infinity, alignment: .center)
-                .offset(x: -(safeOffset + Self.barNudge))
+        ZStack(alignment: .topLeading) {
+            glyph
+            bar
         }
-        // Only a small safety margin off the rounded corners. A large outer
-        // padding would shove the glyph and bar toward the cutout; keeping it
-        // small lets `.center` sit each one in the true middle of its ear.
-        .padding(.horizontal, 4)
-        .animation(Motion.levelChange, value: readout.level)
-        .animation(Motion.medium, value: isMuted)
+        .frame(width: metrics.bodyWidth, height: metrics.height, alignment: .topLeading)
         // Glyph and bar are one readout: a single element beats VoiceOver
         // landing on an unlabelled image and then a bare shape.
         .accessibilityElement(children: .ignore)
@@ -88,39 +46,80 @@ public struct HUDEarsView: View {
         .accessibilityValue(isMuted ? "Muted" : "\(Int((readout.level * 100).rounded())) percent")
     }
 
-    @ViewBuilder
-    private var leading: some View {
-        if isMuted {
-            // The muted glyph rides in a red capsule, the way iOS shows silent
-            // mode — a splash of colour instead of a bar.
-            Image(systemName: readout.symbolName)
-                .font(.cardControl)
-                .foregroundStyle(.white)
-                .padding(.horizontal, 11)
-                .frame(height: 20)
-                .background(Color.red, in: Capsule())
-        } else {
-            // A plain cross-fade between glyphs, not the symbol "replace" effect
-            // that shrinks the old icon to a point first — the user wants the new
-            // level glyph to simply fade in when a threshold is crossed.
-            Image(systemName: readout.symbolName)
-                .font(.cardTitle)
-                .foregroundStyle(.white)
-                .frame(width: 20)
-                .contentTransition(.opacity)
-                .animation(Motion.medium, value: readout.symbolName)
-        }
+    /// In a fixed slot and left-aligned, so nothing moves but the waves as the
+    /// level climbs. A glyph's own frame is bigger than what it draws and
+    /// differs from one to the next, so it is never what positions anything.
+    private var glyph: some View {
+        // A plain cross-fade between glyphs, not the symbol "replace" effect
+        // that shrinks the old icon to a point first.
+        Image(systemName: readout.symbolName)
+            .font(.system(size: metrics.iconSize, weight: .semibold))
+            .foregroundStyle(.white)
+            .contentTransition(.opacity)
+            .animation(Motion.fast, value: readout.symbolName)
+            .frame(width: metrics.iconSlotWidth, height: 0, alignment: .leading)
+            .offset(x: metrics.iconLeading, y: metrics.centreY)
     }
 
-    @ViewBuilder
-    private var trailing: some View {
-        // A short bar, not a full-width one — the native HUD's bar is compact.
-        // Centred in its ear, mirroring the glyph on the other side.
-        LevelBar(
-            level: isMuted ? 0 : readout.level,
-            tint: isMuted ? .white.opacity(0.3) : .white,
-            glowing: glowing && !isMuted
-        )
+    /// Muting drains the bar rather than blanking it, on the same spring as any
+    /// other change of level.
+    private var bar: some View {
+        let shown = isMuted ? 0 : readout.level
+        return ZStack(alignment: .topLeading) {
+            HUDSegmentsShape(level: 1, gap: metrics.segmentGap, innerRadius: metrics.innerCornerRadius)
+                .fill(.white.opacity(contrast == .increased ? 0.5 : 0.34))
+            // One shape for all the lit segments, so the glow blooms around
+            // them as one rod rather than as sixteen separate lights.
+            HUDSegmentsShape(level: shown, gap: metrics.segmentGap, innerRadius: metrics.innerCornerRadius)
+                .fill(.white)
+                .shadow(color: glowing ? .white.opacity(0.9) : .clear, radius: glowing ? 3.5 : 0)
+                .shadow(color: glowing ? .white.opacity(0.55) : .clear, radius: glowing ? 7 : 0)
+                .animation(reduceMotion ? Motion.fast : Motion.levelChange, value: shown)
+        }
+        .frame(width: metrics.barWidth, height: metrics.barHeight)
+        .offset(x: metrics.barLeading, y: metrics.barTop)
+    }
+}
+
+/// The bar's segments, lit up to a level.
+///
+/// All of them in one shape, because that is what lets the level animate as a
+/// single number with a spring that keeps its velocity through a held key. The
+/// rectangles come from `HUDSegments`, which snaps them to pixels and clamps the
+/// spring's overshoot.
+struct HUDSegmentsShape: Shape {
+
+    var level: Double
+    let gap: CGFloat
+    let innerRadius: CGFloat
+
+    nonisolated var animatableData: Double {
+        get { level }
+        set { level = newValue }
+    }
+
+    nonisolated func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let whole = HUDSegments.rects(in: rect.size, gap: gap)
+        let lit = HUDSegments.lit(level: level, in: whole)
+        let outer = rect.height / 2
+        for (index, part) in lit.enumerated() {
+            // The bar's two ends are fully round, and every other corner barely
+            // is. A cut through a segment is an inner corner, whichever one.
+            let isCut = part.width < whole[index].width
+            let leading = min(index == 0 ? outer : innerRadius, part.width / 2)
+            let trailing = min(index == whole.count - 1 && !isCut ? outer : innerRadius, part.width / 2)
+            path.addRoundedRect(
+                in: part.offsetBy(dx: rect.minX, dy: rect.minY),
+                cornerRadii: RectangleCornerRadii(
+                    topLeading: leading,
+                    bottomLeading: leading,
+                    bottomTrailing: trailing,
+                    topTrailing: trailing
+                )
+            )
+        }
+        return path
     }
 }
 
@@ -464,39 +463,6 @@ public struct HUDAdjustPanel: View {
     }
 }
 
-struct LevelBar: View {
-    let level: Double
-    let tint: Color
-
-    /// A definite intrinsic width, so the bar sizes and centres reliably. A
-    /// `GeometryReader` here is greedy — it reports the whole offered space and
-    /// its content pins to the leading edge, which made the bar read as leaning.
-    var width: CGFloat = 36
-    var height: CGFloat = 5
-
-    /// Draw the fill with a soft white bloom, like a lit rod.
-    var glowing: Bool = false
-
-    var body: some View {
-        let fillWidth = width * min(max(level, 0), 1)
-        // The track is drawn clearly, not as a faint hint: when it is nearly
-        // invisible only the left-aligned fill shows, and a half-full bar then
-        // reads as "leaning left" even though it is perfectly centred.
-        ZStack(alignment: .leading) {
-            Capsule().fill(.white.opacity(0.34))
-
-            // Soft, even bloom around the whole lit fill — the look of a lit rod.
-            Capsule()
-                .fill(tint)
-                .shadow(color: glowing ? tint.opacity(0.9) : .clear, radius: glowing ? 3.5 : 0)
-                .shadow(color: glowing ? tint.opacity(0.55) : .clear, radius: glowing ? 7 : 0)
-                .frame(width: fillWidth)
-        }
-        .frame(width: width, height: height)
-    }
-}
-
-
 /// The detached satellite: the circle (or, for the timer, a small capsule)
 /// beside the resting island. One seat, several tenants — a level ring, the
 /// running timer, the recording indicator, a device announcement.
@@ -513,27 +479,19 @@ public struct SatelliteView: View {
     public var body: some View {
         switch content {
         case .level(let readout):
-            // Muted goes red — the same splash the ear HUD shows, so hitting
-            // mute while music holds the island reads instantly in the
-            // satellite instead of a white ring quietly sitting at its level.
+            // Muted reads the way it does in the readout: the struck speaker
+            // and nothing lit, no colour. One ring for both states, so muting
+            // *drains* the arc to zero instead of snapping, and the ring's own
+            // level animation carries it. Unmuting plays it backwards.
             let muted = readout.kind == .volume && readout.isMuted
             circle {
-                // One ring for both states, so muting *drains* the arc to
-                // zero instead of snapping — the ring's own level animation
-                // carries it. The red heart scales in underneath the white
-                // slash; unmuting plays the whole thing backwards.
                 ring(level: muted ? 0 : readout.level, tint: .white.opacity(0.92))
-                if muted {
-                    Circle()
-                        .fill(Color.red)
-                        .padding(7)
-                        .transition(.scale(scale: 0.4).combined(with: .opacity))
-                }
                 Image(systemName: readout.symbolName)
                     .font(.system(size: diameter * 0.32, weight: .semibold))
                     .foregroundStyle(.white)
+                    .contentTransition(.opacity)
             }
-            .animation(Motion.medium, value: muted)
+            .animation(Motion.medium, value: readout.symbolName)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(readout.kind.label)
             .accessibilityValue(muted ? "Muted" : "\(Int((readout.level * 100).rounded())) percent")

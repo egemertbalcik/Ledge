@@ -223,9 +223,30 @@ public struct NotchLayout: Sendable, Equatable {
         )
     }
 
-    /// HUD: a level readout in the ears — a glyph on one side, a bar on the
-    /// other. Same idea as peek, a little wider to fit the bar, same slight
-    /// extra height.
+    /// The readout while a level is changing: the island's width and a row
+    /// below the cutout for the glyph and the bar. See `HUDRowMetrics`.
+    ///
+    /// Scaled, unlike the compact island, because everything in the row is.
+    public static func hudReadout(
+        _ geometry: NotchGeometry,
+        bottomRadius: CGFloat,
+        gutterRadius: CGFloat
+    ) -> NotchLayout {
+        expanded(
+            geometry,
+            size: CGSize(
+                width: geometry.notchSize.width + Self.earWidth(for: geometry) * 2,
+                height: geometry.notchSize.height + compactExtraHeight
+                    + HUDRowMetrics.rowHeight * geometry.displayScale
+            ),
+            bottomRadius: min(bottomRadius, HUDRowMetrics.bottomRadius * geometry.displayScale),
+            gutterRadius: gutterRadius
+        )
+    }
+
+    /// The compact island, as music rests in it. Same idea as peek, a little
+    /// wider to fit its ears, same slight extra height. Named for the readout
+    /// that used to live in it too.
     public static func hud(
         _ geometry: NotchGeometry,
         bottomRadius: CGFloat,
@@ -769,9 +790,11 @@ public struct NotchLayout: Sendable, Equatable {
                 bottomRadius: bottomRadius,
                 gutterRadius: gutterRadius
             )
-        case .hud, .companion:
-            // The companion shares the HUD footprint — width-only, notch height —
-            // so music rests in the ears the same size as the volume readout.
+        case .hud:
+            return .hudReadout(geometry, bottomRadius: bottomRadius, gutterRadius: gutterRadius)
+        case .companion:
+            // Width only, at the notch's height. The readout is the taller one:
+            // music resting in the ears stays exactly this size.
             return .hud(geometry, bottomRadius: bottomRadius, gutterRadius: gutterRadius)
         case .hover, .expanded:
             return .expanded(

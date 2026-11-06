@@ -160,6 +160,16 @@ enum StateGallery {
             presentation.hud = HUDReadout(kind: .volume, level: 0.4)
             presentation.latestLevel = presentation.hud
         },
+        State(name: "hud-volume-muted") { presentation in
+            presentation.phase = .hud
+            presentation.hud = HUDReadout(kind: .volume, level: 0.4, isMuted: true)
+            presentation.latestLevel = presentation.hud
+        },
+        State(name: "hud-volume-zero") { presentation in
+            presentation.phase = .hud
+            presentation.hud = HUDReadout(kind: .volume, level: 0)
+            presentation.latestLevel = presentation.hud
+        },
         State(name: "hud-brightness") { presentation in
             presentation.phase = .hud
             presentation.hud = HUDReadout(kind: .brightness, level: 0.62)

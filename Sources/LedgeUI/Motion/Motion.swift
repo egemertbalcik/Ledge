@@ -1,3 +1,4 @@
+import LedgeCore
 import SwiftUI
 
 /// Motion tokens.
@@ -83,6 +84,47 @@ public enum Motion {
     /// slow. macOS's own readout appears at once.
     public static let readoutIn: Animation = .spring(response: 0.16, dampingFraction: 1.0)
 
+    /// The level readout's own timing: quick and plain, with no bounce and no
+    /// beat before the contents. Fitted by eye, frame by frame, to footage of
+    /// the readout on the Mac with the island, not taken from any Apple value.
+    public static let hudShapeIn: Animation = .spring(response: 0.12, dampingFraction: 1.0)
+    public static let hudContentIn: Animation = .spring(response: 0.09, dampingFraction: 1.0)
+    public static let hudShapeOut: Animation = .spring(response: 0.13, dampingFraction: 1.0)
+    public static let hudContentOut: Animation = .spring(response: 0.07, dampingFraction: 1.0)
+
+    /// The shape's spring for a change of phase, given where it came from.
+    /// `.animation(_:value:)` is only told the new value, and on the way out
+    /// the new value no longer says anything about a readout.
+    public static func phaseChange(
+        from previous: NotchPhase,
+        to phase: NotchPhase,
+        response: Double,
+        damping: Double,
+        reduced: Bool
+    ) -> Animation {
+        guard !reduced else { return expand(response: response, damping: damping, reduced: true) }
+        switch ReadoutShapeMotion(from: previous, to: phase) {
+        case .arriving: return hudShapeIn
+        case .leaving: return hudShapeOut
+        case .ordinary: return expand(response: response, damping: damping)
+        }
+    }
+
+    /// The row coming and going. Scales in from the row's top edge, under the
+    /// cutout, so it seems to come out of the notch, and leaves as a plain fade
+    /// faster than the shape closes over it.
+    public static func hudRow(reduced: Bool) -> AnyTransition {
+        guard !reduced else { return reducedSwap }
+        return .asymmetric(
+            insertion: AnyTransition.modifier(
+                active: HUDRowArrival(hidden: true),
+                identity: HUDRowArrival(hidden: false)
+            )
+            .animation(hudContentIn),
+            removal: AnyTransition.opacity.animation(hudContentOut)
+        )
+    }
+
     /// A level moving under a held key.
     ///
     /// Ease-out restarts from zero velocity on every repeat, so sixteen presses
@@ -159,6 +201,17 @@ public enum Motion {
     }
     public static func expandedSwap(reduced: Bool) -> AnyTransition {
         reduced ? reducedSwap : expandedSwap
+    }
+}
+
+/// The readout's row on its way in.
+struct HUDRowArrival: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(hidden ? 0 : 1)
+            .scaleEffect(hidden ? 0.82 : 1, anchor: .top)
     }
 }
 

@@ -542,7 +542,7 @@ public actor LidConserver {
             // And why it was silent, which the mute control cannot say. A
             // device at a clamped logical zero is silent with no user mute in
             // force, and leaving Ledge's conserve-time reasons in place would
-            // hand the user back a red pill they never pressed.
+            // hand the user back a mute they never pressed.
             if let userMuted = entry.userMuted, let zeroSilence = entry.zeroSilence {
                 audio.restoreReasons(
                     MuteReasons(userMuted: userMuted, zeroSilence: zeroSilence),

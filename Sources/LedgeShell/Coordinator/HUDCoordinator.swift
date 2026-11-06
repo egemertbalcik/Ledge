@@ -385,7 +385,7 @@ public final class HUDCoordinator {
 
         if key == .mute {
             // Toggle mute ourselves so the native mute OSD stays suppressed and
-            // only Ledge's red pill shows. If the device has no settable mute
+            // only Ledge's own readout shows. If the device has no settable mute
             // (some digital outputs), fall through untouched so the key still
             // does whatever it always did.
             //
