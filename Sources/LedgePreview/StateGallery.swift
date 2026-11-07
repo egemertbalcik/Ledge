@@ -155,6 +155,17 @@ enum StateGallery {
             presentation.nowPlaying = PreviewFixtures.nowPlaying
             presentation.selected = PreviewFixtures.nowPlaying
         },
+        // A feed's reading in the ears, with nothing else resting.
+        State(name: "companion-feed") { presentation in
+            presentation.phase = .companion
+            presentation.restingFeed = PreviewFixtures.feed()
+            presentation.selected = PreviewFixtures.feed()
+        },
+        State(name: "companion-feed-critical") { presentation in
+            presentation.phase = .companion
+            presentation.restingFeed = PreviewFixtures.feed(level: .critical)
+            presentation.selected = PreviewFixtures.feed(level: .critical)
+        },
         State(name: "hud-volume") { presentation in
             presentation.phase = .hud
             presentation.hud = HUDReadout(kind: .volume, level: 0.4)

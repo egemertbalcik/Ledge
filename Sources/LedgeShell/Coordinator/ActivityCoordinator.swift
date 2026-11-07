@@ -30,6 +30,12 @@ public final class ActivityCoordinator {
     /// the user's own press, which is always worth the moment.
     public var onKeepAwakeStarted: (Activity) -> Void = { _ in }
 
+    /// A feed has just turned critical. Separate from `onArrival` for the same
+    /// reason `onKeepAwakeStarted` is: a feed's card is standing and its
+    /// arrival is never news, so what is news is a change of level on a card
+    /// already here, which only this coordinator has watched happen.
+    public var onFeedEscalation: (Activity) -> Void = { _ in }
+
     /// The queue went empty, so there is nothing left to show.
     public var onEmpty: () -> Void = {}
 
@@ -57,6 +63,11 @@ public final class ActivityCoordinator {
     /// moment it starts can be told from the once-a-second republishes every
     /// running session makes. Nil means not seen yet.
     private var keepAwakeWasRunning: [ActivityID: Bool] = [:]
+
+    /// The level each feed had at the last sync, so a step into critical can
+    /// be told from a feed that has been critical all along. A feed with no
+    /// entry has not been seen yet, and its first sighting is a baseline.
+    private var feedLevels: [ActivityID: FeedLevel] = [:]
 
     private var knownIDs: Set<ActivityID> = []
     private var lastNowPlayingPresent = false
@@ -280,6 +291,7 @@ public final class ActivityCoordinator {
         lastNowPlayingSource = nil
         lastNowPlayingItem = nil
         keepAwakeWasRunning.removeAll()
+        feedLevels.removeAll()
         recentlyDismissed.removeAll()
         pendingSelection = nil
         timerPausedSince = nil
@@ -417,6 +429,22 @@ public final class ActivityCoordinator {
             keepAwakeWasRunning[id] = nil
         }
 
+        // A feed turning critical is the one thing about a feed that is news.
+        // Its card is standing and rewritten whenever its producer likes, so
+        // neither arriving nor changing is an event — but going from fine to
+        // critical is, once. See `FeedAttention` for what counts.
+        var feedEscalations: [Activity] = []
+        for activity in queue.activities where activity.id.kind == .feeds {
+            guard case .feeds(let payload) = activity.payload else { continue }
+            if FeedAttention.isEscalation(from: feedLevels[activity.id], to: payload.level) {
+                feedEscalations.append(activity)
+            }
+            feedLevels[activity.id] = payload.level
+        }
+        for id in Array(feedLevels.keys) where !currentIDs.contains(id) {
+            feedLevels[id] = nil
+        }
+
         syncPresentation(queue)
         syncExpiry(queue)
 
@@ -442,6 +470,7 @@ public final class ActivityCoordinator {
             onArrival(activity)
         }
         for start in keepAwakeStarts { onKeepAwakeStarted(start) }
+        for escalation in feedEscalations { onFeedEscalation(escalation) }
 
         if queue.isEmpty && !wasEmpty { onEmpty() }
         wasEmpty = queue.isEmpty
@@ -488,7 +517,14 @@ public final class ActivityCoordinator {
         let playing = timerRunning || closeEvent || queue.activities.contains {
             $0.id.kind == .nowPlaying && $0.restsInEars
         }
+        // A feed's compact text is present, and not playing: it is a standing
+        // glance, not a resident that is going on. It keeps the island open
+        // when nothing else is resting and gives way to everything that is —
+        // and above all it leaves a paused track its linger, which a feed that
+        // counted as playing would have cut short.
+        let feedResting = presentation.restingFeed != nil
         let present = playing
+            || feedResting
             // A running Keep Awake is deliberately not here. It used to be, and
             // that made it the one thing the shell could only read as "paused
             // music": present, not playing. Every hold then went down the
@@ -581,6 +617,7 @@ public final class ActivityCoordinator {
             return payload
         }())
         presentation.privacyActive = queue.activities.first { $0.id.kind == .privacy }
+        presentation.restingFeed = FeedSelection.compactFeed(among: queue.activities)
         // The lingering card follows the queue while it lasts: the coordinator
         // decides *whether* a paused track may still be drawn, but which track
         // that is can change underneath it — skipping while paused is somebody

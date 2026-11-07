@@ -260,6 +260,10 @@ extension Activity {
 ///
 /// Keep Awake is deliberately absent. It is announced like a Focus change and
 /// then lives in the side readout; see `Activity.restsInEars`.
+///
+/// A feed's compact text is the lowest of the residents. It is a standing
+/// glance, there all day, so everything that is actually going on takes the
+/// ears from it — and gives them back, because the feed is still true.
 public enum CompactRest {
 
     public static func resolve(
@@ -268,6 +272,7 @@ public enum CompactRest {
         runningTimer: Activity?,
         closeEvent: Activity?,
         nowPlaying: Activity?,
+        feed: Activity? = nil,
         selected: Activity?
     ) -> Activity? {
         // Media the compact view will not draw is turned away wherever it is
@@ -284,6 +289,9 @@ public enum CompactRest {
         if let runningTimer { return runningTimer }
         if let closeEvent { return closeEvent }
         if let nowPlaying = restable(nowPlaying) { return nowPlaying }
+        // Ahead of `selected`: the feed is a resident, and the card last read
+        // is only ever a courtesy for the moment after walking away from it.
+        if let feed, feed.restsInEars { return feed }
         // The last resort is the only one that is not already a live fact, so
         // it is the only one that has to earn its place.
         if let selected, selected.restsInEars { return selected }

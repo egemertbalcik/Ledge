@@ -128,6 +128,12 @@ public final class NotchPresentation {
     /// show.
     public var closeEvent: Activity?
 
+    /// The feed whose compact text rests in the ears while nothing else does,
+    /// chosen by `FeedSelection` from every feed on the queue. Read straight off
+    /// the queue like the timer's session, so the ears empty the moment the
+    /// feed does — or goes stale.
+    public var restingFeed: Activity?
+
     /// The card being walked away from, for the ten-second farewell — shown
     /// ahead of the standing residents so leaving the weather card does not
     /// snap instantly to the music.
@@ -314,6 +320,7 @@ public final class NotchPresentation {
             runningTimer: runningTimerSession,
             closeEvent: closeEvent,
             nowPlaying: lingeringNowPlaying,
+            feed: restingFeed,
             selected: selected
         )
     }
@@ -508,6 +515,7 @@ public struct NotchOverlayView: View {
             // the test and vanished to idle during a hover elsewhere.
             let hasRestingContent = presentation.playingNowPlaying != nil
                 || presentation.runningTimerSession != nil
+                || presentation.restingFeed != nil
             return hasRestingContent ? .companion : .idle
         default:
             return presentation.phase
@@ -875,6 +883,7 @@ public struct NotchOverlayView: View {
                     runningTimer: presentation.runningTimerSession,
                     closeEvent: presentation.closeEvent,
                     nowPlaying: presentation.lingeringNowPlaying,
+                    feed: presentation.restingFeed,
                     selected: presentation.selected
                   )
                 // A peek is explicit news and shows whatever it announces; with

@@ -1758,6 +1758,12 @@ public final class LedgeCoordinator {
             // it answers a press, it does not interrupt.
             self?.announce(activity, byUser: true)
         }
+        activities.onFeedEscalation = { [weak self] activity in
+            // Once, on the step into critical. The peek is the same whisper any
+            // arrival gets, so it keeps its manners with it: nothing during a
+            // Focus, nothing over the greeting.
+            self?.announce(activity)
+        }
         activities.onEmpty = { [weak self] in
             // Nothing left to show, so an overlay held open by a click has
             // nothing to hold open for.
@@ -2257,8 +2263,11 @@ public final class LedgeCoordinator {
 
     /// The one place the fact path speaks to the reducer about resting.
     private func setRestingHold(_ holds: Bool) {
-        restingHold = holds
-        send(.nowPlayingChanged(holds))
+        // A feed's compact text is the lowest resident and the only one that
+        // does not come and go: when everything else lets go of the island,
+        // it is what is left, so letting go means going back to it.
+        restingHold = holds || presentation.restingFeed != nil
+        send(.nowPlayingChanged(restingHold))
     }
 
     /// Whether a rest whose time is up may actually end — see `RestRelease`,
@@ -3802,6 +3811,7 @@ public final class LedgeCoordinator {
             runningTimer: runningTimer,
             closeEvent: presentation.closeEvent,
             nowPlaying: presentation.lingeringNowPlaying,
+            feed: presentation.restingFeed,
             selected: presentation.selected
         )
     }
@@ -3929,7 +3939,7 @@ public final class LedgeCoordinator {
             else { return false }
             return !payload.isIdle
         }()
-        return (playing || timerRunning) ? .companion : .idle
+        return (playing || timerRunning || presentation.restingFeed != nil) ? .companion : .idle
     }
 
     /// The display drawing an open overlay right now, if any: the hover owner
