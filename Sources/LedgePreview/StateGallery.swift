@@ -441,6 +441,33 @@ enum StateGallery {
             presentation.selected = PreviewFixtures.shelf
             presentation.count = 3
         },
+        State(name: "card-feeds") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed()
+            presentation.count = 3
+        },
+        State(name: "card-feeds-critical") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(level: .critical)
+            presentation.count = 3
+        },
+        /// The producer's `stale_after` has run out: dimmed, and the age said.
+        State(name: "card-feeds-stale") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(stale: true)
+            presentation.count = 3
+        },
+        /// Eight rows with a bar each, the tallest the card gets.
+        State(name: "card-feeds-full") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(rowCount: FeedPayload.maxRows)
+            presentation.count = 3
+        },
+        State(name: "card-feeds-empty") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(rowCount: 0)
+            presentation.count = 3
+        },
         State(name: "card-levels") { presentation in
             presentation.phase = .expanded
             presentation.selected = PreviewFixtures.levels
@@ -601,6 +628,46 @@ enum StateGallery {
 
 
 extension PreviewFixtures {
+
+    // MARK: - Feeds
+
+    /// A feed as a script might write one: a few readings, some with a bar.
+    ///
+    /// Written relative to now, like the weather's `fetchedAt`, so the age on
+    /// the card reads the same in every export.
+    static func feed(
+        level: FeedLevel = .normal,
+        stale: Bool = false,
+        rowCount: Int = 3
+    ) -> Activity {
+        let readings: [FeedRow] = [
+            FeedRow(label: "Queue", value: "12 waiting", detail: "oldest 4 min",
+                    fraction: 0.24, level: .normal),
+            FeedRow(label: "Disk", value: "81% full", fraction: 0.81, level: .warning),
+            FeedRow(label: "Last backup", value: "02:14"),
+        ]
+        let rows = rowCount <= readings.count
+            ? Array(readings.prefix(rowCount))
+            : readings + (readings.count..<rowCount).map {
+                FeedRow(label: "Reading \($0 + 1)", value: "\($0 * 7 % 100)%",
+                        fraction: Double($0 * 7 % 100) / 100)
+            }
+        return Activity(
+            id: ActivityID(kind: .feeds, source: "preview"),
+            createdAt: 0,
+            payload: .feeds(FeedPayload(
+                title: "Status",
+                symbolName: "gauge.with.dots.needle.67percent",
+                compactLeading: "Q 12",
+                compactTrailing: "D 81%",
+                level: level,
+                rows: rows,
+                updatedAt: Date().timeIntervalSince1970 - (stale ? 5 * 3_600 : 240),
+                staleAfter: 3_600,
+                isStale: stale
+            ))
+        )
+    }
 
     // MARK: - Levels
     //

@@ -116,6 +116,9 @@ public struct ActivityCardView: View {
         case .notes(let payload):
             NotesCardView(payload: payload, actions: notesActions, isCompactWidth: isCompactWidth)
                 .measuredContent(activity.id, onContentHeight)
+        case .feeds(let payload):
+            FeedCardView(payload: payload)
+                .measuredContent(activity.id, onContentHeight)
         case .device(let payload) where !isCompactWidth:
             // Bluetooth gear gets its own card for the same reason weather does:
             // the generic row buries the product and its battery cells.
@@ -214,7 +217,7 @@ public struct ActivityCardView: View {
                 .padding(.top, 2)
 
         case .focus, .event, .message, .weather, .timer, .shelf, .privacy, .keyboard, .levels, .notes,
-             .keepAwake:
+             .keepAwake, .feeds:
             EmptyView()
         }
     }
@@ -239,6 +242,7 @@ public struct ActivityCardView: View {
         case .notes(let payload):
             payload.notes.count == 1 ? "1 note" : "\(payload.notes.count) notes"
         case .keepAwake: KeepAwakeCopy.title
+        case .feeds(let payload): payload.title
         }
     }
 
@@ -273,6 +277,8 @@ public struct ActivityCardView: View {
                                        floor: payload.batteryFloor,
                                        lidClosed: payload.lidClosed)
             }
+        case .feeds(let payload):
+            payload.rows.first.map { "\($0.label) \($0.value)" } ?? ""
         }
     }
 
@@ -296,7 +302,7 @@ public struct ActivityCardView: View {
                 ? SatelliteContent.keepAwakeLabel(
                     remaining: payload.isIndefinite ? nil : payload.remaining)
                 : nil
-        case .focus, .message, .weather, .shelf, .privacy, .levels, .notes:
+        case .focus, .message, .weather, .shelf, .privacy, .levels, .notes, .feeds:
             nil
         }
     }
@@ -320,6 +326,7 @@ public struct ActivityCardView: View {
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
         case .keepAwake: "cup.and.saucer"
+        case .feeds(let payload): payload.symbolName ?? "list.bullet.rectangle"
         }
     }
 
@@ -340,6 +347,7 @@ public struct ActivityCardView: View {
         case .levels: .white
         case .notes: .yellow
         case .keepAwake: KeepAwakeCardView.tint
+        case .feeds(let payload): payload.level.feedTint
         }
     }
 
