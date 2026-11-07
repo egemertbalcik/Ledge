@@ -326,7 +326,7 @@ public struct ActivityCardView: View {
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
         case .keepAwake: "cup.and.saucer"
-        case .feeds(let payload): payload.symbolName ?? "list.bullet.rectangle"
+        case .feeds(let payload): payload.displaySymbol
         }
     }
 

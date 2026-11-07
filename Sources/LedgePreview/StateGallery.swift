@@ -155,7 +155,8 @@ enum StateGallery {
             presentation.nowPlaying = PreviewFixtures.nowPlaying
             presentation.selected = PreviewFixtures.nowPlaying
         },
-        // A feed's reading in the ears, with nothing else resting.
+        // A feed's reading in the ears, with nothing else resting: a ring and
+        // a few words each side, or words and the feed's tile.
         State(name: "companion-feed") { presentation in
             presentation.phase = .companion
             presentation.restingFeed = PreviewFixtures.feed()
@@ -165,6 +166,16 @@ enum StateGallery {
             presentation.phase = .companion
             presentation.restingFeed = PreviewFixtures.feed(level: .critical)
             presentation.selected = PreviewFixtures.feed(level: .critical)
+        },
+        State(name: "companion-feed-words") { presentation in
+            presentation.phase = .companion
+            presentation.restingFeed = PreviewFixtures.feed(ears: .words)
+            presentation.selected = PreviewFixtures.feed(ears: .words)
+        },
+        State(name: "companion-feed-words-critical") { presentation in
+            presentation.phase = .companion
+            presentation.restingFeed = PreviewFixtures.feed(level: .critical, ears: .words)
+            presentation.selected = PreviewFixtures.feed(level: .critical, ears: .words)
         },
         State(name: "hud-volume") { presentation in
             presentation.phase = .hud
@@ -468,15 +479,27 @@ enum StateGallery {
             presentation.selected = PreviewFixtures.feed(stale: true)
             presentation.count = 3
         },
-        /// Eight rows with a bar each, the tallest the card gets.
+        /// Three gauges and eight rows, the tallest the card gets.
         State(name: "card-feeds-full") { presentation in
             presentation.phase = .expanded
-            presentation.selected = PreviewFixtures.feed(rowCount: FeedPayload.maxRows)
+            presentation.selected = PreviewFixtures.feed(gauges: FeedPayload.maxGauges, rows: FeedPayload.maxRows)
+            presentation.count = 3
+        },
+        /// No gauges: just the rows.
+        State(name: "card-feeds-rows") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(gauges: 0)
+            presentation.count = 3
+        },
+        /// One gauge and nothing under it.
+        State(name: "card-feeds-gauge") { presentation in
+            presentation.phase = .expanded
+            presentation.selected = PreviewFixtures.feed(gauges: 1, rows: 0)
             presentation.count = 3
         },
         State(name: "card-feeds-empty") { presentation in
             presentation.phase = .expanded
-            presentation.selected = PreviewFixtures.feed(rowCount: 0)
+            presentation.selected = PreviewFixtures.feed(gauges: 0, rows: 0)
             presentation.count = 3
         },
         State(name: "card-levels") { presentation in
@@ -642,36 +665,61 @@ extension PreviewFixtures {
 
     // MARK: - Feeds
 
-    /// A feed as a script might write one: a few readings, some with a bar.
+    /// What the ears of a feed fixture carry.
+    enum FeedEars {
+        /// A ring and a few words on each side.
+        case rings
+        /// Words alone, so each side wears the feed's tile.
+        case words
+    }
+
+    /// A usage-style feed as a script might write one: two gauges across the
+    /// top, and a few rows under them.
     ///
     /// Written relative to now, like the weather's `fetchedAt`, so the age on
     /// the card reads the same in every export.
     static func feed(
         level: FeedLevel = .normal,
         stale: Bool = false,
-        rowCount: Int = 3
+        gauges gaugeCount: Int = 2,
+        rows rowCount: Int = 3,
+        ears: FeedEars = .rings
     ) -> Activity {
+        let critical = level == .critical
+        let gaugeSet: [FeedGauge] = [
+            FeedGauge(label: "API", value: critical ? "85%" : "42%",
+                      fraction: critical ? 0.85 : 0.42, level: critical ? .warning : .normal),
+            FeedGauge(label: "Quota", value: critical ? "~100%" : "68%",
+                      fraction: critical ? 1 : 0.68, level: critical ? .critical : .warning),
+            FeedGauge(label: "Storage", value: "23%", fraction: 0.23),
+        ]
         let readings: [FeedRow] = [
-            FeedRow(label: "Queue", value: "12 waiting", detail: "oldest 4 min",
-                    fraction: 0.24, level: .normal),
-            FeedRow(label: "Disk", value: "81% full", fraction: 0.81, level: .warning),
-            FeedRow(label: "Last backup", value: "02:14"),
+            FeedRow(label: "Today", value: "1.2k calls", detail: "resets 05:00",
+                    fraction: 0.42, level: .normal),
+            FeedRow(label: "This week", value: "8.4k calls", detail: "resets Mon",
+                    fraction: 0.85, level: .warning),
+            FeedRow(label: "Last sync", value: "02:14", detail: "took 6 min"),
         ]
         let rows = rowCount <= readings.count
             ? Array(readings.prefix(rowCount))
-            : readings + (readings.count..<rowCount).map {
-                FeedRow(label: "Reading \($0 + 1)", value: "\($0 * 7 % 100)%",
-                        fraction: Double($0 * 7 % 100) / 100)
+            : readings + (readings.count..<rowCount).map { index in
+                FeedRow(label: "Reading \(index + 1)", value: "\(index * 7 % 100)%",
+                        detail: index % 2 == 0 ? "since 09:00" : nil,
+                        fraction: index % 3 == 0 ? nil : Double(index * 7 % 100) / 100)
             }
+        let rings = ears == .rings
         return Activity(
             id: ActivityID(kind: .feeds, source: "preview"),
             createdAt: 0,
             payload: .feeds(FeedPayload(
-                title: "Status",
+                title: "Usage",
                 symbolName: "gauge.with.dots.needle.67percent",
-                compactLeading: "Q 12",
-                compactTrailing: "D 81%",
+                compactLeading: critical ? "85%" : "42%",
+                compactTrailing: critical ? "~100%" : "68%",
+                compactLeadingFraction: rings ? (critical ? 0.85 : 0.42) : nil,
+                compactTrailingFraction: rings ? (critical ? 1 : 0.68) : nil,
                 level: level,
+                gauges: Array(gaugeSet.prefix(gaugeCount)),
                 rows: rows,
                 updatedAt: Date().timeIntervalSince1970 - (stale ? 5 * 3_600 : 240),
                 staleAfter: 3_600,

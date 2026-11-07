@@ -205,18 +205,10 @@ public struct CompactEarsView: View {
                 .frame(width: 20, height: 20)
                 .offset(x: -2.5)
         } else if case .feeds(let payload) = activity.payload {
-            // The producer's own words, when it gave some for this side. A feed
-            // with text on one side only keeps its glyph on the other, so the
-            // ears still say what they are about: identity on the left, the
-            // reading on the right.
-            if let text = payload.compactLeading {
-                feedText(text, level: payload.level)
-            } else {
-                Image(systemName: symbolName)
-                    .font(.cardTitle)
-                    .foregroundStyle(accent)
-                    .padding(.horizontal, 6)
-            }
+            // A ring and the producer's words, or its tile and its words: see
+            // `FeedEar`. Before the checks below, which would take a feed's
+            // own symbol name for one of theirs.
+            FeedEar(payload: payload, side: .leading)
         } else if case .device = activity.payload, symbolName.contains("airpods") {
             // Apple's own AirPods artwork — the official SF Symbol for the exact
             // model — drawn large with a soft top-lit gradient, the way the
@@ -486,29 +478,8 @@ public struct CompactEarsView: View {
                     .minimumScaleFactor(0.7)
             }
         case .feeds(let payload):
-            if let text = payload.compactTrailing {
-                feedText(text, level: payload.level)
-            } else if !payload.hasCompactContent, payload.level != .normal {
-                // A feed with nothing to say in the ears that is nonetheless
-                // standing the notch up — turning critical — would otherwise
-                // be a glyph and an empty ear.
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.cardLabel)
-                    .foregroundStyle(payload.level.feedTint)
-            }
+            FeedEar(payload: payload, side: .trailing)
         }
-    }
-
-    /// One side of a feed's compact text, in the type every ear's reading
-    /// wears. Coloured by the feed's level and not by the row's: the ears have
-    /// no rows, only the producer's word for how things stand.
-    private func feedText(_ text: String, level: FeedLevel) -> some View {
-        Text(text)
-            .font(.cardCaption)
-            .monospacedDigit()
-            .foregroundStyle(level.feedTint)
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
     }
 
     // MARK: - The cover the music ears wear
@@ -595,7 +566,7 @@ public struct CompactEarsView: View {
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
         case .keepAwake: "cup.and.saucer"
-        case .feeds(let payload): payload.symbolName ?? "list.bullet.rectangle"
+        case .feeds(let payload): payload.displaySymbol
         }
     }
 

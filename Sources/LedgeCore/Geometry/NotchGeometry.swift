@@ -432,7 +432,7 @@ public struct NotchLayout: Sendable, Equatable {
         switch payload {
         case .notes(let payload): notesContentHeight(noteCount: payload.notes.count)
         case .levels(let payload): levelsContentHeight(payload.rows)
-        case .feeds(let payload): feedsContentHeight(payload.rows)
+        case .feeds(let payload): feedsContentHeight(gaugeCount: payload.gauges.count, rows: payload.rows)
         default: 0
         }
     }
@@ -464,24 +464,46 @@ public struct NotchLayout: Sendable, Equatable {
         return height
     }
 
-    /// A feed card's rows: 14 for the line, and 6 more under it when it draws
-    /// a bar. The card's own layout is built from these, so what is estimated
-    /// here and what is measured there are the same arithmetic.
+    /// The pieces a feed card is built from. The card's own layout uses these
+    /// same numbers, so what is estimated here and what is measured there are
+    /// the same arithmetic.
+    ///
+    /// A row is 14 for its line, and 6 more under it when it draws a bar.
     public static let feedRowHeight: CGFloat = 14
     public static let feedBarHeight: CGFloat = 6
     public static let feedRowSpacing: CGFloat = 7
     public static let feedHeaderHeight: CGFloat = 18
+    /// From the header to the rows, when there are no gauges between them.
     public static let feedHeaderGap: CGFloat = 8
+    /// From the header to the gauges, which want a little more air over a ring.
+    public static let feedGaugesGap: CGFloat = 10
+    /// A gauge is a ring and the label under it.
+    public static let feedGaugeDiameter: CGFloat = 46
+    public static let feedGaugeLabelHeight: CGFloat = 12
+    public static let feedGaugeSpacing: CGFloat = 4
+    /// The hairline between the gauges and the rows, and the air round it.
+    public static let feedDividerPadding: CGFloat = 9
     /// The card's own padding above and below, which the generic cards also
     /// put outside what they measure.
     public static let feedPadding: CGFloat = 20
 
-    /// The Feeds card: a header, then a row per row, each with its bar or
-    /// without it.
-    public static func feedsContentHeight(_ rows: [FeedRow]) -> CGFloat {
+    /// The row of gauges: rings across the top, each with its label.
+    public static var feedGaugesHeight: CGFloat {
+        feedGaugeDiameter + feedGaugeSpacing + feedGaugeLabelHeight
+    }
+
+    /// The hairline that parts the gauges from the rows under them.
+    public static var feedDividerHeight: CGFloat { 1 + feedDividerPadding * 2 }
+
+    /// The Feeds card: a header, then the gauges if there are any, then a row
+    /// per row, each with its bar or without it.
+    public static func feedsContentHeight(gaugeCount: Int, rows: [FeedRow]) -> CGFloat {
         var height = feedPadding + feedHeaderHeight
+        if gaugeCount > 0 { height += feedGaugesGap + feedGaugesHeight }
         guard !rows.isEmpty else { return height }
-        height += feedHeaderGap
+        // The hairline stands where the header's gap would be, so the rows
+        // never have both.
+        height += gaugeCount > 0 ? feedDividerHeight : feedHeaderGap
         height += rows.reduce(CGFloat(0)) { total, row in
             total + feedRowHeight + (row.fraction == nil ? 0 : feedBarHeight)
         }
@@ -492,15 +514,16 @@ public struct NotchLayout: Sendable, Equatable {
     /// The Feeds card's height, from the height its content reported.
     ///
     /// The simple cards stop at 220, which is about five rows with a bar each.
-    /// A feed may bring eight, which come to about 300 with the cutout and the
-    /// dots' strip, so it has a ceiling of its own.
+    /// A feed may bring three gauges and eight rows with a bar each, which
+    /// come to about 380 with the cutout and the dots' strip, so it has a
+    /// ceiling of its own.
     public static func feedsHeight(
         _ contentHeight: CGFloat,
         notchHeight: CGFloat = referenceNotchHeight
     ) -> CGFloat {
         let delta = notchHeight - referenceNotchHeight
         guard contentHeight > 0, contentHeight.isFinite else { return 140 + delta }
-        return min(max(notchHeight + contentHeight + dotsBand, 96 + delta), 300 + delta)
+        return min(max(notchHeight + contentHeight + dotsBand, 96 + delta), 400 + delta)
     }
 
     /// The Keep Awake card's height, from the height its content reported.
