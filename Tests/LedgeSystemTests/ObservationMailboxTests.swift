@@ -529,6 +529,17 @@ private actor EventLog {
     func append(_ event: String) { events.append(event) }
 }
 
+/// The most deliveries in progress at once.
+private actor InFlightCount {
+    private(set) var peak = 0
+    private var live = 0
+    func enter() {
+        live += 1
+        peak = max(peak, live)
+    }
+    func leave() { live -= 1 }
+}
+
 /// Waits for the mailbox to own its queue, without spinning: a hot
 /// `Task.yield()` loop starves everything else on the runtime, which showed up
 /// as unrelated timing tests failing under a full suite run.
@@ -575,46 +586,93 @@ struct LivenessOrderingTests {
     /// state submitted is the state the store ends on.
     @Test("A delayed start cannot overtake the stop that followed it")
     func stopWinsOverDelayedStart() async {
+        let entered = AsyncGate()
         let held = AsyncGate()
         let log = EventLog()
         let mailbox = mailbox(onLiveness: { live, _ in
-            if live { await held.wait() }
+            if live {
+                await entered.open()
+                await held.wait()
+            }
             await log.append(live ? "live" : "stopped")
         })
 
         mailbox.sourceBecame(live: true, for: DeviceIdentity.Source.thisMac)
-        // Let the first delivery reach the gate before the stop is queued.
-        await briefly()
+        // The first delivery has reached the gate before the stop is queued.
+        await entered.wait()
         mailbox.sourceBecame(live: false, for: DeviceIdentity.Source.thisMac)
         await held.open()
         await mailbox.close()
 
         let events = await log.events
         #expect(
-            events.last == "stopped",
+            events == ["live", "stopped"],
             "a start overtook the stop that followed it: \(events)"
         )
     }
 
-    /// Coalesced per source: a provider toggled repeatedly leaves one update,
-    /// not a queue of them.
+    /// Coalesced per source: toggles made while a delivery is in flight collapse
+    /// into one more delivery with the latest state, not a queue of them.
+    ///
+    /// The first delivery is held so the toggles are certain to land behind it.
+    /// Left to run freely the drain can pick up a value between two toggles, and
+    /// each pickup is a real delivery, so a burst has no fixed count.
     @Test("Repeated updates for one source coalesce")
     func updatesCoalesce() async {
+        let entered = AsyncGate()
+        let held = AsyncGate()
         let log = EventLog()
-        let mailbox = ObservationMailbox(deliver: { _ in })
-        mailbox.setLivenessHandlerForTesting({ live, _ in
+        let mailbox = mailbox(onLiveness: { live, _ in
             await log.append(live ? "live" : "stopped")
+            // Only the first is held: deliveries go one at a time, so nothing
+            // else can be in flight while this one waits.
+            if await log.events.count == 1 {
+                await entered.open()
+                await held.wait()
+            }
         })
 
-        // Twenty toggles, ending on a start: that is the state the store must
-        // settle on, and it should not take twenty deliveries to get there.
-        for index in 0..<21 {
+        mailbox.sourceBecame(live: true, for: DeviceIdentity.Source.thisMac)
+        await entered.wait()
+        // Twenty more toggles, ending on a start.
+        for index in 1..<21 {
             mailbox.sourceBecame(live: index % 2 == 0, for: DeviceIdentity.Source.thisMac)
         }
+        await held.open()
         await mailbox.close()
-        let events = await log.events
-        #expect(events.count <= 2, "\(events.count) deliveries for twenty-one toggles")
-        #expect(events.last == "live", "the last state submitted did not win")
+
+        #expect(await log.events == ["live", "live"])
+    }
+
+    /// With nothing held the count depends on scheduling. What doesn't: the last
+    /// state submitted wins and deliveries never overlap.
+    ///
+    /// Many rounds, because the drain only tends to catch a burst part-way once
+    /// the process is warm: a single round usually makes one delivery, and then
+    /// neither of these can fail.
+    @Test("Toggles left to run freely end on the last state, one delivery at a time")
+    func freeRunningToggles() async {
+        let inFlight = InFlightCount()
+        for round in 0..<200 {
+            let log = EventLog()
+            let mailbox = mailbox(onLiveness: { live, _ in
+                await inFlight.enter()
+                await log.append(live ? "live" : "stopped")
+                // Long enough for an overlapping delivery to show.
+                try? await Task.sleep(for: .milliseconds(1))
+                await inFlight.leave()
+            })
+
+            for index in 0..<21 {
+                mailbox.sourceBecame(live: index % 2 == 0, for: DeviceIdentity.Source.thisMac)
+            }
+            await mailbox.close()
+
+            let events = await log.events
+            #expect(events.last == "live", "round \(round): the last state did not win: \(events)")
+            #expect(events.count <= 21, "round \(round): more deliveries than toggles: \(events)")
+        }
+        #expect(await inFlight.peak == 1, "two deliveries overlapped")
     }
 
     /// And the barrier waits for it: liveness accepted before a close must
