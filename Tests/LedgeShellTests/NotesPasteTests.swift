@@ -521,7 +521,16 @@ struct NotesPasteTests {
         return json
     }
 
+    /// These notes were only ever written on macOS 26, the only system 1.2.x
+    /// ran on, and macOS 15 can't write one for the fixture: it leaves SwiftUI's
+    /// colours out of the encoding.
+    nonisolated private static var canWriteAPollutedNote: Bool {
+        ProcessInfo.processInfo.isOperatingSystemAtLeast(
+            OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0))
+    }
+
     @Test("A note saved with a pasted highlight opens clean and is written back clean",
+          .enabled(if: canWriteAPollutedNote),
           arguments: NotesEditorKind.available)
     func pollutedNoteHeals(editor: NotesEditorKind) async throws {
         _ = NSApplication.shared
@@ -577,7 +586,7 @@ struct NotesPasteTests {
         #expect(String(opened.characters) == "Shopping\n• milk\n• eggs")
     }
 
-    @Test("A note whose formatting cannot be decoded keeps its words")
+    @Test("A note whose formatting cannot be decoded keeps its words", .enabled(if: canWriteAPollutedNote))
     func undecodableFormattingKeepsTheNote() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ledge-notes-paste-tests/\(UUID().uuidString)", isDirectory: true)

@@ -149,11 +149,19 @@ struct LegacyNotesEditorTests {
         let (h, _, textView) = try await open(AttributedString("left to right\nשלום עולם\nمرحبا"))
         defer { done(h) }
         let string = textView.string as NSString
-        for word in ["שלום", "مرحبا"] {
-            let first = NSRange(location: string.range(of: word).location, length: 1)
-            let onScreen = textView.firstRect(forCharacterRange: first, actualRange: nil)
-            let inView = textView.convert(h.panel.convertFromScreen(onScreen), from: nil)
-            #expect(inView.maxX > textView.bounds.width - 10, "\(word) starts at the right: \(inView)")
+        // macOS 15 reads the words in the right order but leaves the line on
+        // the left, against the text view's natural alignment. Measured on a
+        // real 15.8 runner; only the position differs.
+        withKnownIssue("macOS 15 leaves a right-to-left line on the left") {
+            for word in ["שלום", "مرحبا"] {
+                let first = NSRange(location: string.range(of: word).location, length: 1)
+                let onScreen = textView.firstRect(forCharacterRange: first, actualRange: nil)
+                let inView = textView.convert(h.panel.convertFromScreen(onScreen), from: nil)
+                #expect(inView.maxX > textView.bounds.width - 10, "\(word) starts at the right: \(inView)")
+            }
+        } when: {
+            !ProcessInfo.processInfo.isOperatingSystemAtLeast(
+                OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0))
         }
         let latin = textView.firstRect(forCharacterRange: NSRange(location: 0, length: 1), actualRange: nil)
         #expect(textView.convert(h.panel.convertFromScreen(latin), from: nil).minX < 10)

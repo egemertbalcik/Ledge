@@ -392,17 +392,23 @@ struct NowPlayingContinuityTests {
     @Test("The card's bars settle on pause instead of dropping flat in one frame")
     func cardBarsSettle() async {
         let model = Model(Self.song("A", art: Self.redCover))
-        let card = host(Card(model: model), size: CGSize(width: 270, height: 164))
+        // Motion on whatever the machine says: a CI runner has Reduce Motion
+        // on, and there the bars correctly never rise.
+        let card = host(
+            Card(model: model).transformEnvironment(\.self) { $0._accessibilityReduceMotion = false },
+            size: CGSize(width: 270, height: 164)
+        )
         defer { card.close() }
         let eq = CGRect(x: 222, y: 6, width: 44, height: 38)
-        let resting = 6 // 3 pt at 2x
-        let playing = await eventually(card) { tallest($0, in: eq) > resting + 4 }
-        #expect(tallest(playing, in: eq) > resting + 4, "the bars are up while it plays")
+        let scale = Int(card.window.backingScaleFactor)
+        let resting = 3 * scale // 3 pt
+        let playing = await eventually(card) { tallest($0, in: eq) > resting + 2 * scale }
+        #expect(tallest(playing, in: eq) > resting + 2 * scale, "the bars are up while it plays")
 
         let frame = firstFrame(card, model: model, marker: Self.cardMarker) {
             model.set(Self.song("A", playing: false, art: Self.redCover))
         }
-        #expect(tallest(frame, in: eq) > resting + 2,
+        #expect(tallest(frame, in: eq) > resting + scale,
                 "\(Int(frame.after * 1000)) ms after the pause the bars are still up, not flat")
         let rest = await eventually(card) { tallest($0, in: eq) <= resting + 1 }
         #expect(tallest(rest, in: eq) <= resting + 1, "and then they settle onto the line")
