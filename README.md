@@ -84,6 +84,55 @@ to Apple Notes in one click.
 
 <img src="docs/media/notes.gif" width="560" alt="Opening Notes from the notch, a new note in its own window, typing with Caps Lock on, then closing it">
 
+## Show anything a script can write
+
+Feeds turn small files into cards. Put a JSON file in
+`~/Library/Application Support/Ledge/Feeds/` and Ledge shows it as a card with
+a title and a few rows, and, if the file asks, a short reading on either side
+of the notch while it's closed. A build's status, a backup's last run, a quota,
+a queue length: whatever a script can write down. Ledge only reads these files.
+It never runs anything.
+
+Feeds are off until you switch them on in Settings, under Cards.
+
+```json
+{
+  "version": 1,
+  "id": "backup",
+  "title": "Backup",
+  "symbol": "externaldrive.fill",
+  "compact_leading": "Backup ok",
+  "level": "normal",
+  "rows": [
+    {"label": "Last run", "value": "02:14", "detail": "took 6 min"},
+    {"label": "Disk", "value": "81% full", "fraction": 0.81, "level": "warning"}
+  ],
+  "updated_at": 1794088196,
+  "stale_after": 86400
+}
+```
+
+| Field | |
+|---|---|
+| `version` | Required, and `1`. A file with another version is skipped. |
+| `id` | Optional. Defaults to the file name without `.json`. |
+| `title` | Optional. The card's title. Defaults to the id. |
+| `symbol` | Optional. The name of an SF Symbol. |
+| `compact_leading`, `compact_trailing` | Optional. Short text for the left and right of the notch while it's closed. |
+| `level` | Optional. `normal`, `warning` or `critical`. Colours the feed; a feed turning `critical` peeks once. |
+| `rows` | Optional. Up to eight, each with a `label` and a `value` (both required), and optionally a `detail`, a `fraction` from 0 to 1 that draws a thin bar, and a `level`. |
+| `updated_at` | Optional. Unix seconds. Defaults to when the file was last written. |
+| `stale_after` | Optional. Seconds after `updated_at` when the numbers stop being true. The card then dims and says how old it is. |
+
+Replace a file by writing a temporary file beside it and renaming it over the
+original, so Ledge never reads half of one. Fields it doesn't know are ignored.
+A file that isn't valid JSON, is over 64 KB or has a version above 1 is skipped,
+with a line in the log. A feed's card goes when its file does.
+
+The closed notch shows one feed's text at a time, the most recently updated
+one that has any, and only while nothing else (music, a timer, a close meeting)
+is using it.
+
 ## And the rest
 
 <table>
