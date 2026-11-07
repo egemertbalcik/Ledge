@@ -102,6 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // could not run. A press of the button still builds it, as before.
         if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
             _ = updater
+            // Checking is not a choice Ledge offers. A copy from before
+            // Info.plist turned checks on could have stored a refusal, with
+            // nowhere to undo it. What to do with an update stays the user's:
+            // Sparkle's window offers install, skip and later.
+            updater.updater.automaticallyChecksForUpdates = true
         }
         coordinator.onCheckForUpdates = { [weak self] in self?.updater.checkForUpdates(nil) }
         coordinator.canCheckForUpdates = { [weak self] in

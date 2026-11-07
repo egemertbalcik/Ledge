@@ -40,6 +40,11 @@ struct UpdaterLaunchTests {
         let guardLine = try #require(launch.range(of: "guard !started else { return }"))
         let build = try #require(launch.range(of: "_ = updater"), "startNormally() no longer builds the updater")
         let start = try #require(launch.range(of: "coordinator.start()"))
+        // Automatic checks aren't a setting: a refusal stored by an older copy
+        // must not stop them.
+        let always = try #require(launch.range(of: "updater.updater.automaticallyChecksForUpdates = true"))
+        #expect(build.upperBound <= always.lowerBound)
+        #expect(always.upperBound <= start.lowerBound)
         #expect(guardLine.upperBound <= build.lowerBound, "built before the started guard")
         #expect(build.upperBound <= start.lowerBound, "built after the app has already started")
 
@@ -93,9 +98,11 @@ struct UpdaterLaunchTests {
             try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
         #expect(plist["SUEnableAutomaticChecks"] as? Bool == true)
-        // The default for somebody who has never chosen: updates install by
-        // themselves. A choice made in Sparkle's own window still wins.
-        #expect(plist["SUAutomaticallyUpdate"] as? Bool == true)
+        // An update is always offered, never installed silently. False also
+        // takes the box out of Sparkle's window and overrides a choice an older
+        // copy stored by ticking it.
+        #expect(plist["SUAllowsAutomaticUpdates"] as? Bool == false)
+        #expect(plist["SUAutomaticallyUpdate"] == nil)
         let feed = try #require(plist["SUFeedURL"] as? String)
         #expect(feed.hasPrefix("https://"))
         #expect(feed.hasSuffix("appcast.xml"))

@@ -161,9 +161,10 @@ and it can never be sold on the App Store. The source for all of it is here.
 [Download the DMG](https://github.com/egemertbalcik/Ledge/releases/latest/download/Ledge.dmg),
 drag Ledge into Applications, and open it **from Finder** — macOS gives the
 permissions to whatever launched the app, so starting it from a terminal hands
-them to the terminal instead. After that it keeps itself up to date with
-[Sparkle](https://sparkle-project.org); there's a *Check for Updates…* in
-Settings, under General.
+them to the terminal instead. After that it checks for updates by itself with
+[Sparkle](https://sparkle-project.org) and asks before installing one. You can
+install it, skip that version or be reminded later. There's also a *Check for
+Updates…* in Settings, under General.
 
 There's no Dock icon — the notch is the app. The only time Ledge shows up in the
 menu bar is while it's holding the Mac awake with the lid shut, because once the
