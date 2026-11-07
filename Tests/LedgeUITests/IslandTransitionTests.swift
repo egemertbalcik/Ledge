@@ -49,6 +49,9 @@ struct IslandTransitionTests {
         }
         .frame(width: size.width, height: size.height)
         .environment(\.waveformAnimationsEnabled, false)
+        // A CI runner has Reduce Motion on, which cuts the movement these
+        // tests read part-way through.
+        .transformEnvironment(\.self) { $0._accessibilityReduceMotion = false }
         // Far off every screen, so nothing is ever drawn where anyone sees it.
         let origin = CGPoint(x: -20000, y: -20000)
         let window = NSWindow(
@@ -148,7 +151,9 @@ struct IslandTransitionTests {
         defer { host.close() }
         settle(1)
         let open = frame(host)
-        #expect(open.content > 500, "the open card is drawn: \(open)")
+        // Counted in pixels, so a 1x display has a quarter of a 2x one's.
+        let scale = Int(host.window.backingScaleFactor)
+        #expect(open.content > 125 * scale * scale, "the open card is drawn: \(open)")
 
         presentation.phase = .idle
         settle(0.25)

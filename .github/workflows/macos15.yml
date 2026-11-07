@@ -52,9 +52,10 @@ jobs:
 
       # A few timing tests are known to flake on a slow machine, and a runner
       # has three cores. One retry; a failure that repeats is real. The first
-      # run's failures stay in the log either way.
+      # run's failures stay in the log either way. No test here uses XCTest, and
+      # looking for them crashes swiftpm-xctest-helper on the runner.
       - name: Test
-        run: swift test --no-parallel || { echo "::warning::test run failed once, retrying"; swift test --no-parallel; }
+        run: swift test --no-parallel --disable-xctest || { echo "::warning::test run failed once, retrying"; swift test --no-parallel --disable-xctest; }
 
       - name: Bundle
         run: ./Scripts/bundle.sh debug build/Ledge.app
