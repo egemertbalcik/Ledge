@@ -107,16 +107,22 @@ struct FeedSymbolTile: View {
 
 /// One side of a feed in the closed notch.
 ///
-/// A ring and the producer's words beside it, when the side has a fraction;
-/// the feed's tile and its words, when it has only words. Both sides read left
-/// to right, ring or tile first, so the two ears are one phrase either side of
-/// the cutout.
+/// A side with a fraction is a ring with the producer's words inside it, the
+/// way the timer's satellite holds its countdown: the ring says how full, the
+/// digits say how much. A side with only words wears the feed's tile and the
+/// words beside it. Both sides read the same either side of the cutout.
 struct FeedEar: View {
 
     enum Side { case leading, trailing }
 
     let payload: FeedPayload
     let side: Side
+
+    /// What the ring leaves clear above and below it, so it sits in the ear
+    /// rather than touching the shape's edge. The satellite fills its whole
+    /// circle; an ear is a strip with the notch's own height, and a ring that
+    /// went edge to edge in it would read as cut off.
+    private static let verticalMargin: CGFloat = 3
 
     private var text: String? {
         side == .leading ? payload.compactLeading : payload.compactTrailing
@@ -127,21 +133,17 @@ struct FeedEar: View {
     }
 
     var body: some View {
-        if text != nil || fraction != nil {
-            HStack(spacing: 2.5) {
-                if let fraction {
-                    // The timer ear's own dial geometry, with no hand: this is
-                    // how full something is, not a count of time.
-                    FeedRing(
-                        fraction: fraction,
-                        tint: payload.level.feedTint,
-                        track: payload.level.feedTint.opacity(0.3),
-                        lineWidth: 2.4
-                    )
-                    .frame(width: 14, height: 14)
-                } else {
-                    FeedSymbolTile(symbolName: payload.displaySymbol)
-                }
+        if let fraction {
+            // As tall as the ear comfortably allows, which is the notch's own
+            // height on this Mac: 32 on an Air, 38 on a Pro. Measured because
+            // a ring that fits one is lost on the other.
+            GeometryReader { proxy in
+                ring(fraction: fraction, diameter: Self.diameter(forHeight: proxy.size.height))
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+        } else if text != nil {
+            HStack(spacing: 3) {
+                FeedSymbolTile(symbolName: payload.displaySymbol)
                 if let text {
                     Text(text)
                         .font(.system(size: 9.5, weight: .semibold))
@@ -151,7 +153,7 @@ struct FeedEar: View {
                         .minimumScaleFactor(0.55)
                 }
             }
-            // Room to breathe either side, as the music tile has: a ring and
+            // Room to breathe either side, as the music tile has: a tile and
             // three digits are most of an ear, and words longer than that
             // shrink rather than reach for the shape's corner.
             .frame(maxWidth: 42)
@@ -166,5 +168,58 @@ struct FeedEar: View {
                 .font(.cardLabel)
                 .foregroundStyle(payload.level.feedTint)
         }
+    }
+
+    /// The ring's outer diameter in an ear of this height.
+    static func diameter(forHeight height: CGFloat) -> CGFloat {
+        guard height.isFinite, height > 0 else { return 25 }
+        return min(max(height - 2 * verticalMargin, 20), 34)
+    }
+
+    /// The stroke that goes with a diameter. Thinner in a small ring, where
+    /// two strokes of 2.5 would leave less than 20pt for the digits.
+    static func lineWidth(forDiameter diameter: CGFloat) -> CGFloat {
+        min(max(diameter * 0.075, 2), 2.5)
+    }
+
+    /// The digits' size, which is the ring's inner room and no more: about 8.5pt
+    /// in the ring of an Air and 10 in a Pro's. They are set condensed, because
+    /// four characters like "%100" in the ordinary width would need 7pt or less
+    /// to fit a ring this small; condensed they fit at about this size, and a
+    /// fifth character makes them shrink further.
+    static func fontSize(forDiameter diameter: CGFloat) -> CGFloat {
+        min(max(diameter * 0.32, 8), 10)
+    }
+
+    /// What the ring leaves for the digits: its inside, less a little air at
+    /// each end. Without the air the first and last characters of a long
+    /// string touch the stroke.
+    static func textWidth(forDiameter diameter: CGFloat) -> CGFloat {
+        diameter - 2 * lineWidth(forDiameter: diameter) - 2.5
+    }
+
+    private func ring(fraction: Double, diameter: CGFloat) -> some View {
+        let lineWidth = Self.lineWidth(forDiameter: diameter)
+        return ZStack {
+            // The timer ear's own dial geometry, with no hand: this is how full
+            // something is, not a count of time.
+            FeedRing(
+                fraction: fraction,
+                tint: payload.level.feedTint,
+                track: payload.level.feedTint.opacity(0.3),
+                lineWidth: lineWidth
+            )
+            if let text {
+                Text(text)
+                    .font(.system(size: Self.fontSize(forDiameter: diameter), weight: .semibold))
+                    .fontWidth(.condensed)
+                    .monospacedDigit()
+                    .foregroundStyle(payload.level.feedTint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .frame(width: Self.textWidth(forDiameter: diameter))
+            }
+        }
+        .frame(width: diameter, height: diameter)
     }
 }

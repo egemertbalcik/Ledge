@@ -167,6 +167,11 @@ enum StateGallery {
             presentation.restingFeed = PreviewFixtures.feed(level: .critical)
             presentation.selected = PreviewFixtures.feed(level: .critical)
         },
+        State(name: "companion-feed-long") { presentation in
+            presentation.phase = .companion
+            presentation.restingFeed = PreviewFixtures.feed(level: .critical, ears: .ringsLong)
+            presentation.selected = PreviewFixtures.feed(level: .critical, ears: .ringsLong)
+        },
         State(name: "companion-feed-words") { presentation in
             presentation.phase = .companion
             presentation.restingFeed = PreviewFixtures.feed(ears: .words)
@@ -667,8 +672,10 @@ extension PreviewFixtures {
 
     /// What the ears of a feed fixture carry.
     enum FeedEars {
-        /// A ring and a few words on each side.
+        /// A ring with a few characters inside it on each side.
         case rings
+        /// The same with five characters, the most a ring is asked to hold.
+        case ringsLong
         /// Words alone, so each side wears the feed's tile.
         case words
     }
@@ -707,7 +714,7 @@ extension PreviewFixtures {
                         detail: index % 2 == 0 ? "since 09:00" : nil,
                         fraction: index % 3 == 0 ? nil : Double(index * 7 % 100) / 100)
             }
-        let rings = ears == .rings
+        let rings = ears != .words
         return Activity(
             id: ActivityID(kind: .feeds, source: "preview"),
             createdAt: 0,
@@ -715,7 +722,7 @@ extension PreviewFixtures {
                 title: "Usage",
                 symbolName: "gauge.with.dots.needle.67percent",
                 compactLeading: critical ? "85%" : "42%",
-                compactTrailing: critical ? "~100%" : "68%",
+                compactTrailing: ears == .ringsLong ? "~100%" : (critical ? "100%" : "68%"),
                 compactLeadingFraction: rings ? (critical ? 0.85 : 0.42) : nil,
                 compactTrailingFraction: rings ? (critical ? 1 : 0.68) : nil,
                 level: level,
