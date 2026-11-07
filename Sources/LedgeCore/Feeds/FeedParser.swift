@@ -1,0 +1,152 @@
+import Foundation
+
+/// Reads a feed file.
+///
+/// A feed is a small JSON document some other program writes into a folder
+/// Ledge watches. Schema version 1:
+///
+/// ```json
+/// {
+///   "version": 1,
+///   "id": "limits",
+///   "title": "Limits",
+///   "symbol": "gauge.with.dots.needle.67percent",
+///   "compact_leading": "C 90%",
+///   "compact_trailing": "G ~100%",
+///   "level": "normal",
+///   "rows": [
+///     {"label": "Claude 5h", "value": "10% used", "detail": "resets 05:00",
+///      "fraction": 0.10, "level": "normal"}
+///   ],
+///   "updated_at": 1794088196,
+///   "stale_after": 43200
+/// }
+/// ```
+///
+/// Only `version` is required. Everything else has an answer when it is
+/// missing, because the writer is somebody else's script: a file that is
+/// nearly right should still draw, and a file that is wrong should be skipped
+/// whole rather than half-drawn. Unknown fields are ignored so a newer
+/// producer can add to a version-1 file without breaking an older Ledge.
+///
+/// Parsed by hand from `JSONSerialization` rather than decoded. `Decodable`
+/// is all or nothing, and one row with a number where a string belongs would
+/// have thrown away the whole card; here it throws away the row.
+public enum FeedParser {
+
+    /// Past this a file is not a status card. The limit is on the file, not on
+    /// what survives parsing, so an oversize file is never read into a model.
+    public static let maxBytes = 64 * 1024
+
+    public static let supportedVersion = 1
+
+    /// How much of each string is kept. A card has no room for more, and a
+    /// producer with a runaway string should not make the model carry it.
+    enum Limit {
+        static let id = 128
+        static let title = 80
+        static let symbol = 80
+        static let compact = 24
+        static let label = 60
+        static let value = 60
+        static let detail = 80
+    }
+
+    public struct Feed: Equatable, Sendable {
+        /// The producer's `id`, or the file's name without its extension.
+        public let id: String
+        public let payload: FeedPayload
+
+        public init(id: String, payload: FeedPayload) {
+            self.id = id
+            self.payload = payload
+        }
+    }
+
+    /// Why a file was not used. Only ever logged: a rejected file is simply
+    /// not a card.
+    public enum Rejection: Error, Equatable, Sendable, CustomStringConvertible {
+        case oversize(bytes: Int)
+        case notAnObject
+        case missingVersion
+        case unsupportedVersion(Int)
+
+        public var description: String {
+            switch self {
+            case .oversize(let bytes): "larger than \(FeedParser.maxBytes) bytes (\(bytes))"
+            case .notAnObject: "not a JSON object"
+            case .missingVersion: "no version"
+            case .unsupportedVersion(let version):
+                "version \(version) is not one this Ledge reads (\(FeedParser.supportedVersion))"
+            }
+        }
+    }
+
+    /// - Parameters:
+    ///   - fallbackID: the file's name without its extension, for a file that
+    ///     names no `id` of its own.
+    ///   - fallbackUpdatedAt: when the file was last written, in Unix seconds,
+    ///     for one that says nothing about when its numbers were true. The
+    ///     file's own date is a fair stand-in: it is when the producer last
+    ///     had something to say.
+    ///   - now: Unix seconds, for settling staleness. The parser never reads
+    ///     a clock.
+    public static func parse(
+        _ data: Data,
+        fallbackID: String,
+        fallbackUpdatedAt: TimeInterval = 0,
+        now: TimeInterval
+    ) -> Result<Feed, Rejection> {
+        guard data.count <= maxBytes else { return .failure(.oversize(bytes: data.count)) }
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .failure(.notAnObject)
+        }
+        guard let version = root["version"] as? Int else { return .failure(.missingVersion) }
+        guard version == supportedVersion else { return .failure(.unsupportedVersion(version)) }
+
+        let id = string(root["id"], limit: Limit.id) ?? fallbackID
+
+        let rows: [FeedRow] = (root["rows"] as? [Any] ?? []).compactMap { raw in
+            guard let row = raw as? [String: Any],
+                  let label = string(row["label"], limit: Limit.label),
+                  let value = string(row["value"], limit: Limit.value)
+            else { return nil }
+            return FeedRow(
+                label: label,
+                value: value,
+                detail: string(row["detail"], limit: Limit.detail),
+                fraction: number(row["fraction"]),
+                level: FeedLevel(word: row["level"] as? String)
+            )
+        }
+
+        let updatedAt = number(root["updated_at"]).flatMap { $0 > 0 ? $0 : nil } ?? fallbackUpdatedAt
+        let staleAfter = number(root["stale_after"]).flatMap { $0 > 0 ? $0 : nil }
+
+        let payload = FeedPayload(
+            title: string(root["title"], limit: Limit.title) ?? id,
+            symbolName: string(root["symbol"], limit: Limit.symbol),
+            compactLeading: string(root["compact_leading"], limit: Limit.compact),
+            compactTrailing: string(root["compact_trailing"], limit: Limit.compact),
+            level: FeedLevel(word: root["level"] as? String),
+            rows: rows,
+            updatedAt: updatedAt,
+            staleAfter: staleAfter
+        ).settled(at: now)
+
+        return .success(Feed(id: id, payload: payload))
+    }
+
+    /// A non-empty string, trimmed and cut to `limit` characters. Anything
+    /// else — a number, a null, a blank — is absent.
+    private static func string(_ value: Any?, limit: Int) -> String? {
+        guard let raw = value as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(limit))
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        guard let number = value as? Double, number.isFinite else { return nil }
+        return number
+    }
+}
