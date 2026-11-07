@@ -142,6 +142,7 @@ struct SettingsIcon {
         case "keep-awake": SettingsIcon(symbol: "cup.and.saucer", color: .brown)
         case "shelf": SettingsIcon(symbol: "tray.full.fill", color: .teal)
         case "notes": SettingsIcon(symbol: "note.text", color: .yellow)
+        case "feeds": SettingsIcon(symbol: "list.bullet.rectangle", color: .mint)
         case "privacy": SettingsIcon(symbol: "video.fill", color: .green)
         case "airpods-proximity": SettingsIcon(symbol: "airpods.gen3", color: .gray)
         case "devicealerts": SettingsIcon(symbol: "battery.25percent", color: .red)
@@ -185,7 +186,7 @@ enum CardGroup: String, CaseIterable {
         case "battery", "levels", "keep-awake", "privacy", "focus",
              "keyboard", "capslock", "audioroute", "bluetooth-power": .mac
         case "bluetooth", "airpods-proximity", "devicealerts": .devices
-        case "shelf", "notes": .files
+        case "shelf", "notes", "feeds": .files
         default: .other
         }
     }
@@ -245,6 +246,7 @@ struct CardRowPresentation: Equatable {
         case "keep-awake": KeepAwakeCopy.settingsSummary
         case "shelf": "Drop files on the notch to park them, then drag them out anywhere."
         case "notes": "A scratch pad in the notch, kept on this Mac."
+        case "feeds": "Cards for anything a script can write: small JSON files in Ledge's Feeds folder."
         case "privacy": "A dot while the camera or microphone is in use by an app."
         case "levels": "The readout when you press a volume or brightness key, and a card with sliders."
         case "airpods-proximity": "A card when an AirPods case opens nearby."
