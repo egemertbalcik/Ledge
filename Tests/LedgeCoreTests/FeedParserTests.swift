@@ -42,7 +42,13 @@ struct FeedParserTests {
           "symbol": "gauge.with.dots.needle.67percent",
           "compact_leading": "C 90%",
           "compact_trailing": "G ~100%",
+          "compact_leading_fraction": 0.9,
+          "compact_trailing_fraction": 1,
           "level": "warning",
+          "gauges": [
+            {"label": "Claude", "value": "90%", "fraction": 0.9, "level": "warning"},
+            {"label": "Gemini", "value": "~100%", "fraction": 1, "level": "critical"}
+          ],
           "rows": [
             {"label": "Claude 5h", "value": "10% used", "detail": "resets 05:00",
              "fraction": 0.10, "level": "normal"},
@@ -59,7 +65,13 @@ struct FeedParserTests {
         #expect(payload.symbolName == "gauge.with.dots.needle.67percent")
         #expect(payload.compactLeading == "C 90%")
         #expect(payload.compactTrailing == "G ~100%")
+        #expect(payload.compactLeadingFraction == 0.9)
+        #expect(payload.compactTrailingFraction == 1)
         #expect(payload.level == .warning)
+        #expect(payload.gauges == [
+            FeedGauge(label: "Claude", value: "90%", fraction: 0.9, level: .warning),
+            FeedGauge(label: "Gemini", value: "~100%", fraction: 1, level: .critical),
+        ])
         #expect(payload.updatedAt == 1_794_052_700)
         #expect(payload.staleAfter == 43_200)
         #expect(!payload.isStale)
@@ -77,8 +89,11 @@ struct FeedParserTests {
         let payload = parsed.payload
         #expect(payload.title == "limits", "and for a title")
         #expect(payload.symbolName == nil)
-        #expect(!payload.hasCompactText)
+        #expect(!payload.hasCompactContent)
+        #expect(payload.compactLeadingFraction == nil)
+        #expect(payload.compactTrailingFraction == nil)
         #expect(payload.level == .normal)
+        #expect(payload.gauges.isEmpty)
         #expect(payload.rows.isEmpty)
         #expect(payload.updatedAt == 1_794_000_000, "the file's own date stands in for updated_at")
         #expect(payload.staleAfter == nil)
@@ -161,7 +176,7 @@ struct FeedParserTests {
         #expect(parsed.id == "file")
         #expect(parsed.payload.title == "file")
         #expect(parsed.payload.symbolName == nil)
-        #expect(!parsed.payload.hasCompactText)
+        #expect(!parsed.payload.hasCompactContent)
     }
 
     @Test("Text is trimmed and cut to what a card has room for")
@@ -211,6 +226,90 @@ struct FeedParserTests {
         """
         let rows = try #require(feed(json)?.payload.rows)
         #expect(rows.map(\.fraction) == [1, 0, nil, 0.5])
+    }
+
+    // MARK: - Gauges
+
+    @Test("A gauge needs a label, a value and a fraction")
+    func gaugeNeedsItsThree() throws {
+        let json = """
+        {"version": 1, "gauges": [
+          {"label": "Kept", "value": "10%", "fraction": 0.1},
+          {"value": "10%", "fraction": 0.1},
+          {"label": "no value", "fraction": 0.1},
+          {"label": "no fraction", "value": "10%"},
+          {"label": "string fraction", "value": "10%", "fraction": "0.1"},
+          {"label": "number value", "value": 10, "fraction": 0.1},
+          "not an object",
+          {"label": "Also kept", "value": "20%", "fraction": 0.2}
+        ]}
+        """
+        let gauges = try #require(feed(json)?.payload.gauges)
+        #expect(gauges.map(\.label) == ["Kept", "Also kept"])
+    }
+
+    @Test("A card draws at most three gauges, counted after the broken ones are dropped")
+    func gaugeCap() throws {
+        let broken = #"{"label": "broken", "value": "1%"}"#
+        let good = (1...5).map { #"{"label": "G\#($0)", "value": "\#($0)%", "fraction": 0.\#($0)}"# }
+        let json = #"{"version": 1, "gauges": [\#(([broken] + good).joined(separator: ","))]}"#
+        let payload = try #require(feed(json)?.payload)
+        #expect(payload.gauges.count == FeedPayload.maxGauges)
+        #expect(payload.gauges.map(\.label) == ["G1", "G2", "G3"])
+    }
+
+    @Test("A gauge's fraction is held to 0...1, and its level reads like a row's")
+    func gaugeFractionAndLevel() throws {
+        let json = """
+        {"version": 1, "gauges": [
+          {"label": "a", "value": "1", "fraction": 3},
+          {"label": "b", "value": "1", "fraction": -1, "level": "Critical"},
+          {"label": "c", "value": "1", "fraction": 0.5, "level": "dire"}
+        ]}
+        """
+        let gauges = try #require(feed(json)?.payload.gauges)
+        #expect(gauges.map(\.fraction) == [1, 0, 0.5])
+        #expect(gauges.map(\.level) == [.normal, .critical, .normal])
+    }
+
+    @Test("Gauge text is cut to what a ring has room for")
+    func gaugeText() throws {
+        let long = String(repeating: "x", count: 500)
+        let json = #"{"version": 1, "gauges": [{"label": "\#(long)", "value": "\#(long)", "fraction": 0.5}]}"#
+        let gauge = try #require(feed(json)?.payload.gauges.first)
+        #expect(gauge.label.count == FeedParser.Limit.gaugeLabel)
+        #expect(gauge.value.count == FeedParser.Limit.gaugeValue)
+    }
+
+    @Test("A gauges field that is not a list draws no gauges")
+    func gaugesNotAList() throws {
+        for value in ["7", #""many""#, #"{"label": "a"}"#, "null"] {
+            let payload = try #require(feed(#"{"version": 1, "gauges": \#(value)}"#)?.payload)
+            #expect(payload.gauges.isEmpty, "gauges \(value)")
+        }
+    }
+
+    // MARK: - Rings in the closed notch
+
+    @Test("The compact fractions are held to 0...1, and a non-number is no ring")
+    func compactFractions() throws {
+        let json = #"{"version": 1, "compact_leading_fraction": 4, "compact_trailing_fraction": -2}"#
+        let payload = try #require(feed(json)?.payload)
+        #expect(payload.compactLeadingFraction == 1)
+        #expect(payload.compactTrailingFraction == 0)
+
+        let nonsense = try #require(feed(
+            #"{"version": 1, "compact_leading_fraction": "half", "compact_trailing_fraction": null}"#
+        )?.payload)
+        #expect(nonsense.compactLeadingFraction == nil)
+        #expect(nonsense.compactTrailingFraction == nil)
+    }
+
+    @Test("A ring with no words is still something to say in the ears")
+    func ringAlone() throws {
+        let payload = try #require(feed(#"{"version": 1, "compact_trailing_fraction": 0.4}"#)?.payload)
+        #expect(payload.compactTrailing == nil)
+        #expect(payload.hasCompactContent)
     }
 
     // MARK: - Levels

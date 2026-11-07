@@ -88,24 +88,31 @@ to Apple Notes in one click.
 
 Feeds turn small files into cards. Put a JSON file in
 `~/Library/Application Support/Ledge/Feeds/` and Ledge shows it as a card with
-a title and a few rows, and, if the file asks, a short reading on either side
-of the notch while it's closed. A build's status, a backup's last run, a quota,
-a queue length: whatever a script can write down. Ledge only reads these files.
-It never runs anything.
+a title, a few rings across the top and a few rows under them, and, if the file
+asks, a short reading on either side of the notch while it's closed. A build's
+status, a backup's last run, a quota, a queue length: whatever a script can
+write down. Ledge only reads these files. It never runs anything.
 
 Feeds are off until you switch them on in Settings, under Cards.
 
 ```json
 {
   "version": 1,
-  "id": "backup",
-  "title": "Backup",
-  "symbol": "externaldrive.fill",
-  "compact_leading": "Backup ok",
+  "id": "usage",
+  "title": "Usage",
+  "symbol": "gauge.with.dots.needle.67percent",
+  "compact_leading": "42%",
+  "compact_leading_fraction": 0.42,
+  "compact_trailing": "85%",
+  "compact_trailing_fraction": 0.85,
   "level": "normal",
+  "gauges": [
+    {"label": "API", "value": "42%", "fraction": 0.42},
+    {"label": "Storage", "value": "85%", "fraction": 0.85, "level": "warning"}
+  ],
   "rows": [
-    {"label": "Last run", "value": "02:14", "detail": "took 6 min"},
-    {"label": "Disk", "value": "81% full", "fraction": 0.81, "level": "warning"}
+    {"label": "Today", "value": "1.2k calls", "detail": "resets 05:00", "fraction": 0.42},
+    {"label": "Last sync", "value": "02:14", "detail": "took 6 min"}
   ],
   "updated_at": 1794088196,
   "stale_after": 86400
@@ -118,8 +125,10 @@ Feeds are off until you switch them on in Settings, under Cards.
 | `id` | Optional. Defaults to the file name without `.json`. |
 | `title` | Optional. The card's title. Defaults to the id. |
 | `symbol` | Optional. The name of an SF Symbol. |
-| `compact_leading`, `compact_trailing` | Optional. Short text for the left and right of the notch while it's closed. |
-| `level` | Optional. `normal`, `warning` or `critical`. Colours the feed; a feed turning `critical` peeks once. |
+| `compact_leading`, `compact_trailing` | Optional. Short text for the left and right of the notch while it's closed. Keep it to a few characters. |
+| `compact_leading_fraction`, `compact_trailing_fraction` | Optional. 0 to 1. Draws a small ring beside that side's text, filled to the fraction. Without one, the side shows the feed's symbol instead. |
+| `level` | Optional. `normal`, `warning` or `critical`. Colours the closed notch's ring and text; a feed turning `critical` peeks once. |
+| `gauges` | Optional. Up to three, shown as rings across the top of the card. Each needs a `label`, a short `value` that goes inside the ring and a `fraction` from 0 to 1, and may have a `level` (`normal`, `warning` or `critical`) that colours the ring. An item missing one of the three is skipped. |
 | `rows` | Optional. Up to eight, each with a `label` and a `value` (both required), and optionally a `detail`, a `fraction` from 0 to 1 that draws a thin bar, and a `level`. |
 | `updated_at` | Optional. Unix seconds. Defaults to when the file was last written. |
 | `stale_after` | Optional. Seconds after `updated_at` when the numbers stop being true. The card then dims and says how old it is. |

@@ -488,7 +488,7 @@ public struct CompactEarsView: View {
         case .feeds(let payload):
             if let text = payload.compactTrailing {
                 feedText(text, level: payload.level)
-            } else if !payload.hasCompactText, payload.level != .normal {
+            } else if !payload.hasCompactContent, payload.level != .normal {
                 // A feed with nothing to say in the ears that is nonetheless
                 // standing the notch up — turning critical — would otherwise
                 // be a glyph and an empty ear.

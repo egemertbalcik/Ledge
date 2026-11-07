@@ -163,7 +163,7 @@ extension Activity {
         case .event(let payload):
             return payload.hasEvent && payload.startsIn <= 60 * 60 && payload.startsIn >= -60
         case .feeds(let payload):
-            return payload.hasCompactText && !payload.isStale
+            return payload.hasCompactContent && !payload.isStale
         case .levels, .shelf, .notes:
             return false
         default:

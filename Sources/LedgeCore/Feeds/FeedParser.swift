@@ -13,7 +13,12 @@ import Foundation
 ///   "symbol": "gauge.with.dots.needle.67percent",
 ///   "compact_leading": "C 90%",
 ///   "compact_trailing": "G ~100%",
+///   "compact_leading_fraction": 0.9,
+///   "compact_trailing_fraction": 1.0,
 ///   "level": "normal",
+///   "gauges": [
+///     {"label": "Claude", "value": "90%", "fraction": 0.9, "level": "warning"}
+///   ],
 ///   "rows": [
 ///     {"label": "Claude 5h", "value": "10% used", "detail": "resets 05:00",
 ///      "fraction": 0.10, "level": "normal"}
@@ -47,6 +52,8 @@ public enum FeedParser {
         static let title = 80
         static let symbol = 80
         static let compact = 24
+        static let gaugeLabel = 20
+        static let gaugeValue = 12
         static let label = 60
         static let value = 60
         static let detail = 80
@@ -106,6 +113,20 @@ public enum FeedParser {
 
         let id = string(root["id"], limit: Limit.id) ?? fallbackID
 
+        // A gauge with nothing to fill its ring is no gauge, so a missing
+        // fraction drops the item, where a row would only lose its bar.
+        let gauges: [FeedGauge] = (root["gauges"] as? [Any] ?? []).compactMap { raw in
+            guard let gauge = raw as? [String: Any],
+                  let label = string(gauge["label"], limit: Limit.gaugeLabel),
+                  let value = string(gauge["value"], limit: Limit.gaugeValue),
+                  let fraction = number(gauge["fraction"])
+            else { return nil }
+            return FeedGauge(
+                label: label, value: value, fraction: fraction,
+                level: FeedLevel(word: gauge["level"] as? String)
+            )
+        }
+
         let rows: [FeedRow] = (root["rows"] as? [Any] ?? []).compactMap { raw in
             guard let row = raw as? [String: Any],
                   let label = string(row["label"], limit: Limit.label),
@@ -128,7 +149,10 @@ public enum FeedParser {
             symbolName: string(root["symbol"], limit: Limit.symbol),
             compactLeading: string(root["compact_leading"], limit: Limit.compact),
             compactTrailing: string(root["compact_trailing"], limit: Limit.compact),
+            compactLeadingFraction: number(root["compact_leading_fraction"]),
+            compactTrailingFraction: number(root["compact_trailing_fraction"]),
             level: FeedLevel(word: root["level"] as? String),
+            gauges: gauges,
             rows: rows,
             updatedAt: updatedAt,
             staleAfter: staleAfter
