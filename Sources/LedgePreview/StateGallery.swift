@@ -738,7 +738,7 @@ extension PreviewFixtures {
             payload: .feeds(FeedPayload(
                 title: "Usage",
                 symbolName: "gauge.with.dots.needle.67percent",
-                compactLeading: bareFractions != nil ? nil : (critical ? "85%" : "42%"),
+                compactLeading: bareFractions != nil ? nil : (critical ? "85%" : "42"),
                 compactTrailing: bareFractions != nil
                     ? nil : (ears == .ringsLong ? "~100%" : (critical ? "100%" : "68%")),
                 compactLeadingFraction: bareFractions?.leading ?? (rings ? (critical ? 0.85 : 0.42) : nil),

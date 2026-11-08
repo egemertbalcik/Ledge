@@ -56,6 +56,20 @@ struct FeedEarSizingTests {
         }
     }
 
+    @Test("Only up to three bare digits count as a plain number")
+    func plainNumber() {
+        for text in ["0", "48", "100"] { #expect(FeedEar.isPlainNumber(text)) }
+        for text in ["", "%48", "48%", "1000", "~10"] { #expect(!FeedEar.isPlainNumber(text)) }
+    }
+
+    @Test("Plain digits are 8 to 9pt")
+    func plainNumberSize() {
+        for height in Self.heights + [0, 20, 400] {
+            let size = FeedEar.plainNumberSize(forDiameter: FeedEar.diameter(forHeight: height))
+            #expect(size >= 8 && size <= 9)
+        }
+    }
+
     /// The width of a string in the face the ring sets it in, as AppKit
     /// measures it: semibold, condensed, with the digits all one width.
     private func width(of text: String, size: CGFloat) -> CGFloat {

@@ -245,6 +245,18 @@ struct FeedEar: View {
         min(max(diameter * 0.32, 8), 10)
     }
 
+    /// Up to three bare digits have room in the ring, so they can skip the
+    /// condensed face longer strings need and match Ledge's rounded numerals.
+    static func isPlainNumber(_ text: String) -> Bool {
+        !text.isEmpty && text.count <= 3 && text.allSatisfy(\.isNumber)
+    }
+
+    /// The size for those digits: a touch under `fontSize`, since a rounded
+    /// face at full width looks larger than a condensed one.
+    static func plainNumberSize(forDiameter diameter: CGFloat) -> CGFloat {
+        min(max(diameter * 0.28, 8), 9)
+    }
+
     /// What the ring leaves for the digits: its inside, less a little air at
     /// each end. Without the air the first and last characters of a long
     /// string touch the stroke.
@@ -264,9 +276,14 @@ struct FeedEar: View {
                 lineWidth: lineWidth
             )
             if let text {
+                let plain = Self.isPlainNumber(text)
                 Text(text)
-                    .font(.system(size: Self.fontSize(forDiameter: diameter), weight: .semibold))
-                    .fontWidth(.condensed)
+                    .font(.system(
+                        size: plain ? Self.plainNumberSize(forDiameter: diameter) : Self.fontSize(forDiameter: diameter),
+                        weight: plain ? .bold : .semibold,
+                        design: plain ? .rounded : .default
+                    ))
+                    .fontWidth(plain ? .standard : .condensed)
                     .monospacedDigit()
                     .foregroundStyle(payload.level.feedTint)
                     .lineLimit(1)
