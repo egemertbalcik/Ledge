@@ -743,6 +743,8 @@ extension PreviewFixtures {
                     ? nil : (ears == .ringsLong ? "~100%" : (critical ? "100%" : "68%")),
                 compactLeadingFraction: bareFractions?.leading ?? (rings ? (critical ? 0.85 : 0.42) : nil),
                 compactTrailingFraction: bareFractions?.trailing ?? (rings ? (critical ? 1 : 0.68) : nil),
+                compactLeadingColor: critical ? nil : "#D97757",
+                compactTrailingColor: critical ? nil : "#7A9DFF",
                 level: level,
                 gauges: Array(gaugeSet.prefix(gaugeCount)),
                 rows: rows,

@@ -159,6 +159,22 @@ struct FeedEar: View {
         side == .leading ? payload.compactLeadingFraction : payload.compactTrailingFraction
     }
 
+    /// The producer's colour for this side, if it chose one.
+    private var fixedTint: Color? {
+        Self.color(hex: side == .leading ? payload.compactLeadingColor : payload.compactTrailingColor)
+    }
+
+    /// `#RRGGBB` as a colour. The parser has already checked the shape.
+    static func color(hex: String?) -> Color? {
+        guard let hex, let value = Int(hex.dropFirst(), radix: 16) else { return nil }
+        return Color(
+            .sRGB,
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+
     var body: some View {
         if let fraction, text == nil {
             bareRing(fraction: fraction)
@@ -177,7 +193,7 @@ struct FeedEar: View {
                     Text(text)
                         .font(.system(size: 9.5, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(payload.level.feedTint)
+                        .foregroundStyle(fixedTint ?? payload.level.feedTint)
                         .lineLimit(1)
                         .minimumScaleFactor(0.55)
                 }
@@ -214,7 +230,7 @@ struct FeedEar: View {
     }
 
     private func bareRing(fraction: Double) -> some View {
-        let tint = Self.bareRingTint(forFraction: fraction)
+        let tint = fixedTint ?? Self.bareRingTint(forFraction: fraction)
         return FeedRing(
             fraction: fraction,
             tint: tint,
@@ -266,13 +282,14 @@ struct FeedEar: View {
 
     private func ring(fraction: Double, diameter: CGFloat) -> some View {
         let lineWidth = Self.lineWidth(forDiameter: diameter)
+        let tint = fixedTint ?? payload.level.feedTint
         return ZStack {
             // The timer ear's own dial geometry, with no hand: this is how full
             // something is, not a count of time.
             FeedRing(
                 fraction: fraction,
-                tint: payload.level.feedTint,
-                track: payload.level.feedTint.opacity(0.3),
+                tint: tint,
+                track: tint.opacity(0.3),
                 lineWidth: lineWidth
             )
             if let text {
@@ -285,7 +302,7 @@ struct FeedEar: View {
                     ))
                     .fontWidth(plain ? .standard : .condensed)
                     .monospacedDigit()
-                    .foregroundStyle(payload.level.feedTint)
+                    .foregroundStyle(tint)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .frame(width: Self.textWidth(forDiameter: diameter))

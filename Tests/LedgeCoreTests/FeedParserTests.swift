@@ -30,6 +30,19 @@ struct FeedParserTests {
         return feed
     }
 
+    // MARK: - Fixed colours
+
+    @Test("A side's colour is read only as #RRGGBB")
+    func compactColours() {
+        let good = feed(#"{"version":1,"compact_leading_color":"#D97757","compact_trailing_color":"#2F80ED"}"#)
+        #expect(good?.payload.compactLeadingColor == "#D97757")
+        #expect(good?.payload.compactTrailingColor == "#2F80ED")
+        for bad in ["D97757", "#D9775", "#D977577", "#GGGGGG", "orange", ""] {
+            let parsed = feed(#"{"version":1,"compact_leading_color":"\#(bad)"}"#)
+            #expect(parsed?.payload.compactLeadingColor == nil, "\(bad)")
+        }
+    }
+
     // MARK: - What a whole file says
 
     @Test("A complete file reads field for field")

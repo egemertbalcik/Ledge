@@ -107,6 +107,11 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     public var compactLeadingFraction: Double?
     public var compactTrailingFraction: Double?
 
+    /// A fixed colour for each side, as `#RRGGBB`, when what is shown has a
+    /// colour of its own. Without one the side takes its colour from `level`.
+    public var compactLeadingColor: String?
+    public var compactTrailingColor: String?
+
     /// The feed as a whole, which is not necessarily the worst of its rows:
     /// the producer knows what its numbers mean.
     public var level: FeedLevel
@@ -139,6 +144,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         compactTrailing: String? = nil,
         compactLeadingFraction: Double? = nil,
         compactTrailingFraction: Double? = nil,
+        compactLeadingColor: String? = nil,
+        compactTrailingColor: String? = nil,
         level: FeedLevel = .normal,
         gauges: [FeedGauge] = [],
         rows: [FeedRow] = [],
@@ -152,6 +159,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         self.compactTrailing = compactTrailing
         self.compactLeadingFraction = Self.clamped(compactLeadingFraction)
         self.compactTrailingFraction = Self.clamped(compactTrailingFraction)
+        self.compactLeadingColor = compactLeadingColor
+        self.compactTrailingColor = compactTrailingColor
         self.level = level
         self.gauges = Array(gauges.prefix(Self.maxGauges))
         self.rows = Array(rows.prefix(Self.maxRows))
