@@ -3381,9 +3381,10 @@ public final class LedgeCoordinator {
     /// that has to hand its borrowed flag back, the pointer's position at
     /// the moment a readout was asked for.
     private func settleBeforeReducing(_ event: NotchEvent) {
-        // A hover with nothing on screen starts on the first card rather than
-        // the one last read, so what opens doesn't depend on the last visit.
-        if event == .hoverChanged(true), state.phase == .idle {
+        // A hover with nothing on screen comes back to the card last read.
+        // A card pinned under "Opens first" still wins: that is the user
+        // saying which one they want.
+        if event == .hoverChanged(true), state.phase == .idle, !preferences.pinnedCard.isEmpty {
             activities.selectFirst()
         }
         // A collapse can sever a slider drag without its onEnded ever firing —

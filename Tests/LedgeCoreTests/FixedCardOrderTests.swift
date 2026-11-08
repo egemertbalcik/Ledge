@@ -220,7 +220,7 @@ struct FixedCardOrderTests {
     /// `LedgeCoordinator` can't be built in a test, so this reads it. Each line
     /// is a way for the rule to die quietly: the queue would still pass above
     /// while nothing ever asked it for the first card.
-    @Test("The shell asks for the first card only when nothing is on screen")
+    @Test("The shell asks for the first card only for a pin, with nothing on screen")
     func hoverWiring() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -232,7 +232,7 @@ struct FixedCardOrderTests {
         let settling = coordinator[start.upperBound...]
         let end = settling.range(of: "\n    }\n")?.lowerBound ?? settling.endIndex
         let hook = settling[..<end]
-        #expect(hook.contains("if event == .hoverChanged(true), state.phase == .idle {"))
+        #expect(hook.contains("if event == .hoverChanged(true), state.phase == .idle, !preferences.pinnedCard.isEmpty {"))
         #expect(hook.contains("activities.selectFirst()"))
 
         // The ears keep their rule: what they show is what opens.
