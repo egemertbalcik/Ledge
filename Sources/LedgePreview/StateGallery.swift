@@ -512,7 +512,7 @@ enum StateGallery {
         /// One gauge and nothing under it.
         State(name: "card-feeds-gauge") { presentation in
             presentation.phase = .expanded
-            presentation.selected = PreviewFixtures.feed(gauges: 1, rows: 0)
+            presentation.selected = PreviewFixtures.feed(gauges: 4, rows: 0)
             presentation.count = 3
         },
         State(name: "card-feeds-empty") { presentation in
@@ -709,11 +709,14 @@ extension PreviewFixtures {
     ) -> Activity {
         let critical = level == .critical
         let gaugeSet: [FeedGauge] = [
-            FeedGauge(label: "API", value: critical ? "85%" : "42%",
-                      fraction: critical ? 0.85 : 0.42, level: critical ? .warning : .normal),
-            FeedGauge(label: "Quota", value: critical ? "~100%" : "68%",
-                      fraction: critical ? 1 : 0.68, level: critical ? .critical : .warning),
-            FeedGauge(label: "Storage", value: "23%", fraction: 0.23),
+            FeedGauge(label: "Claude 5h", value: critical ? "85%" : "42%",
+                      fraction: critical ? 0.85 : 0.42, level: critical ? .warning : .normal,
+                      color: critical ? nil : "#D97757"),
+            FeedGauge(label: "Claude 7d", value: critical ? "~100%" : "68%",
+                      fraction: critical ? 1 : 0.68, level: critical ? .critical : .warning,
+                      color: critical ? nil : "#D97757"),
+            FeedGauge(label: "Codex 5h", value: "23%", fraction: 0.23, color: "#7A9DFF"),
+            FeedGauge(label: "Codex 7d", value: "91%", fraction: 0.91, color: "#7A9DFF"),
         ]
         let readings: [FeedRow] = [
             FeedRow(label: "Today", value: "1.2k calls", detail: "resets 05:00",

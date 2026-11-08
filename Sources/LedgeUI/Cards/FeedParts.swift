@@ -76,7 +76,7 @@ struct FeedGaugeView: View {
             ZStack {
                 FeedRing(
                     fraction: gauge.fraction,
-                    tint: gauge.level.feedTint,
+                    tint: FeedEar.color(hex: gauge.color) ?? gauge.level.feedTint,
                     track: .white.opacity(0.15),
                     lineWidth: 4
                 )

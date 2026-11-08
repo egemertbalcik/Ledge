@@ -64,13 +64,17 @@ public struct FeedGauge: Equatable, Sendable, Codable {
 
     public var level: FeedLevel
 
-    public init(label: String, value: String, fraction: Double, level: FeedLevel = .normal) {
+    /// A fixed colour for the ring, as `#RRGGBB`. Without one, `level` colours it.
+    public var color: String?
+
+    public init(label: String, value: String, fraction: Double, level: FeedLevel = .normal, color: String? = nil) {
         self.label = label
         self.value = value
         // Clamped here so no view has to, and a non-number is an empty ring
         // rather than something to draw.
         self.fraction = fraction.isFinite ? min(max(fraction, 0), 1) : 0
         self.level = level
+        self.color = color
     }
 }
 
@@ -86,9 +90,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     /// enthusiasm stops being a glance.
     public static let maxRows = 8
 
-    /// The most gauges a card draws: three rings fit across it and a fourth
-    /// would not.
-    public static let maxGauges = 3
+    /// The most gauges a card draws: four rings fit across it.
+    public static let maxGauges = 4
 
     public var title: String
 

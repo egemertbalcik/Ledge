@@ -134,7 +134,8 @@ public enum FeedParser {
             else { return nil }
             return FeedGauge(
                 label: label, value: value, fraction: fraction,
-                level: FeedLevel(word: gauge["level"] as? String)
+                level: FeedLevel(word: gauge["level"] as? String),
+                color: color(gauge["color"])
             )
         }
 
