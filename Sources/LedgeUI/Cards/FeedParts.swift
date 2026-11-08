@@ -134,8 +134,10 @@ struct FeedSymbolTile: View {
 ///
 /// A side with a fraction is a ring with the producer's words inside it, the
 /// way the timer's satellite holds its countdown: the ring says how full, the
-/// digits say how much. A side with only words wears the feed's tile and the
-/// words beside it. Both sides read the same either side of the cutout.
+/// digits say how much. A side with a fraction and no words is a small ring
+/// whose colour says how full it is. A side with only words wears the feed's
+/// tile and the words beside it. Both sides read the same either side of the
+/// cutout.
 struct FeedEar: View {
 
     enum Side { case leading, trailing }
@@ -158,7 +160,9 @@ struct FeedEar: View {
     }
 
     var body: some View {
-        if let fraction {
+        if let fraction, text == nil {
+            bareRing(fraction: fraction)
+        } else if let fraction {
             // As tall as the ear comfortably allows, which is the notch's own
             // height on this Mac: 32 on an Air, 38 on a Pro. Measured because
             // a ring that fits one is lost on the other.
@@ -195,7 +199,32 @@ struct FeedEar: View {
         }
     }
 
-    /// The ring's outer diameter in an ear of this height.
+    /// A ring with no words holds nothing, so it needs no more room than the
+    /// timer's dial beside it: about the same outer size and the same stroke.
+    static let bareRingDiameter: CGFloat = 18
+    private static let bareRingLineWidth: CGFloat = 2.5
+
+    /// The colour of a ring with no words, which is the only thing saying how
+    /// much is left: each side by its own fraction, as a battery reads, and
+    /// not by the level of the feed as a whole.
+    static func bareRingTint(forFraction fraction: Double) -> Color {
+        if fraction < 0.15 { return .red }
+        if fraction < 0.4 { return .orange }
+        return .green
+    }
+
+    private func bareRing(fraction: Double) -> some View {
+        let tint = Self.bareRingTint(forFraction: fraction)
+        return FeedRing(
+            fraction: fraction,
+            tint: tint,
+            track: tint.opacity(0.3),
+            lineWidth: Self.bareRingLineWidth
+        )
+        .frame(width: Self.bareRingDiameter, height: Self.bareRingDiameter)
+    }
+
+    /// The ring's outer diameter in an ear of this height, when it holds words.
     static func diameter(forHeight height: CGFloat) -> CGFloat {
         guard height.isFinite, height > 0 else { return 25 }
         return min(max(height - 2 * verticalMargin, 20), 34)

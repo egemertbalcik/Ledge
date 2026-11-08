@@ -31,6 +31,23 @@ struct FeedEarSizingTests {
         #expect(FeedEar.diameter(forHeight: 0) > 0)
     }
 
+    @Test("A ring with no words is smaller than one that holds words")
+    func bareRingIsSmaller() {
+        for height in Self.heights {
+            #expect(FeedEar.bareRingDiameter < FeedEar.diameter(forHeight: height))
+        }
+    }
+
+    @Test("A ring with no words is green when full, orange in the middle, red when low")
+    func bareRingColour() {
+        #expect(FeedEar.bareRingTint(forFraction: 1) == .green)
+        #expect(FeedEar.bareRingTint(forFraction: 0.4) == .green)
+        #expect(FeedEar.bareRingTint(forFraction: 0.39) == .orange)
+        #expect(FeedEar.bareRingTint(forFraction: 0.15) == .orange)
+        #expect(FeedEar.bareRingTint(forFraction: 0.14) == .red)
+        #expect(FeedEar.bareRingTint(forFraction: 0) == .red)
+    }
+
     @Test("The digits are never smaller than 8pt, or larger than 10")
     func digitSize() {
         for height in Self.heights + [0, 20, 400] {

@@ -102,8 +102,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     public var compactTrailing: String?
 
     /// How far round a ring in the closed notch goes, on each side. With one
-    /// the side draws a ring beside its text; without, a tile for the feed's
-    /// symbol.
+    /// the side draws a ring around its text, or a small coloured ring if it
+    /// has none; without, a tile for the feed's symbol.
     public var compactLeadingFraction: Double?
     public var compactTrailingFraction: Double?
 

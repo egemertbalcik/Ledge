@@ -176,7 +176,12 @@ public struct CompactEarsView: View {
             }
         case .feeds(let payload):
             var parts = [payload.title]
-            parts += [payload.compactLeading, payload.compactTrailing].compactMap { $0 }
+            // A ring with no words is still a reading, and VoiceOver cannot see
+            // its colour.
+            parts += [
+                payload.compactLeading ?? payload.compactLeadingFraction.map(percent),
+                payload.compactTrailing ?? payload.compactTrailingFraction.map(percent),
+            ].compactMap { $0 }
             if payload.level != .normal { parts.append(payload.level.rawValue) }
             return parts.joined(separator: ", ")
         }
