@@ -83,6 +83,7 @@ public struct ScenarioActivity: Codable, Sendable {
     public var levels: LevelsPayload?
     public var notes: NotesPayload?
     public var keepAwake: KeepAwakePayload?
+    public var feeds: FeedPayload?
 
     public init(
         kind: ActivityKind,
@@ -102,7 +103,8 @@ public struct ScenarioActivity: Codable, Sendable {
         keyboard: KeyboardLayoutPayload? = nil,
         levels: LevelsPayload? = nil,
         notes: NotesPayload? = nil,
-        keepAwake: KeepAwakePayload? = nil
+        keepAwake: KeepAwakePayload? = nil,
+        feeds: FeedPayload? = nil
     ) {
         self.kind = kind
         self.source = source
@@ -122,6 +124,7 @@ public struct ScenarioActivity: Codable, Sendable {
         self.levels = levels
         self.notes = notes
         self.keepAwake = keepAwake
+        self.feeds = feeds
     }
 
     public func activity(createdAt: TimeInterval) throws -> Activity {
@@ -169,6 +172,9 @@ public struct ScenarioActivity: Codable, Sendable {
             // Awake card at rest is the one state that needs nothing said
             // about it.
             payload = .keepAwake(keepAwake ?? KeepAwakePayload(phase: .ready))
+        case .feeds:
+            guard let feeds else { throw ScenarioError.missingPayload(kind, source) }
+            payload = .feeds(feeds)
         }
 
         return Activity(

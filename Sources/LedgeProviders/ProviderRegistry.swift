@@ -345,6 +345,21 @@ public enum ProviderRegistry {
             ),
 
             ProviderRegistration(
+                id: "feeds",
+                displayName: "Feeds",
+                kind: .feeds,
+                // Reads files other programs leave in Ledge's own folder in
+                // Application Support, which the app is free to read.
+                permission: nil,
+                // Off until asked for. A feed is something the user arranged
+                // with another program, and until they have there is nothing
+                // to show; while it is off the provider is never built, so it
+                // makes no folder and costs nothing.
+                isEnabledByDefault: false,
+                make: { FeedsProvider(source: FeedFolderSource()) }
+            ),
+
+            ProviderRegistration(
                 id: "privacy",
                 displayName: "Camera & Mic",
                 kind: .privacy,

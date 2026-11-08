@@ -100,6 +100,7 @@ private enum PreviewShell {
             Self.provider("keep-awake", "Keep Awake", .keepAwake, nil, enabled: false),
             Self.provider("shelf", "File Shelf", .shelf, nil),
             Self.provider("notes", "Notes", .notes, nil),
+            Self.provider("feeds", "Feeds", .feeds, nil, enabled: false),
             Self.provider("privacy", "Camera & Mic", .privacy, nil),
         ]
         m.mediaSource = .systemWide(host: "MediaRemote")

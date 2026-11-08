@@ -96,7 +96,7 @@ struct SettingsPresentationTests {
             "nowplaying", "battery", "bluetooth", "airpods-proximity", "devicealerts",
             "audioroute", "bluetooth-power", "keyboard", "capslock", "calendar",
             "focus", "weather", "levels", "timer", "shelf", "notes", "privacy",
-            "keep-awake",
+            "keep-awake", "feeds",
         ]
         let fallback = CardRowPresentation.summary(for: "something-new")
         for id in ids {

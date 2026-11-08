@@ -174,6 +174,11 @@ public struct CompactEarsView: View {
                                              floor: payload.batteryFloor,
                                              lidClosed: payload.lidClosed)
             }
+        case .feeds(let payload):
+            var parts = [payload.title]
+            parts += [payload.compactLeading, payload.compactTrailing].compactMap { $0 }
+            if payload.level != .normal { parts.append(payload.level.rawValue) }
+            return parts.joined(separator: ", ")
         }
     }
 
@@ -199,6 +204,11 @@ public struct CompactEarsView: View {
                 // the rhythm glyph keeps on the other side.
                 .frame(width: 20, height: 20)
                 .offset(x: -2.5)
+        } else if case .feeds(let payload) = activity.payload {
+            // A ring and the producer's words, or its tile and its words: see
+            // `FeedEar`. Before the checks below, which would take a feed's
+            // own symbol name for one of theirs.
+            FeedEar(payload: payload, side: .leading)
         } else if case .device = activity.payload, symbolName.contains("airpods") {
             // Apple's own AirPods artwork — the official SF Symbol for the exact
             // model — drawn large with a soft top-lit gradient, the way the
@@ -467,6 +477,8 @@ public struct CompactEarsView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
+        case .feeds(let payload):
+            FeedEar(payload: payload, side: .trailing)
         }
     }
 
@@ -554,6 +566,7 @@ public struct CompactEarsView: View {
         case .levels: "slider.horizontal.3"
         case .notes: "note.text"
         case .keepAwake: "cup.and.saucer"
+        case .feeds(let payload): payload.displaySymbol
         }
     }
 
@@ -574,6 +587,7 @@ public struct CompactEarsView: View {
         case .levels: .white
         case .notes: .yellow
         case .keepAwake: KeepAwakeCardView.tint
+        case .feeds(let payload): payload.level.feedTint
         }
     }
 }

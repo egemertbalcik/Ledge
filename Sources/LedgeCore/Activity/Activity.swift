@@ -17,6 +17,7 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
     case levels
     case notes
     case keepAwake
+    case feeds
 
     /// Default ordering weight. Higher wins a place nearer the front.
     ///
@@ -43,6 +44,9 @@ public enum ActivityKind: String, Equatable, Sendable, CaseIterable, Codable {
         case .focus: 44
         // A condition the user set and stopped thinking about, on or off.
         case .keepAwake: 42
+        // Something a script wrote down for the user to read, after the cards
+        // the app makes itself and ahead of the controls.
+        case .feeds: 41
         case .levels: 40
         // The launcher and a running session sit in the same place. Only a
         // finished session is news: see `Urgency`.
@@ -124,6 +128,9 @@ extension Activity {
     /// - **Keep Awake** rests only while it is holding the Mac awake. Its
     ///   Ready card is a launcher like the timer's, and its Finished card is a
     ///   sentence to read once, not a standing fact to watch.
+    /// - **A feed** rests only if its producer gave the ears something to say,
+    ///   and only while that is still true. A feed that has gone stale keeps
+    ///   its card, which can say how old it is; the ears cannot.
     ///
     /// Announcements are not covered by this rule — a peek is explicitly news
     /// and shows whatever it is announcing, including a shelf drop.
@@ -155,6 +162,8 @@ extension Activity {
             return false
         case .event(let payload):
             return payload.hasEvent && payload.startsIn <= 60 * 60 && payload.startsIn >= -60
+        case .feeds(let payload):
+            return payload.hasCompactContent && !payload.isStale
         case .levels, .shelf, .notes:
             return false
         default:
@@ -211,6 +220,15 @@ extension Activity {
             // had been stopped for hours. Announcing is for something that
             // started.
             return payload.isPlaying && payload.showsInCompact
+        case .feeds:
+            // A status somebody else keeps, rewritten whenever its producer
+            // likes — often every minute. Nothing about a file changing is
+            // news, and a card that announced itself each time would be the
+            // notch tapping the user on the shoulder for a number that did
+            // not move. The one thing that is news, a feed turning critical,
+            // is the coordinator's to say: it is the only place that has seen
+            // the level before.
+            return false
         case .notes:
             // Saving a note is not an event. The card republishes on every
             // keystroke's worth of debounce, and announcing any of that would
@@ -242,6 +260,10 @@ extension Activity {
 ///
 /// Keep Awake is deliberately absent. It is announced like a Focus change and
 /// then lives in the side readout; see `Activity.restsInEars`.
+///
+/// A feed's compact text is the lowest of the residents. It is a standing
+/// glance, there all day, so everything that is actually going on takes the
+/// ears from it — and gives them back, because the feed is still true.
 public enum CompactRest {
 
     public static func resolve(
@@ -250,6 +272,7 @@ public enum CompactRest {
         runningTimer: Activity?,
         closeEvent: Activity?,
         nowPlaying: Activity?,
+        feed: Activity? = nil,
         selected: Activity?
     ) -> Activity? {
         // Media the compact view will not draw is turned away wherever it is
@@ -266,6 +289,9 @@ public enum CompactRest {
         if let runningTimer { return runningTimer }
         if let closeEvent { return closeEvent }
         if let nowPlaying = restable(nowPlaying) { return nowPlaying }
+        // Ahead of `selected`: the feed is a resident, and the card last read
+        // is only ever a courtesy for the moment after walking away from it.
+        if let feed, feed.restsInEars { return feed }
         // The last resort is the only one that is not already a live fact, so
         // it is the only one that has to earn its place.
         if let selected, selected.restsInEars { return selected }
