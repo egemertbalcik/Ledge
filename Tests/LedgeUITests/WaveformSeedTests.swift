@@ -219,8 +219,8 @@ struct KeepAwakeRestTests {
             payload: .privacy(PrivacyPayload(cameraActive: true))
         )
         #expect(presentation.liveKeepAwake != nil)
-        #expect(presentation.satellite(phase: .companion)
-            == .privacy(camera: true, microphone: false))
+        #expect(presentation.satellite(phase: .companion) == nil, "the dot leaves the seat empty")
+        #expect(presentation.recordingDot(phase: .companion) == .green)
     }
 
     /// The one time the ears do show a hold in the companion phase: the brief

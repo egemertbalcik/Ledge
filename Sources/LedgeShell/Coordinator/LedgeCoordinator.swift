@@ -3885,10 +3885,6 @@ public final class LedgeCoordinator {
                   case .timer(let payload) = session.payload,
                   !payload.isIdle, musicIsMainIsland {
             candidate = session.id
-        } else if let privacy = presentation.privacyActive,
-                  case .privacy(let payload) = privacy.payload,
-                  payload.cameraActive || payload.micActive {
-            candidate = privacy.id
         } else {
             candidate = nil
         }

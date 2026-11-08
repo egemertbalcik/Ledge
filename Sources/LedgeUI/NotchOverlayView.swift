@@ -340,6 +340,17 @@ public final class NotchPresentation {
         return payload.interruptsEars
     }
 
+    /// The colour of the small recording dot in the ears, if there is one:
+    /// green for the camera, orange for the microphone, as macOS draws them.
+    /// Stands down while a feed has the ears for a moment.
+    public func recordingDot(phase: NotchPhase) -> Color? {
+        guard phase == .companion, announcement == nil, !feedInterruptsEars,
+              case .privacy(let payload)? = privacyActive?.payload,
+              payload.cameraActive || payload.micActive
+        else { return nil }
+        return payload.cameraActive ? .green : .orange
+    }
+
     /// Who holds the satellite seat right now, if anyone. The freshest
     /// transient wins the dwell; then the running timer; then the recording
     /// indicator — and the timer never orbits itself.
@@ -361,16 +372,11 @@ public final class NotchPresentation {
                 isRunning: payload.isRunning
             )
         }()
-        let privacyContent: SatelliteContent? = {
-            guard let activity = privacyActive,
-                  case .privacy(let payload) = activity.payload,
-                  payload.cameraActive || payload.micActive
-            else { return nil }
-            return .privacy(camera: payload.cameraActive, microphone: payload.micActive)
-        }()
+        // No recording tenant: this fork shows a small dot in the ear instead,
+        // so the trailing ear stays what it was. See `recordingDot(phase:)`.
         return SatelliteArbiter.resolve(
             transient: hudSatellite,
-            privacy: feedInterruptsEars ? nil : privacyContent,
+            privacy: nil,
             timer: feedInterruptsEars ? nil : timerContent,
             timerIsMainIsland: playingNowPlaying == nil
         )
@@ -906,6 +912,7 @@ public struct NotchOverlayView: View {
                     // While the satellite holds any content, the trailing ear
                     // yields — the island carries only its leading side.
                     trailingHidden: satelliteContent != nil,
+                    recordingDot: presentation.recordingDot(phase: phase),
                     leadingOffset: preferences.earLeadingOffset,
                     trailingOffset: preferences.earTrailingOffset
                 )

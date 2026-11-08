@@ -18,6 +18,10 @@ public struct CompactEarsView: View {
     /// the satellite owns the right.
     private let trailingHidden: Bool
 
+    /// A small dot at the outer end of the trailing ear while a camera or
+    /// microphone is in use. Small so whatever rests there keeps its place.
+    private let recordingDot: Color?
+
     private let activity: Activity
     private let cutoutWidth: CGFloat
     private let inset: CGFloat
@@ -34,6 +38,7 @@ public struct CompactEarsView: View {
     public init(activity: Activity, cutoutWidth: CGFloat, inset: CGFloat,
         audioLevels: @escaping () -> [Double] = { [] },
         trailingHidden: Bool = false,
+        recordingDot: Color? = nil,
         leadingOffset: CGFloat = 0,
         trailingOffset: CGFloat = 0) {
         self.activity = activity
@@ -41,6 +46,7 @@ public struct CompactEarsView: View {
         self.inset = inset
         self.audioLevels = audioLevels
         self.trailingHidden = trailingHidden
+        self.recordingDot = recordingDot
         self.leadingOffset = leadingOffset.isFinite ? min(max(leadingOffset, -24), 24) : 0
         self.trailingOffset = trailingOffset.isFinite ? min(max(trailingOffset, -24), 24) : 0
     }
@@ -86,6 +92,17 @@ public struct CompactEarsView: View {
             .offset(x: -(trailingOffset + inwardNudge))
         }
         .padding(.horizontal, inset)
+        .overlay(alignment: .trailing) {
+            if let recordingDot {
+                Circle()
+                    .fill(recordingDot)
+                    .frame(width: 6, height: 6)
+                    .padding(.trailing, inset + 2)
+                    .transition(.opacity)
+                    .accessibilityLabel("Camera or microphone in use")
+            }
+        }
+        .animation(Motion.earContent, value: recordingDot)
         .onAppear { coverChanged() }
         .onChange(of: coverIdentity) { _, _ in coverChanged() }
         .onDisappear {
