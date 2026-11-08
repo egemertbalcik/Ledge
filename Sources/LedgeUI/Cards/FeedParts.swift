@@ -202,8 +202,10 @@ struct FeedEar: View {
             // three digits are most of an ear, and words longer than that
             // shrink rather than reach for the shape's corner.
             .frame(maxWidth: 42)
-        } else if side == .leading {
-            // Nothing for this side, so it says whose ears these are.
+        } else if side == .leading, !payload.interruptsEars {
+            // Nothing for this side, so it says whose ears these are. Not
+            // while interrupting: that is one side's news, and the other stays
+            // empty.
             FeedSymbolTile(symbolName: payload.displaySymbol)
         } else if payload.level != .normal, !payload.hasCompactContent {
             // A feed with nothing for the ears that is nonetheless standing the
