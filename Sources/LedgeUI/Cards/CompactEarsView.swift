@@ -96,8 +96,9 @@ public struct CompactEarsView: View {
             if let recordingDot {
                 Circle()
                     .fill(recordingDot)
-                    .frame(width: 6, height: 6)
-                    .padding(.trailing, inset + 2)
+                    .frame(width: 5, height: 5)
+                    // Midway between the waveform's end and the shape's edge.
+                    .padding(.trailing, inset + 4.5)
                     .transition(.opacity)
                     .accessibilityLabel("Camera or microphone in use")
             }
