@@ -115,6 +115,11 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     public var compactLeadingColor: String?
     public var compactTrailingColor: String?
 
+    /// Whether what the ears say right now should take them from whatever
+    /// rests there, music included. For a producer with something brief to
+    /// say: it sets this for a moment, then writes the file without it.
+    public var compactInterrupts: Bool?
+
     /// The feed as a whole, which is not necessarily the worst of its rows:
     /// the producer knows what its numbers mean.
     public var level: FeedLevel
@@ -149,6 +154,7 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         compactTrailingFraction: Double? = nil,
         compactLeadingColor: String? = nil,
         compactTrailingColor: String? = nil,
+        compactInterrupts: Bool? = nil,
         level: FeedLevel = .normal,
         gauges: [FeedGauge] = [],
         rows: [FeedRow] = [],
@@ -164,6 +170,7 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         self.compactTrailingFraction = Self.clamped(compactTrailingFraction)
         self.compactLeadingColor = compactLeadingColor
         self.compactTrailingColor = compactTrailingColor
+        self.compactInterrupts = compactInterrupts
         self.level = level
         self.gauges = Array(gauges.prefix(Self.maxGauges))
         self.rows = Array(rows.prefix(Self.maxRows))
@@ -174,6 +181,11 @@ public struct FeedPayload: Equatable, Sendable, Codable {
 
     private static func clamped(_ fraction: Double?) -> Double? {
         fraction.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
+    }
+
+    /// Whether this feed is taking the ears from whatever rests there.
+    public var interruptsEars: Bool {
+        compactInterrupts == true && hasCompactContent && !isStale
     }
 
     /// Whether the producer gave the closed notch anything to say: words or a

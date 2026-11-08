@@ -181,6 +181,7 @@ public enum FeedParser {
             compactTrailingFraction: number(root["compact_trailing_fraction"]),
             compactLeadingColor: color(root["compact_leading_color"]),
             compactTrailingColor: color(root["compact_trailing_color"]),
+            compactInterrupts: (root["compact_interrupts"] as? Bool) == true ? true : nil,
             level: FeedLevel(word: root["level"] as? String),
             gauges: gauges,
             rows: rows,
