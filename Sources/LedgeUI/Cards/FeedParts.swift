@@ -1,10 +1,35 @@
+import AppKit
 import LedgeCore
 import SwiftUI
 
 extension FeedPayload {
 
-    /// The glyph a feed wears when its producer named none.
-    var displaySymbol: String { symbolName ?? "list.bullet.rectangle" }
+    static let fallbackSymbol = "list.bullet.rectangle"
+
+    /// The glyph a feed wears: the producer's, if it names a symbol that
+    /// exists, and the feeds glyph otherwise. A misspelt name would draw an
+    /// empty tile and an empty header.
+    @MainActor
+    var displaySymbol: String {
+        guard let symbolName, SymbolNames.exists(symbolName) else { return Self.fallbackSymbol }
+        return symbolName
+    }
+}
+
+/// Which SF Symbol names exist, asked once each.
+@MainActor
+enum SymbolNames {
+    private static var known: [String: Bool] = [:]
+
+    static func exists(_ name: String) -> Bool {
+        if let answer = known[name] { return answer }
+        // A producer could name a new symbol on every write; the cache is
+        // only a convenience, so it is not allowed to grow without end.
+        if known.count > 256 { known.removeAll() }
+        let answer = NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+        known[name] = answer
+        return answer
+    }
 }
 
 /// A ring that fills clockwise from twelve o'clock to a fraction.
@@ -74,7 +99,7 @@ struct FeedGaugeView: View {
                 .frame(height: NotchLayout.feedGaugeLabelHeight)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(gauge.label), \(gauge.value)")
+        .accessibilityLabel([gauge.label, gauge.value, gauge.level.spoken].compactMap { $0 }.joined(separator: ", "))
     }
 }
 

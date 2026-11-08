@@ -3,6 +3,25 @@ import SwiftUI
 
 extension FeedLevel {
 
+    /// The level in words, for VoiceOver: colour alone says nothing there.
+    /// Nil while all is well.
+    var spoken: String? {
+        switch self {
+        case .normal: nil
+        case .warning: "Warning"
+        case .critical: "Critical"
+        }
+    }
+
+    /// A glyph beside a value when the user has asked for more than colour.
+    var glyph: String? {
+        switch self {
+        case .normal: nil
+        case .warning: "exclamationmark.triangle.fill"
+        case .critical: "exclamationmark.octagon.fill"
+        }
+    }
+
     /// How a level is drawn, in the app's own colours: white while all is
     /// well, the way the battery ring is, and colour only when there is
     /// something to say about it.
@@ -28,6 +47,8 @@ extension FeedLevel {
 public struct FeedCardView: View {
 
     private let payload: FeedPayload
+
+    @Environment(\.colorSchemeContrast) private var contrast
 
     public init(payload: FeedPayload) {
         self.payload = payload
@@ -90,6 +111,7 @@ public struct FeedCardView: View {
                     .lineLimit(1)
                     // The name wins the room, as the weather's city does.
                     .layoutPriority(1)
+                    .accessibilityValue(payload.isStale ? "Out of date" : "")
             }
             .opacity(dimmed)
             freshness
@@ -98,11 +120,16 @@ public struct FeedCardView: View {
         .frame(height: NotchLayout.feedHeaderHeight)
     }
 
-    /// How long ago the producer wrote, in the weather card's words: "Just now"
-    /// while fresh, "Updated 12m ago" once the difference matters. Always on
-    /// show, for the same reason: a producer that has died keeps its last
+    /// Whose card this is, and how long ago it was written: "Feed · Just now"
+    /// while fresh, "Feed · Updated 12m ago" once the difference matters.
+    ///
+    /// "Feed" is always there. Another program writes this card, and it can
+    /// call itself anything and wear any symbol — "Battery", a battery glyph,
+    /// critical — so the card says plainly that it is not one of Ledge's own.
+    ///
+    /// The age is always on show too: a producer that has died keeps its last
     /// numbers on screen, and the age is what admits it. A feed with no date
-    /// says nothing rather than something false.
+    /// says nothing about its age rather than something false.
     @ViewBuilder
     private var freshness: some View {
         if payload.updatedAt > 0 {
@@ -111,24 +138,29 @@ public struct FeedCardView: View {
                 // Never abbreviated, but giving ground rather than taking it
                 // from the title: the full phrase where it fits, then the age.
                 ViewThatFits(in: .horizontal) {
-                    freshnessText(age, prefixed: true)
-                    freshnessText(age, prefixed: false)
+                    freshnessText(Self.freshnessText(age: age, prefixed: true))
+                    freshnessText(Self.freshnessText(age: age, prefixed: false))
+                    freshnessText(Self.mark)
                 }
             }
+        } else {
+            freshnessText(Self.mark)
         }
     }
 
-    private func freshnessText(_ age: TimeInterval, prefixed: Bool) -> some View {
-        Text(Self.freshnessText(age: age, prefixed: prefixed))
+    private func freshnessText(_ text: String) -> some View {
+        Text(text)
             .font(.system(size: 10))
-            .foregroundStyle(payload.isStale ? Color.orange : Color.white.opacity(0.35))
+            .foregroundStyle(payload.isStale ? Color.orange : Color.white.opacity(contrast == .increased ? 0.6 : 0.35))
             .fixedSize(horizontal: true, vertical: false)
     }
 
+    static let mark = "Feed"
+
     static func freshnessText(age: TimeInterval, prefixed: Bool) -> String {
-        if age < 120 { return "Just now" }
+        if age < 120 { return "\(mark) · Just now" }
         let ago = WeatherCardView.ago(age)
-        return prefixed ? "Updated \(ago) ago" : "\(ago) ago"
+        return prefixed ? "\(mark) · Updated \(ago) ago" : "\(mark) · \(ago) ago"
     }
 }
 
@@ -142,6 +174,9 @@ struct FeedRowView: View {
 
     let row: FeedRow
 
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColour
+    @Environment(\.colorSchemeContrast) private var contrast
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
@@ -154,16 +189,24 @@ struct FeedRowView: View {
                 if let detail = row.detail {
                     Text(detail)
                         .font(.cardBody)
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(contrast == .increased ? 0.65 : 0.4))
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
+                if withoutColour, let glyph = row.level.glyph {
+                    Image(systemName: glyph)
+                        .font(.cardSmallFigure)
+                        .foregroundStyle(row.level.feedTint)
+                        .accessibilityHidden(true)
+                }
+                // First claim on the room, but not more than the row has: a
+                // long value truncates rather than drawing past the card.
                 Text(row.value)
                     .font(.cardSmallFigure)
                     .monospacedDigit()
                     .foregroundStyle(row.level.feedTint)
                     .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .truncationMode(.tail)
                     .layoutPriority(2)
             }
             .frame(height: NotchLayout.feedRowHeight)
@@ -174,5 +217,6 @@ struct FeedRowView: View {
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityValue(row.level.spoken ?? "")
     }
 }

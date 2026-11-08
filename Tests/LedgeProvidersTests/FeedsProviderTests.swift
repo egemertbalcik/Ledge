@@ -148,14 +148,104 @@ struct FeedsProviderTests {
         #expect(events.last == .retract(activity.id))
     }
 
-    @Test("A file replaced by a broken one takes its card away")
+    @Test("A file caught half-written keeps its card as it last was")
     func brokenReplacement() async {
+        let source = StubFeedSource(files: [file("limits", limits(percent: 10))])
+        let provider = FeedsProvider(source: source)
+        let events = await collect(provider) {
+            source.set([self.file("limits", "{ half a fi")])
+            source.set([self.file("limits", self.limits(percent: 40))])
+        }
+        // Published at 10%, never retracted while broken, then 40%.
+        #expect(!events.contains { if case .retract = $0 { return true } else { return false } })
+        #expect(published(events).map(\.payload.compactLeading) == ["C 10%", "C 40%"])
+    }
+
+    @Test("A broken file that was never readable is no card at all")
+    func brokenFromTheStart() async {
+        let source = StubFeedSource(files: [file("limits", "{ half a fi")])
+        let provider = FeedsProvider(source: source)
+        let events = await collect(provider) {}
+        #expect(events.isEmpty)
+    }
+
+    @Test("A broken file that is then removed takes its card with it")
+    func brokenThenGone() async {
         let source = StubFeedSource(files: [file("limits", limits())])
         let provider = FeedsProvider(source: source)
         let events = await collect(provider) {
             source.set([self.file("limits", "{ half a fi")])
+            source.set([])
+            // And a later broken file of the same name has nothing to fall back on.
+            source.set([self.file("limits", "{ half a fi")])
         }
         #expect(events.last == .retract(ActivityID(kind: .feeds, source: "limits")))
+        #expect(published(events).count == 1)
+    }
+
+    @Test("A date in the future counts as now, so it cannot hold the ears for good")
+    func futureDate() async {
+        let clock = FeedClock()
+        let source = StubFeedSource(files: [file("limits", limits(updatedAt: 4_102_444_800))])
+        let provider = FeedsProvider(source: source, now: { clock.date })
+        let events = await collect(provider) {}
+        let updatedAt = published(events).first?.payload.updatedAt
+        #expect(updatedAt != nil)
+        #expect((updatedAt ?? .infinity) <= clock.date.timeIntervalSince1970 + FeedParser.clockSkew)
+    }
+
+    /// The folder is read again every minute. Held to each read's own clock,
+    /// a date in the future was "Just now" on every read and never went stale.
+    @Test("A date in the future still goes stale while the file sits unchanged")
+    func futureDateGoesStale() async {
+        let clock = FeedClock()
+        let first = clock.date.timeIntervalSince1970
+        let source = StubFeedSource(files: [file("limits", limits(updatedAt: 4_102_444_800))])
+        let provider = FeedsProvider(source: source, now: { clock.date })
+        let events = await collect(provider) {
+            clock.advance(2 * 3_600)
+            source.set(source.files())
+        }
+        let cards = published(events)
+        #expect(cards.count == 2, "the second read never published")
+        #expect(cards.map(\.payload.updatedAt) == [first + FeedParser.clockSkew, first + FeedParser.clockSkew])
+        #expect(cards.map(\.payload.isStale) == [false, true])
+    }
+
+    @Test("A file's own date set in the future is held back the same way")
+    func futureFileDateGoesStale() async {
+        let clock = FeedClock()
+        let source = StubFeedSource(files: [
+            file("disk", #"{"version": 1, "compact_leading": "1", "stale_after": 60}"#, modifiedAt: 4_102_444_800),
+        ])
+        let provider = FeedsProvider(source: source, now: { clock.date })
+        let events = await collect(provider) {
+            clock.advance(2 * 3_600)
+            source.set(source.files())
+        }
+        #expect(published(events).map(\.payload.isStale) == [false, true])
+    }
+
+    @Test("A file that stays broken goes out of date after a grace period")
+    func brokenTooLong() async {
+        let clock = FeedClock()
+        let source = StubFeedSource(files: [file("limits", limits(percent: 10))])
+        let provider = FeedsProvider(source: source, now: { clock.date })
+        let broken = file("limits", #"{"version": 2}"#)
+        let events = await collect(provider) {
+            source.set([broken])
+            clock.advance(FeedsProvider.brokenGrace / 2)
+            source.set([broken])
+            clock.advance(FeedsProvider.brokenGrace / 2)
+            source.set([broken])
+            // Readable again: current again.
+            let now = Int(clock.date.timeIntervalSince1970)
+            source.set([self.file("limits", self.limits(percent: 40, updatedAt: now))])
+        }
+        #expect(!events.contains { if case .retract = $0 { return true } else { return false } })
+        let cards = published(events)
+        #expect(cards.map(\.payload.isStale) == [false, true, false])
+        #expect(cards.map(\.payload.compactLeading) == ["C 10%", "C 10%", "C 40%"])
     }
 
     // MARK: - Going stale

@@ -45,6 +45,9 @@ public enum FeedParser {
 
     public static let supportedVersion = 1
 
+    /// How far ahead of this Mac's clock a producer's `updated_at` may be.
+    public static let clockSkew: TimeInterval = 5 * 60
+
     /// How much of each string is kept. A card has no room for more, and a
     /// producer with a runaway string should not make the model carry it.
     enum Limit {
@@ -98,17 +101,25 @@ public enum FeedParser {
     ///     had something to say.
     ///   - now: Unix seconds, for settling staleness. The parser never reads
     ///     a clock.
+    ///   - seenAt: when this version of the file was first read, in Unix
+    ///     seconds; `now` when not given. No date the file gives may be later
+    ///     than this, give or take `clockSkew`. It has to be a time that stays
+    ///     put while the file does: the folder is read again every minute, and
+    ///     a ceiling taken from each read's `now` moved with it, so a file
+    ///     dated in the future read "Just now" forever and never went stale.
     public static func parse(
         _ data: Data,
         fallbackID: String,
         fallbackUpdatedAt: TimeInterval = 0,
-        now: TimeInterval
+        now: TimeInterval,
+        seenAt: TimeInterval? = nil
     ) -> Result<Feed, Rejection> {
         guard data.count <= maxBytes else { return .failure(.oversize(bytes: data.count)) }
         guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return .failure(.notAnObject)
         }
-        guard let version = root["version"] as? Int else { return .failure(.missingVersion) }
+        guard let raw = numeric(root["version"]), raw == raw.rounded(), let version = Int(exactly: raw)
+        else { return .failure(.missingVersion) }
         guard version == supportedVersion else { return .failure(.unsupportedVersion(version)) }
 
         let id = string(root["id"], limit: Limit.id) ?? fallbackID
@@ -141,7 +152,23 @@ public enum FeedParser {
             )
         }
 
-        let updatedAt = number(root["updated_at"]).flatMap { $0 > 0 ? $0 : nil } ?? fallbackUpdatedAt
+        // Never later than when this file was first seen, give or take a
+        // clock that runs a little fast. A date in the future would win the
+        // ears from every other feed, win every clash over an id, never go
+        // stale and read "Just now" forever. A claim past the ceiling is not
+        // believed at all: the file's own date says better when it was
+        // written, and that date is held to the ceiling too, since
+        // `touch -t 2100…` can set it to anything.
+        let ceiling = (seenAt ?? now) + clockSkew
+        let written = min(fallbackUpdatedAt, ceiling)
+        let updatedAt: TimeInterval
+        switch number(root["updated_at"]).flatMap({ $0 > 0 ? $0 : nil }) {
+        case .some(let claimed) where claimed <= ceiling: updatedAt = claimed
+        // With no date of its own to fall back on, the ceiling is the
+        // latest the numbers can be true.
+        case .some: updatedAt = fallbackUpdatedAt > 0 ? written : ceiling
+        case .none: updatedAt = written
+        }
         let staleAfter = number(root["stale_after"]).flatMap { $0 > 0 ? $0 : nil }
 
         let payload = FeedPayload(
@@ -170,7 +197,16 @@ public enum FeedParser {
     }
 
     private static func number(_ value: Any?) -> Double? {
-        guard let number = value as? Double, number.isFinite else { return nil }
+        guard let number = numeric(value), number.isFinite else { return nil }
         return number
+    }
+
+    /// A JSON number, and only a number. `JSONSerialization` hands `true` back
+    /// as an `NSNumber` too, which would otherwise read as 1.
+    private static func numeric(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID()
+        else { return nil }
+        return number.doubleValue
     }
 }

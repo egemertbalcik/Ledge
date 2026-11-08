@@ -122,25 +122,30 @@ Feeds are off until you switch them on in Settings, under Cards.
 | Field | |
 |---|---|
 | `version` | Required, and `1`. A file with another version is skipped. |
-| `id` | Optional. Defaults to the file name without `.json`. |
-| `title` | Optional. The card's title. Defaults to the id. |
+| `id` | Optional, up to 128 characters. Defaults to the file name without `.json`. |
+| `title` | Optional, up to 80 characters. The card's title. Defaults to the id. |
 | `symbol` | Optional. The name of an SF Symbol. |
-| `compact_leading`, `compact_trailing` | Optional. Short text for the left and right of the notch while it's closed. Keep it to a few characters. |
+| `compact_leading`, `compact_trailing` | Optional, up to 24 characters. Short text for the left and right of the notch while it's closed. Keep it to a few characters. |
 | `compact_leading_fraction`, `compact_trailing_fraction` | Optional. 0 to 1. Draws a small ring on that side, filled to the fraction, with the text drawn inside it, so keep that text to about four characters. Without a fraction, the side shows the feed's symbol beside its text instead. |
-| `level` | Optional. `normal`, `warning` or `critical`. Colours the closed notch's ring and text; a feed turning `critical` peeks once. |
-| `gauges` | Optional. Up to three, shown as rings across the top of the card. Each needs a `label`, a short `value` that goes inside the ring and a `fraction` from 0 to 1, and may have a `level` (`normal`, `warning` or `critical`) that colours the ring. An item missing one of the three is skipped. |
-| `rows` | Optional. Up to eight, each with a `label` and a `value` (both required), and optionally a `detail`, a `fraction` from 0 to 1 that draws a thin bar, and a `level`. |
-| `updated_at` | Optional. Unix seconds. Defaults to when the file was last written. |
+| `level` | Optional. `normal`, `warning` or `critical`. Colours the closed notch's ring and text. A feed turning `critical` peeks once, and then not again for 30 minutes however often it goes back and forth. |
+| `gauges` | Optional. Up to three, shown as rings across the top of the card. Each needs a `label` (up to 20 characters), a short `value` that goes inside the ring (up to 12) and a `fraction` from 0 to 1, and may have a `level` (`normal`, `warning` or `critical`) that colours the ring. An item missing one of the three is skipped. |
+| `rows` | Optional. Up to eight, each with a `label` and a `value` (both required, up to 60 characters each), and optionally a `detail` (up to 80), a `fraction` from 0 to 1 that draws a thin bar, and a `level`. |
+| `updated_at` | Optional. Unix seconds. Defaults to when the file was last written. A time more than five minutes ahead of when Ledge first read the file isn't believed: the time the file was written is used instead. |
 | `stale_after` | Optional. Seconds after `updated_at` when the numbers stop being true. The card then dims and says how old it is. |
 
 Replace a file by writing a temporary file beside it and renaming it over the
-original, so Ledge never reads half of one. Fields it doesn't know are ignored.
-A file that isn't valid JSON, is over 64 KB or has a version above 1 is skipped,
-with a line in the log. A feed's card goes when its file does.
+original, so Ledge never reads half of one. Fields it doesn't know are ignored,
+and longer text is cut to the limits above. A file that isn't valid JSON, is
+over 64 KB or has a version above 1 is skipped, with a line in the log; if it
+was readable before, its card keeps what it last said for two minutes, then
+dims as out of date. A feed's card goes when its file does. Ledge reads the
+first 16 files by name and leaves the rest unopened. Links aren't followed, so
+put the file itself in the folder.
 
-The closed notch shows one feed's text at a time, the most recently updated
-one that has any, and only while nothing else (music, a timer, a close meeting)
-is using it.
+The closed notch shows one feed's text at a time, and only while nothing else
+(music, a timer, a close meeting) is using it. The feed showing there keeps its
+place until it goes out of date or away; then the most recently updated feed
+with text takes over.
 
 ## And the rest
 

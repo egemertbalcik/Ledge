@@ -1758,11 +1758,15 @@ public final class LedgeCoordinator {
             // it answers a press, it does not interrupt.
             self?.announce(activity, byUser: true)
         }
+        activities.onRestingFeedChanged = { [weak self] rests in
+            self?.setFeedRests(rests)
+        }
         activities.onFeedEscalation = { [weak self] activity in
             // Once, on the step into critical. The peek is the same whisper any
             // arrival gets, so it keeps its manners with it: nothing during a
-            // Focus, nothing over the greeting.
-            self?.announce(activity)
+            // Focus, nothing over the greeting. Whether it was let through
+            // decides whether the feed's cooldown starts.
+            self?.announce(activity) ?? false
         }
         activities.onEmpty = { [weak self] in
             // Nothing left to show, so an overlay held open by a click has
@@ -1774,18 +1778,22 @@ public final class LedgeCoordinator {
     /// Puts an arrival in front of the user: beside the island when music
     /// already holds it and the arrival is satellite material, otherwise as a
     /// peek — now, or queued behind whatever has the stage.
-    private func announce(_ activity: Activity, byUser: Bool = false) {
+    ///
+    /// False only when the peek was turned down — a Focus, the greeting — and
+    /// nothing will be shown for it.
+    @discardableResult
+    private func announce(_ activity: Activity, byUser: Bool = false) -> Bool {
         guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
-            return
+            return false
         }
         // While the companion rests, a device or charger announcement is
         // satellite material, not a takeover: the music keeps the island
         // and the event shows beside it for its dwell.
-        if self.state.phase == .companion,
+        if Self.satellitesBesideRest(phase: self.state.phase, resting: self.restingContent()?.kind),
            let content = Self.transientSatellite(for: activity) {
             self.showSatellite(content, source: activity.id, priority: activity.priority)
-            return
+            return true
         }
         // Whether this arrival is worth standing up for, decided once and
         // honoured by every path below. Deciding it at the bottom meant
@@ -1827,7 +1835,7 @@ public final class LedgeCoordinator {
             self.presentation.peeked = activity
             self.presentation.announcement = announcement
             self.send(.peekRequested(duration))
-            return
+            return true
         }
         // A peek already on screen keeps the stage; this one waits its
         // turn and plays when the current one retires. Every phase the
@@ -1843,7 +1851,7 @@ public final class LedgeCoordinator {
                 PendingPeek(activity, at: Date().timeIntervalSinceReferenceDate, byUser: byUser),
                 into: &self.pendingPeeks, limit: Self.pendingPeekLimit
             )
-            return
+            return true
         }
         // The card the peek is *for*: selection only moves for standings
         // that outrank it, so without this the flash showed whatever was
@@ -1854,6 +1862,7 @@ public final class LedgeCoordinator {
         // stands up instead — see `NotchAnnouncement`.
         self.presentation.announcement = announcement
         self.send(.peekRequested(duration))
+        return true
     }
 
     /// What a resting track — playing, paused, or gone — does to the ears.
@@ -2259,15 +2268,33 @@ public final class LedgeCoordinator {
     /// The farewell borrows `hasNowPlaying` for its four seconds and must
     /// hand back exactly this truth, never the queue's stale "present" (a
     /// paused track is present long after its linger closed the island).
-    private var restingHold = false
+    private var restingHold: Bool { hold.holds }
+
+    /// The facts and the resting feed, combined — see `RestingHold`.
+    private var hold = RestingHold()
 
     /// The one place the fact path speaks to the reducer about resting.
     private func setRestingHold(_ holds: Bool) {
-        // A feed's compact text is the lowest resident and the only one that
-        // does not come and go: when everything else lets go of the island,
-        // it is what is left, so letting go means going back to it.
-        restingHold = holds || presentation.restingFeed != nil
-        send(.nowPlayingChanged(restingHold))
+        send(.nowPlayingChanged(hold.factsChanged(holds)))
+    }
+
+    /// A feed started or stopped resting. See `RestingHold.feedChanged`.
+    private func setFeedRests(_ rests: Bool) {
+        if let holds = hold.feedChanged(rests, farewellRunning: briefRest != nil) {
+            send(.nowPlayingChanged(holds))
+        }
+    }
+
+    /// Whether a device, a charger or a level readout goes beside what rests
+    /// rather than over it.
+    ///
+    /// Only beside the companion, and not when the island is resting for a
+    /// feed and nothing else. Then a volume key gets the usual readout and an
+    /// arrival its usual peek, as they would with the island shut. A feed sits
+    /// in the ears all day, and turning every readout into a satellite for as
+    /// long as one was there changed far more than the feed.
+    static func satellitesBesideRest(phase: NotchPhase, resting: ActivityKind?) -> Bool {
+        phase == .companion && resting != .feeds
     }
 
     /// Whether a rest whose time is up may actually end — see `RestRelease`,
@@ -2490,7 +2517,7 @@ public final class LedgeCoordinator {
                         resting=\(self.restingContent()?.id.kind.rawValue ?? "-", privacy: .public)
                         """)
                 }
-                if self.state.phase == .companion {
+                if Self.satellitesBesideRest(phase: self.state.phase, resting: self.restingContent()?.kind) {
                     self.showSatellite(.level(readout), source: LevelsProvider.activityID)
                 } else if self.levelsCardIsOpen {
                     // The Levels card *is* the readout. Summoning the HUD over
@@ -3273,7 +3300,7 @@ public final class LedgeCoordinator {
         briefRest?.cancel()
         briefRest = nil
         presentation.farewell = nil
-        restingHold = false
+        hold = RestingHold()
         parkedHUDCheck?.cancel()
         parkedHUDCheck = nil
         permissionFlow.stop()
