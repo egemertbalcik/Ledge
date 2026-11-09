@@ -184,6 +184,11 @@ public final class NowPlayingProvider: ActivityProvider {
     /// without a system to ask.
     private let ownerIsApp: @MainActor (String) -> Bool
 
+    /// The app filling the notched display in full screen, if any. A player
+    /// that is doing so is being watched, and the ears would only sit on top
+    /// of it. Its card stays, for whoever goes looking.
+    private let fullScreenOwner: @MainActor () -> String?
+
     /// Whether a web page's media may have a card, the ears, or neither.
     /// Read fresh on every poll for the same reason as `showsVideo`: turning
     /// either switch takes effect on the next tick, with no relaunch and no
@@ -267,12 +272,14 @@ public final class NowPlayingProvider: ActivityProvider {
         ownerIsApp: @escaping @MainActor (String) -> Bool = {
             MediaOwner.isOpenableApp(bundleID: $0)
         },
+        fullScreenOwner: @escaping @MainActor () -> String? = { nil },
         now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
     ) {
         self.source = source
         self.showsVideo = showsVideo
         self.webMedia = webMedia
         self.ownerIsApp = ownerIsApp
+        self.fullScreenOwner = fullScreenOwner
         self.playbackWatcher = playbackWatcher
         self.artwork = artwork
         self.playingInterval = playingInterval
@@ -648,7 +655,7 @@ public final class NowPlayingProvider: ActivityProvider {
                 kind: snapshot.kind,
                 showsInCompact: Self.showsInCompact(
                     snapshot, showsVideo: showsVideo(), webMedia: policy, ownerIsApp: isApp
-                ),
+                ) && fullScreenOwner()?.lowercased() != snapshot.appBundleID.lowercased(),
                 isLive: snapshot.isLive,
                 ownerIsApp: isApp,
                 transportKey: snapshot.transportKey

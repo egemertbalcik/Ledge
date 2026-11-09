@@ -554,3 +554,79 @@ struct WebMediaGateTests {
         #expect(events.isEmpty)
     }
 }
+
+@Suite("A player in full screen keeps out of the ears")
+@MainActor
+struct FullScreenPlayerTests {
+
+    private func showsInCompact(owner: String?, playingIn bundleID: String) async -> Bool? {
+        let source = ScriptedSource()
+        source.current = media("Dune", duration: 9000, bundleID: bundleID)
+        let provider = NowPlayingProvider(
+            source: source, artwork: ArtworkLoader(),
+            playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
+            fullScreenOwner: { owner }
+        )
+        let stream = provider.start()
+        await provider.refreshNow()
+        provider.stop()
+        var shown: Bool?
+        for await event in stream {
+            if case .publish(let activity) = event, case .nowPlaying(let payload) = activity.payload {
+                shown = payload.showsInCompact
+            }
+        }
+        return shown
+    }
+
+    @Test("The player filling the screen gives up the ears and keeps its card")
+    func ownPlayer() async {
+        #expect(await showsInCompact(owner: "com.spotify.client", playingIn: "com.spotify.client") == false)
+    }
+
+    @Test("Music keeps the ears behind someone else's full screen")
+    func otherApp() async {
+        #expect(await showsInCompact(owner: "com.microsoft.vscode", playingIn: "com.spotify.client") == true)
+    }
+
+    @Test("An ordinary desktop changes nothing")
+    func desktop() async {
+        #expect(await showsInCompact(owner: nil, playingIn: "com.spotify.client") == true)
+    }
+}
+
+@Suite("Reading the owner of a full-screen Space")
+struct FullScreenSpaceTests {
+
+    private func monitor(_ identifier: String, current: Int) -> [String: Any] {
+        [
+            "Display Identifier": identifier,
+            "Current Space": ["ManagedSpaceID": current, "type": current == 5218 ? 4 : 0],
+            "Spaces": [
+                ["ManagedSpaceID": 3, "type": 0],
+                ["ManagedSpaceID": 5218, "type": 4, "pid": 63987],
+            ] as [[String: Any]],
+        ]
+    }
+
+    @Test("A full-screen Space names its app")
+    func fullScreen() {
+        #expect(FullScreenSpace.ownerPID(monitors: [monitor("A", current: 5218)], displayIdentifier: "A") == 63987)
+    }
+
+    @Test("A desktop has no owner, even with a full-screen Space elsewhere")
+    func desktop() {
+        #expect(FullScreenSpace.ownerPID(monitors: [monitor("A", current: 3)], displayIdentifier: "A") == nil)
+    }
+
+    @Test("Another display's full screen is not this one's")
+    func otherDisplay() {
+        let monitors = [monitor("A", current: 3), monitor("B", current: 5218)]
+        #expect(FullScreenSpace.ownerPID(monitors: monitors, displayIdentifier: "A") == nil)
+    }
+
+    @Test("One shared set of Spaces is called Main")
+    func sharedSpaces() {
+        #expect(FullScreenSpace.ownerPID(monitors: [monitor("Main", current: 5218)], displayIdentifier: "A") == 63987)
+    }
+}
