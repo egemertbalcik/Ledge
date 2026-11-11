@@ -408,7 +408,8 @@ public final class LedgePanelController {
             islandSize: layout.boundingSize,
             geometry: geometry,
             gutterRadius: preferences.gutterRadius,
-            offset: preferences.satelliteOffset
+            offset: preferences.satelliteOffset,
+            recordingRoom: presentation.recordingRoom(phase: phase)
         )
         // Screen coordinates run bottom-up; the seat's y is measured down from
         // the island's top, which is the screen's top edge.

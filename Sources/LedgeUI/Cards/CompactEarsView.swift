@@ -18,9 +18,9 @@ public struct CompactEarsView: View {
     /// the satellite owns the right.
     private let trailingHidden: Bool
 
-    /// A small dot at the outer end of the trailing ear while a camera or
-    /// microphone is in use. Small so whatever rests there keeps its place.
-    private let recordingDot: Color?
+    /// The recording lights showing beside these ears, if any. Drawn by
+    /// `NotchOverlayView`; here only so they are said with the ears.
+    private let recording: RecordingLights?
 
     private let activity: Activity
     private let cutoutWidth: CGFloat
@@ -38,7 +38,7 @@ public struct CompactEarsView: View {
     public init(activity: Activity, cutoutWidth: CGFloat, inset: CGFloat,
         audioLevels: @escaping () -> [Double] = { [] },
         trailingHidden: Bool = false,
-        recordingDot: Color? = nil,
+        recording: RecordingLights? = nil,
         leadingOffset: CGFloat = 0,
         trailingOffset: CGFloat = 0) {
         self.activity = activity
@@ -46,7 +46,7 @@ public struct CompactEarsView: View {
         self.inset = inset
         self.audioLevels = audioLevels
         self.trailingHidden = trailingHidden
-        self.recordingDot = recordingDot
+        self.recording = recording
         self.leadingOffset = leadingOffset.isFinite ? min(max(leadingOffset, -24), 24) : 0
         self.trailingOffset = trailingOffset.isFinite ? min(max(trailingOffset, -24), 24) : 0
     }
@@ -92,18 +92,6 @@ public struct CompactEarsView: View {
             .offset(x: -(trailingOffset + inwardNudge))
         }
         .padding(.horizontal, inset)
-        .overlay(alignment: .trailing) {
-            if let recordingDot {
-                Circle()
-                    .fill(recordingDot)
-                    .frame(width: 5, height: 5)
-                    // Midway between the waveform's end and the shape's edge.
-                    .padding(.trailing, inset + 4.5)
-                    .transition(.opacity)
-                    .accessibilityLabel("Camera or microphone in use")
-            }
-        }
-        .animation(Motion.earContent, value: recordingDot)
         .onAppear { coverChanged() }
         .onChange(of: coverIdentity) { _, _ in coverChanged() }
         .onDisappear {
@@ -124,12 +112,21 @@ public struct CompactEarsView: View {
         // level HUD's ears read, instead of VoiceOver landing on an unlabelled
         // image and then a bare "24°".
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityDescription)
+        .accessibilityLabel(spokenDescription)
     }
 
     /// What the two ears say together, as VoiceOver reads them: the kind first,
     /// then whatever the trailing ear draws, spelled out.
-    private var accessibilityDescription: String {
+    /// What VoiceOver says for the ears: what rests there, then the
+    /// recording lights. The ears are one element, so lights drawn as their
+    /// own view were dropped from it: "Microphone in use" was right and never
+    /// said. Said here instead, once, the lights themselves are hidden.
+    var spokenDescription: String {
+        guard let recording else { return accessibilityDescription }
+        return "\(accessibilityDescription), \(recording.label.prefix(1).lowercased())\(recording.label.dropFirst())"
+    }
+
+    var accessibilityDescription: String {
         func percent(_ fraction: Double) -> String {
             "\(Int((min(max(fraction, 0), 1) * 100).rounded())) percent"
         }
@@ -981,5 +978,80 @@ extension EnvironmentValues {
     var chargeChangeAnimation: Animation? {
         get { self[ChargeChangeAnimationKey.self] }
         set { self[ChargeChangeAnimationKey.self] = newValue }
+    }
+}
+
+
+/// Which recording lights the ears draw: green for the camera, orange for the
+/// microphone, as macOS draws them. Both can be on at once, and then both
+/// show, one above the other: a single dot used to show only the camera.
+public struct RecordingLights: Equatable, Sendable {
+    public var camera: Bool
+    public var microphone: Bool
+
+    public init(camera: Bool, microphone: Bool) {
+        self.camera = camera
+        self.microphone = microphone
+    }
+
+    /// Each light's diameter, and the gap between two stacked.
+    static let size: CGFloat = 5
+    static let gap: CGFloat = 2.5
+
+    /// The box the lights are drawn in: room for two stacked.
+    static var height: CGFloat { size * 2 + gap }
+
+    /// From the island's outer edge, past its gutter, to the lights: midway
+    /// between the waveform's end and the shape's edge.
+    static let edgeMargin: CGFloat = 4.5
+
+
+    /// A light alone sits centred. Two stack around the centre, camera above.
+    var cameraOffset: CGFloat { microphone ? -(Self.size + Self.gap) / 2 : 0 }
+    var microphoneOffset: CGFloat { camera ? (Self.size + Self.gap) / 2 : 0 }
+
+    var label: String {
+        camera && microphone ? "Camera and microphone in use"
+            : camera ? "Camera in use" : "Microphone in use"
+    }
+}
+
+
+/// The recording lights themselves. `NotchOverlayView` places them: at the
+/// outer end of the trailing ear, or in the room the island keeps beside the
+/// satellite, gliding between the two.
+///
+/// One light sits centred. When the other comes on, the first slides aside
+/// to make room and the newcomer fades in: camera above, microphone below,
+/// whichever came first. Animated here, so it happens the same wherever the
+/// lights sit.
+public struct RecordingLightsView: View {
+    let lights: RecordingLights
+
+    public init(lights: RecordingLights) {
+        self.lights = lights
+    }
+
+    public var body: some View {
+        ZStack {
+            if lights.camera {
+                Circle()
+                    .fill(.green)
+                    .frame(width: RecordingLights.size, height: RecordingLights.size)
+                    .offset(y: lights.cameraOffset)
+                    .transition(.opacity)
+            }
+            if lights.microphone {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: RecordingLights.size, height: RecordingLights.size)
+                    .offset(y: lights.microphoneOffset)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: RecordingLights.size, height: RecordingLights.height)
+        .animation(Motion.earContent, value: lights)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(lights.label)
     }
 }

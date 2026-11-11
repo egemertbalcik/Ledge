@@ -220,7 +220,7 @@ struct KeepAwakeRestTests {
         )
         #expect(presentation.liveKeepAwake != nil)
         #expect(presentation.satellite(phase: .companion) == nil, "the dot leaves the seat empty")
-        #expect(presentation.recordingDot(phase: .companion) == .green)
+        #expect(presentation.recordingLights(phase: .companion) == RecordingLights(camera: true, microphone: false))
     }
 
     /// The one time the ears do show a hold in the companion phase: the brief

@@ -332,14 +332,22 @@ public final class NotchPresentation {
         return activity
     }
 
-    /// The colour of the small recording dot in the ears, if there is one:
-    /// green for the camera, orange for the microphone, as macOS draws them.
-    public func recordingDot(phase: NotchPhase) -> Color? {
+    /// How much of the trailing ear the island keeps for the recording lights
+    /// while the satellite is out. Zero unless both are showing.
+    public func recordingRoom(phase: NotchPhase) -> CGFloat {
+        satellite(phase: phase) != nil && recordingLights(phase: phase) != nil
+            ? NotchLayout.recordingRoom : 0
+    }
+
+    /// The recording lights in the ears, if any: the camera, the microphone
+    /// or both. An announcement, which lasts seconds, sets them aside.
+    public func recordingLights(phase: NotchPhase) -> RecordingLights? {
         guard phase == .companion, announcement == nil,
+              restingContent != nil,
               case .privacy(let payload)? = privacyActive?.payload,
               payload.cameraActive || payload.micActive
         else { return nil }
-        return payload.cameraActive ? .green : .orange
+        return RecordingLights(camera: payload.cameraActive, microphone: payload.micActive)
     }
 
     /// Who holds the satellite seat right now, if anyone. The freshest
@@ -363,8 +371,8 @@ public final class NotchPresentation {
                 isRunning: payload.isRunning
             )
         }()
-        // No recording tenant: this fork shows a small dot in the ear instead,
-        // so the trailing ear stays what it was. See `recordingDot(phase:)`.
+        // No recording tenant: the trailing ear shows small lights instead,
+        // so it stays what it was. See `recordingLights(phase:)`.
         return SatelliteArbiter.resolve(
             transient: hudSatellite,
             privacy: nil,
@@ -568,7 +576,20 @@ public struct NotchOverlayView: View {
     /// out: the whole trailing ear, so the body's right edge lands at the
     /// hardware cutout with only the gutter flare beyond it.
     private var satelliteCollapse: CGFloat {
-        satelliteContent != nil ? NotchLayout.earWidth(for: geometry) : 0
+        satelliteContent != nil
+            ? NotchLayout.earWidth(for: geometry) - presentation.recordingRoom(phase: phase) : 0
+    }
+
+    /// Where the recording lights' left edge sits. Beside the satellite,
+    /// centred in the room kept past the cutout; otherwise at the outer end of
+    /// the trailing ear, inside the gutter.
+    private func recordingLightsX(layout: NotchLayout) -> CGFloat {
+        let gutter = max(0, preferences.gutterRadius.isFinite ? preferences.gutterRadius : 0)
+        guard satelliteContent != nil else {
+            return layout.boundingSize.width - gutter - RecordingLights.edgeMargin - RecordingLights.size
+        }
+        let cutout = layout.boundingSize.width - gutter - NotchLayout.earWidth(for: geometry)
+        return cutout + (NotchLayout.recordingRoom - RecordingLights.size) / 2
     }
 
     /// Who holds the satellite seat, resolved once on the presentation so the
@@ -641,6 +662,37 @@ public struct NotchOverlayView: View {
         // every frame, not hug it, so one fixed shape serves the whole flight
         // and the stack does not relayout per frame.
         .clipShape(shape)
+        // The recording lights: at the outer end of the trailing ear, or,
+        // while the satellite has folded that ear away, in the room the island
+        // keeps for them just past the cutout. Drawn over the clip, like the
+        // satellite, but always on black.
+        //
+        // They don't glide between the two places. The satellite flies in
+        // from inside the island and out the same way, and lights gliding
+        // the other way crossed it mid-flight, then sat on the waveform's last
+        // bars while it faded back in. So when the satellite comes or goes
+        // they fade out at once and back in where they now belong, after the
+        // satellite has landed. Under the satellite, so in the one frame they
+        // may share while it tucks back in, the satellite is the one seen.
+        .overlay(alignment: .topLeading) {
+            if let lights = presentation.recordingLights(phase: phase) {
+                RecordingLightsView(lights: lights)
+                    .offset(x: recordingLightsX(layout: layout),
+                            y: (layout.boundingSize.height - RecordingLights.height) / 2)
+                    .id(satelliteContent != nil)
+                    // Said with the ears, which VoiceOver reads as one.
+                    .accessibilityHidden(true)
+                    // In once the island has made room and the satellite has
+                    // landed, so a light is never drawn over the desktop or
+                    // under the satellite; out quickly, before the edge closes
+                    // back past it.
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(Motion.earContent.delay(0.3)),
+                        removal: .opacity.animation(.easeOut(duration: 0.06))
+                    ))
+                    .allowsHitTesting(false)
+            }
+        }
         // The detached satellite, seated just past the island's right edge
         // while the companion rests — the ear inside goes dark and this circle
         // owns the readout. It slides out from behind the island as if
@@ -656,9 +708,16 @@ public struct NotchOverlayView: View {
                     islandSize: layout.boundingSize,
                     geometry: geometry,
                     gutterRadius: preferences.gutterRadius,
-                    offset: preferences.satelliteOffset
+                    offset: preferences.satelliteOffset,
+                    recordingRoom: presentation.recordingRoom(phase: phase)
                 )
                 SatelliteView(content: content, diameter: seat.width)
+                    // One piece while it moves. The countdown is redrawn every
+                    // second outside any animation, and without this the new
+                    // digits were placed where the satellite was headed while
+                    // its disc was still sliding there: the numbers ran ahead
+                    // of their circle.
+                    .geometryGroup()
                     .offset(x: seat.minX)
                     .transition(reduceMotion ? .opacity : .asymmetric(
                         insertion: .offset(x: -(geometry.notchSize.height + 9))
@@ -820,6 +879,17 @@ public struct NotchOverlayView: View {
             ),
             value: expandedSize
         )
+        // The room kept for the recording lights beside the satellite: the
+        // island's edge, its fill, its clip and the satellite all move on this
+        // one spring, so the black part grows and the satellite slides as one.
+        .animation(
+            Motion.expand(
+                response: preferences.springResponse,
+                damping: preferences.springDamping,
+                reduced: reduceMotion
+            ),
+            value: presentation.recordingRoom(phase: phase)
+        )
         .animation(Motion.tuning, value: preferences.bottomRadius)
         .animation(Motion.tuning, value: preferences.closedBottomRadius)
         .animation(Motion.tuning, value: preferences.gutterRadius)
@@ -903,7 +973,7 @@ public struct NotchOverlayView: View {
                     // While the satellite holds any content, the trailing ear
                     // yields — the island carries only its leading side.
                     trailingHidden: satelliteContent != nil,
-                    recordingDot: presentation.recordingDot(phase: phase),
+                    recording: presentation.recordingLights(phase: phase),
                     leadingOffset: preferences.earLeadingOffset,
                     trailingOffset: preferences.earTrailingOffset
                 )
