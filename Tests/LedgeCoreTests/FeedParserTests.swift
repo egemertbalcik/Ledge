@@ -43,39 +43,6 @@ struct FeedParserTests {
         }
     }
 
-    // MARK: - Interrupting
-
-    @Test("A feed interrupts only when it says so and has something to show")
-    func interrupts() throws {
-        let on = try #require(feed(#"{"version":1,"compact_leading":"48","compact_interrupts":true}"#)?.payload)
-        #expect(on.interruptsEars)
-        let off = try #require(feed(#"{"version":1,"compact_leading":"48"}"#)?.payload)
-        #expect(!off.interruptsEars)
-        let empty = try #require(feed(#"{"version":1,"compact_interrupts":true}"#)?.payload)
-        #expect(!empty.interruptsEars)
-    }
-
-    @Test("An interrupting feed takes the ears from the music, and a quiet one does not")
-    func interruptsOverMusic() {
-        func activity(_ source: String, interrupts: Bool?) -> Activity {
-            Activity(
-                id: ActivityID(kind: .feeds, source: source),
-                createdAt: 0,
-                payload: .feeds(FeedPayload(
-                    title: source, compactLeading: "48", compactInterrupts: interrupts, updatedAt: 1
-                ))
-            )
-        }
-        func rest(_ feed: Activity) -> ActivityID? {
-            CompactRest.resolve(
-                farewell: nil, playingNowPlaying: activity("music", interrupts: nil),
-                runningTimer: nil, closeEvent: nil, nowPlaying: nil, feed: feed, selected: nil
-            )?.id
-        }
-        #expect(rest(activity("loud", interrupts: true))?.source == "loud")
-        #expect(rest(activity("quiet", interrupts: nil))?.source == "music")
-    }
-
     // MARK: - What a whole file says
 
     @Test("A complete file reads field for field")

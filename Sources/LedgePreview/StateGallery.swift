@@ -162,23 +162,6 @@ enum StateGallery {
             presentation.restingFeed = PreviewFixtures.feed()
             presentation.selected = PreviewFixtures.feed()
         },
-        State(name: "companion-feed-one-side") { presentation in
-            let feed = Activity(
-                id: ActivityID(kind: .feeds, source: "preview"),
-                createdAt: 0,
-                payload: .feeds(FeedPayload(
-                    title: "Limits",
-                    compactTrailing: "91",
-                    compactTrailingFraction: 0.91,
-                    compactTrailingColor: "#7A9DFF",
-                    compactInterrupts: true,
-                    updatedAt: Date().timeIntervalSince1970
-                ))
-            )
-            presentation.phase = .companion
-            presentation.restingFeed = feed
-            presentation.selected = feed
-        },
         State(name: "companion-feed-critical") { presentation in
             presentation.phase = .companion
             presentation.restingFeed = PreviewFixtures.feed(level: .critical)

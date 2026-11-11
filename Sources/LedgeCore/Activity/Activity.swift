@@ -285,9 +285,6 @@ public enum CompactRest {
         }
 
         if let farewell { return farewell }
-        // A feed that asked to interrupt has the ears for its moment, over
-        // everything below. It gives them back by writing itself without that.
-        if let feed, case .feeds(let payload) = feed.payload, payload.interruptsEars { return feed }
         if let playingNowPlaying = restable(playingNowPlaying) { return playingNowPlaying }
         if let runningTimer { return runningTimer }
         if let closeEvent { return closeEvent }

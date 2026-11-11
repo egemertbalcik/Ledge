@@ -332,19 +332,10 @@ public final class NotchPresentation {
         return activity
     }
 
-    /// A feed is saying something brief over whatever rests in the ears and
-    /// needs both of them, so the standing tenants leave the satellite seat
-    /// for that moment. A transient readout still takes it.
-    public var feedInterruptsEars: Bool {
-        guard case .feeds(let payload)? = restingFeed?.payload else { return false }
-        return payload.interruptsEars
-    }
-
     /// The colour of the small recording dot in the ears, if there is one:
     /// green for the camera, orange for the microphone, as macOS draws them.
-    /// Stands down while a feed has the ears for a moment.
     public func recordingDot(phase: NotchPhase) -> Color? {
-        guard phase == .companion, announcement == nil, !feedInterruptsEars,
+        guard phase == .companion, announcement == nil,
               case .privacy(let payload)? = privacyActive?.payload,
               payload.cameraActive || payload.micActive
         else { return nil }
@@ -377,7 +368,7 @@ public final class NotchPresentation {
         return SatelliteArbiter.resolve(
             transient: hudSatellite,
             privacy: nil,
-            timer: feedInterruptsEars ? nil : timerContent,
+            timer: timerContent,
             timerIsMainIsland: playingNowPlaying == nil
         )
     }

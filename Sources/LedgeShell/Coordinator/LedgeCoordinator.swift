@@ -3870,8 +3870,6 @@ public final class LedgeCoordinator {
     /// target whose activity has left the queue answers nil rather than
     /// letting `select` no-op into opening the wrong card.
     private func trailingDuoTarget(on key: CGDirectDisplayID) -> ActivityID? {
-        // The seat is empty while a feed interrupts; the ear is the feed's.
-        guard !presentation.feedInterruptsEars else { return nil }
         guard let controller = displayPanels.controller(for: key),
               controller.geometry.isHardwareNotch,
               let regions = controller.compactRegions(for: restingPhase)
