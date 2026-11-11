@@ -3884,27 +3884,39 @@ public final class LedgeCoordinator {
             at: NSEvent.mouseLocation,
             cutoutWidth: controller.geometry.notchSize.width
         )
-        guard zone == .trailing || zone == .satellite else { return nil }
-
         let musicIsMainIsland: Bool = {
             guard let playing = presentation.nowPlaying,
                   case .nowPlaying(let payload) = playing.payload
             else { return false }
             return payload.isPlaying
         }()
-
-        let candidate: ActivityID?
-        if presentation.hudSatellite != nil {
-            candidate = satelliteSourceID
-        } else if let session = presentation.timerSession,
+        let runningTimer: ActivityID? = {
+            guard let session = presentation.timerSession,
                   case .timer(let payload) = session.payload,
-                  !payload.isIdle, musicIsMainIsland {
-            candidate = session.id
-        } else {
-            candidate = nil
-        }
+                  !payload.isIdle, musicIsMainIsland
+            else { return nil }
+            return session.id
+        }()
+        let candidate = Self.trailingTarget(
+            zone: zone,
+            transientShown: presentation.hudSatellite != nil,
+            transient: satelliteSourceID,
+            runningTimer: runningTimer
+        )
         guard let candidate, activities.activity(withID: candidate) != nil else { return nil }
         return candidate
+    }
+
+    /// What a pointer on the trailing side opens, in the order the satellite
+    /// is drawn: a transient readout first, then a running timer.
+    static func trailingTarget(
+        zone: CompactZone?,
+        transientShown: Bool,
+        transient: ActivityID?,
+        runningTimer: ActivityID?
+    ) -> ActivityID? {
+        guard zone == .trailing || zone == .satellite else { return nil }
+        return transientShown ? transient : runningTimer
     }
 
     /// Every display's resting region, in the panels' own (notched-first) order
