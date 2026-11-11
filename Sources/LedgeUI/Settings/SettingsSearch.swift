@@ -82,7 +82,7 @@ enum SettingsSearch {
             .init(title: "Reset all settings", aliases: "reset defaults start over factory",
                   pane: .general, card: nil, row: "reset"),
 
-            .init(title: "Opens first", aliases: "order pinned priority which card",
+            .init(title: "Opens first", aliases: "order pinned priority which card last read left off remember",
                   pane: .cards, card: nil, row: "pinnedCard"),
 
             .init(title: "Timer durations", aliases: "focus pomodoro break minutes length",

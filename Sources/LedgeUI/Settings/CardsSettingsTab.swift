@@ -58,6 +58,7 @@ struct CardsSettingsTab: View {
                 Section {
                     Picker("Opens first", selection: $preferences.pinnedCard) {
                         Text("Whatever matters most").tag("")
+                        Text("Last one read").tag(Prefs.lastReadCard)
                         Text("Music").tag("nowPlaying")
                         Text("Calendar").tag("event")
                         Text("Timer").tag("timer")
@@ -68,7 +69,7 @@ struct CardsSettingsTab: View {
                 } header: {
                     Text("Order")
                 } footer: {
-                    SettingsNote("A meeting about to start comes before playing music, which comes before the weather. Choosing a card opens that one every time.")
+                    SettingsNote("A meeting about to start comes before playing music, which comes before the weather. Choosing a card opens that one every time. Last one read opens the card you were on when the notch closed.")
                 }
             }
             .navigationDestination(for: String.self) { id in

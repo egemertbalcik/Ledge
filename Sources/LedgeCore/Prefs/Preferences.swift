@@ -172,7 +172,12 @@ public enum Prefs {
     public static let quietDuringFocus = PrefKey<Bool>("behavior.quietDuringFocus", default: true)
     /// The card kind that always opens first — an ActivityKind rawValue, or
     /// empty for the automatic urgency ordering. A direct order beats a score.
+    /// `lastReadCard` is the one value that names no card.
     public static let pinnedCard = PrefKey<String>("behavior.pinnedCard", default: "")
+    /// "Last one read" under "Opens first": the notch opens on the card it
+    /// closed on instead of the first one. It is no card kind, so the order
+    /// reads it as no pin and stays the automatic one.
+    public static let lastReadCard = "lastRead"
     /// The hairline along the shape's free edges. A fixed subtle stroke —
     /// it needs no permission and costs nothing.
     public static let outlineEnabled = PrefKey<Bool>("appearance.outlineEnabled", default: true)
