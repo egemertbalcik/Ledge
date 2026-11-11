@@ -1787,6 +1787,16 @@ public final class LedgeCoordinator {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
             return false
         }
+        // Sound moving to the device whose banner is already up is the same
+        // news told twice, and the second telling is a name that does not
+        // fit in an ear.
+        if activity.id == AudioRouteProvider.activityID, self.routeEchoesBanner(activity) {
+            return true
+        }
+        // A device arriving or leaving says so in full below the island,
+        // whichever way the ears end up carrying it — peek or satellite.
+        let banner = Self.bannerPayload(for: activity)
+        if let banner { self.showDeviceBanner(banner) }
         // While the companion rests, a device or charger announcement is
         // satellite material, not a takeover: the music keeps the island
         // and the event shows beside it for its dwell.
@@ -1802,9 +1812,23 @@ public final class LedgeCoordinator {
         // a pomodoro that ends while anything else is on screen is exactly
         // the case this exists for.
         let announcement = Self.announcement(for: activity)
-        let duration = announcement == nil
-            ? self.preferences.peekDuration
-            : NotchAnnouncement.duration
+        // The ears stay as long as the banner under them: an island that
+        // closed first left the capsule hanging below a bare notch.
+        let duration = announcement != nil
+            ? NotchAnnouncement.duration
+            : banner != nil
+                ? max(self.preferences.peekDuration, Self.deviceBannerDwell)
+                : self.preferences.peekDuration
+
+        // The route peek that got there first is the same echo the other way
+        // round. The connection replaces it in place and nothing is put back.
+        if banner != nil, self.state.phase == .peek,
+           self.presentation.peeked?.id == AudioRouteProvider.activityID {
+            self.presentation.peeked = activity
+            self.presentation.announcement = announcement
+            self.send(.peekRequested(duration))
+            return true
+        }
 
         // The SAME card announcing again — Caps Lock toggled mid-peek,
         // a second Focus flip — restarts the current peek in place with
@@ -1863,6 +1887,68 @@ public final class LedgeCoordinator {
         self.presentation.announcement = announcement
         self.send(.peekRequested(duration))
         return true
+    }
+
+    // MARK: - Device banner
+
+    /// How long the banner stays. A beat longer than an announcement: there
+    /// is a name and up to three numbers to read.
+    static let deviceBannerDwell: TimeInterval = 3.2
+
+    /// How long after a connection a route change to the same device is the
+    /// connection's own echo rather than news.
+    static let routeEchoWindow: TimeInterval = 8
+
+    private var deviceBannerDismiss: DispatchWorkItem?
+    /// The device last bannered as connecting, and when.
+    private var bannerConnected: (name: String, at: TimeInterval)?
+
+    /// The device a card is about, when the card is a device coming or going.
+    ///
+    /// Known connection state only: a case opening on the desk says nothing
+    /// about this Mac. And no status word — those are the switches and the
+    /// route changes, which borrow the device payload without being devices.
+    static func bannerPayload(for activity: Activity) -> DevicePayload? {
+        guard case .device(let payload) = activity.payload,
+              payload.isConnected != nil,
+              payload.statusText == nil,
+              !payload.name.isEmpty
+        else { return nil }
+        return payload
+    }
+
+    private func showDeviceBanner(_ payload: DevicePayload) {
+        presentation.deviceBanner = payload
+        if payload.isConnected == true {
+            bannerConnected = (payload.name, Date().timeIntervalSinceReferenceDate)
+        }
+        deviceBannerDismiss?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.presentation.deviceBanner = nil }
+        }
+        deviceBannerDismiss = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.deviceBannerDwell, execute: item)
+    }
+
+    private func routeEchoesBanner(_ activity: Activity) -> Bool {
+        guard case .device(let route) = activity.payload, let shown = bannerConnected else {
+            return false
+        }
+        return Self.routeEchoes(
+            route: route.name, connected: shown.name,
+            elapsed: Date().timeIntervalSinceReferenceDate - shown.at
+        )
+    }
+
+    /// Whether a route change names the device that has just connected.
+    /// The audio system and Bluetooth mostly agree on a name; where they do
+    /// not, one usually contains the other.
+    static func routeEchoes(route: String, connected: String, elapsed: TimeInterval) -> Bool {
+        guard elapsed >= 0, elapsed < routeEchoWindow else { return false }
+        let a = route.lowercased().trimmingCharacters(in: .whitespaces)
+        let b = connected.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a == b || a.contains(b) || b.contains(a)
     }
 
     /// What a resting track — playing, paused, or gone — does to the ears.

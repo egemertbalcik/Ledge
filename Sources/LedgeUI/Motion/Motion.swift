@@ -23,6 +23,22 @@ public enum Motion {
         return .spring(response: response, dampingFraction: max(damping, 0.92))
     }
 
+    /// The device banner arriving and leaving. Slower than a peek and with a
+    /// little settle: it is a separate object landing below the island, not
+    /// the island changing shape, so it may overshoot where the shape may not.
+    public static func deviceBannerArrival(reduced: Bool = false) -> Animation {
+        if reduced { return .easeInOut(duration: 0.2) }
+        return .spring(response: 0.46, dampingFraction: 0.78)
+    }
+
+    static func deviceBanner(reduced: Bool = false) -> AnyTransition {
+        if reduced { return .opacity }
+        return .modifier(
+            active: DeviceBannerEffect(hidden: true),
+            identity: DeviceBannerEffect(hidden: false)
+        )
+    }
+
     /// Content appearing after the silhouette has started moving, so the shape
     /// leads and the contents follow.
     public static func content(response: Double, reduced: Bool = false) -> Animation {
@@ -216,6 +232,21 @@ struct HUDRowArrival: ViewModifier {
         content
             .opacity(hidden ? 0 : 1)
             .scaleEffect(hidden ? 0.82 : 1, anchor: .top)
+    }
+}
+
+/// The device banner either side of its stay: tucked up under the island and
+/// a little smaller, so it reads as dropping out of the notch and being drawn
+/// back into it. No blur — the capsule is glass, and blurring glass smears
+/// the one thing that makes it read as glass.
+struct DeviceBannerEffect: ViewModifier {
+    let hidden: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(hidden ? 0 : 1)
+            .scaleEffect(hidden ? 0.8 : 1, anchor: .top)
+            .offset(y: hidden ? -12 : 0)
     }
 }
 
