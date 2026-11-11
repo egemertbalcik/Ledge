@@ -76,7 +76,7 @@ struct FeedGaugeView: View {
             ZStack {
                 FeedRing(
                     fraction: gauge.fraction,
-                    tint: FeedEar.color(hex: gauge.color) ?? gauge.level.feedTint,
+                    tint: FeedEar.tint(fixed: gauge.color, level: gauge.level, otherwise: gauge.level.feedTint),
                     track: .white.opacity(0.15),
                     lineWidth: 4
                 )
@@ -160,19 +160,53 @@ struct FeedEar: View {
     }
 
     /// The producer's colour for this side, if it chose one.
-    private var fixedTint: Color? {
-        Self.color(hex: side == .leading ? payload.compactLeadingColor : payload.compactTrailingColor)
+    private var fixedHex: String? {
+        side == .leading ? payload.compactLeadingColor : payload.compactTrailingColor
     }
 
-    /// `#RRGGBB` as a colour. The parser has already checked the shape.
+    /// What a side or a gauge is drawn in. Critical is red whatever colour
+    /// the producer chose: a chosen colour used to stay blue at the one
+    /// moment it mattered most. Otherwise the chosen colour, otherwise what
+    /// the caller would draw anyway.
+    static func tint(fixed hex: String?, level: FeedLevel, otherwise: Color) -> Color {
+        if level == .critical { return level.feedTint }
+        return color(hex: hex) ?? otherwise
+    }
+
+    /// `#RRGGBB` as a colour, never too dark to see on the black notch.
+    /// The parser has already checked the shape.
     static func color(hex: String?) -> Color? {
         guard let hex, let value = Int(hex.dropFirst(), radix: 16) else { return nil }
-        return Color(
-            .sRGB,
+        let (red, green, blue) = readableOnBlack(
             red: Double((value >> 16) & 0xFF) / 255,
             green: Double((value >> 8) & 0xFF) / 255,
             blue: Double(value & 0xFF) / 255
         )
+        return Color(.sRGB, red: red, green: green, blue: blue)
+    }
+
+    /// The least lift toward white that gives a colour 3:1 against black,
+    /// the contrast a graphic needs to be seen. A producer could choose
+    /// `#111111`, and its ring and words were then invisible on the notch.
+    /// Colours that already have the contrast come back unchanged.
+    static func readableOnBlack(red: Double, green: Double, blue: Double) -> (Double, Double, Double) {
+        func luminance(_ r: Double, _ g: Double, _ b: Double) -> Double {
+            func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+        // (L + 0.05) / 0.05 ≥ 3, against black.
+        let floor = 0.1
+        guard luminance(red, green, blue) < floor else { return (red, green, blue) }
+        func lifted(_ t: Double) -> (Double, Double, Double) {
+            (red + (1 - red) * t, green + (1 - green) * t, blue + (1 - blue) * t)
+        }
+        var low = 0.0, high = 1.0
+        for _ in 0..<20 {
+            let mid = (low + high) / 2
+            let (r, g, b) = lifted(mid)
+            if luminance(r, g, b) < floor { low = mid } else { high = mid }
+        }
+        return lifted(high)
     }
 
     var body: some View {
@@ -193,7 +227,7 @@ struct FeedEar: View {
                     Text(text)
                         .font(.system(size: 9.5, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(fixedTint ?? payload.level.feedTint)
+                        .foregroundStyle(Self.tint(fixed: fixedHex, level: payload.level, otherwise: payload.level.feedTint))
                         .lineLimit(1)
                         .minimumScaleFactor(0.55)
                 }
@@ -223,15 +257,18 @@ struct FeedEar: View {
     /// The colour of a ring with no words, which is the only thing saying how
     /// much is left: each side by its own fraction, as a battery reads. The
     /// feed's level can only make it worse: a fraction read as usage rather
-    /// than what is left showed a full, critical feed in green.
-    static func bareRingTint(forFraction fraction: Double, level: FeedLevel = .normal) -> Color {
-        if level == .critical || fraction < 0.15 { return .red }
+    /// than what is left showed a full, critical feed in green. A chosen
+    /// colour stands in for the fraction's, and critical is red regardless.
+    static func bareRingTint(forFraction fraction: Double, level: FeedLevel = .normal, fixed hex: String? = nil) -> Color {
+        if level == .critical { return .red }
+        if let chosen = color(hex: hex) { return chosen }
+        if fraction < 0.15 { return .red }
         if fraction < 0.4 || level == .warning { return .orange }
         return .green
     }
 
     private func bareRing(fraction: Double) -> some View {
-        let tint = fixedTint ?? Self.bareRingTint(forFraction: fraction, level: payload.level)
+        let tint = Self.bareRingTint(forFraction: fraction, level: payload.level, fixed: fixedHex)
         return FeedRing(
             fraction: fraction,
             tint: tint,
@@ -283,7 +320,7 @@ struct FeedEar: View {
 
     private func ring(fraction: Double, diameter: CGFloat) -> some View {
         let lineWidth = Self.lineWidth(forDiameter: diameter)
-        let tint = fixedTint ?? payload.level.feedTint
+        let tint = Self.tint(fixed: fixedHex, level: payload.level, otherwise: payload.level.feedTint)
         return ZStack {
             // The timer ear's own dial geometry, with no hand: this is how full
             // something is, not a count of time.

@@ -38,7 +38,10 @@ struct FeedParserTests {
         #expect(good?.payload.compactLeadingColor == "#D97757")
         #expect(good?.payload.compactTrailingColor == "#2F80ED")
         for bad in ["D97757", "#D9775", "#D977577", "#GGGGGG", "orange", ""] {
-            let parsed = feed(#"{"version":1,"compact_leading_color":"\#(bad)"}"#)
+            // The colour is dropped, not the file: a file thrown away whole
+            // would also have no colour, and passed this for the wrong reason.
+            let parsed = feed(#"{"version":1,"title":"Kept","compact_leading_color":"\#(bad)"}"#)
+            #expect(parsed?.payload.title == "Kept", "the file was thrown away over \(bad)")
             #expect(parsed?.payload.compactLeadingColor == nil, "\(bad)")
         }
     }
