@@ -215,9 +215,12 @@ struct FeedEar: View {
         } else if let fraction {
             // As tall as the ear comfortably allows, which is the notch's own
             // height on this Mac: 32 on an Air, 38 on a Pro. Measured because
-            // a ring that fits one is lost on the other.
+            // a ring that fits one is lost on the other. No wider than the ear
+            // offers, which only binds while recording lights take the end of
+            // a narrow one.
             GeometryReader { proxy in
-                ring(fraction: fraction, diameter: Self.diameter(forHeight: proxy.size.height))
+                ring(fraction: fraction,
+                     diameter: Self.diameter(forHeight: proxy.size.height, width: proxy.size.width))
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
         } else if text != nil {
@@ -282,6 +285,15 @@ struct FeedEar: View {
     static func diameter(forHeight height: CGFloat) -> CGFloat {
         guard height.isFinite, height > 0 else { return 25 }
         return min(max(height - 2 * verticalMargin, 20), 34)
+    }
+
+    /// The same, but never wider than the room offered. The largest ring, 34,
+    /// is narrower than the narrowest ear, 36, so only the recording lights'
+    /// lane can make this bind: a narrow ear on a tall notch, with a light on.
+    static func diameter(forHeight height: CGFloat, width: CGFloat) -> CGFloat {
+        let tall = diameter(forHeight: height)
+        guard width.isFinite, width > 0 else { return tall }
+        return min(tall, width)
     }
 
     /// The stroke that goes with a diameter. Thinner in a small ring, where

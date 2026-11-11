@@ -1,5 +1,6 @@
 import Foundation
 import LedgeCore
+import SwiftUI
 import Testing
 @testable import LedgeUI
 
@@ -182,3 +183,193 @@ struct RecordingLightsTests {
     }
 }
 
+/// While the lights show, the trailing ear's content keeps out of their lane:
+/// a long feed word or an outward nudge used to run under them.
+@Suite("Trailing content gives the lights room")
+@MainActor
+struct TrailingEarLaneTests {
+
+    private let ear: CGFloat = 48
+    private var lane: CGFloat { RecordingLights.lane }
+
+    private func place(_ width: CGFloat, nudge: CGFloat = 0, inward: CGFloat = 0,
+                       lights: Bool = true) -> (x: CGFloat, width: CGFloat) {
+        TrailingEarLayout.placement(earWidth: ear, contentWidth: width, nudge: nudge,
+                                    inward: inward, lane: lights ? lane : 0)
+    }
+
+    @Test("The lane is the lights, their margin and four points before them")
+    func laneSize() {
+        #expect(lane - RecordingLights.edgeMargin - RecordingLights.size == 4)
+    }
+
+    @Test("Without lights the content sits where it always did")
+    func noLights() {
+        for nudge: CGFloat in [-20, -8, 0, 12] {
+            let spot = place(42, nudge: nudge, inward: 2, lights: false)
+            #expect(spot.x == (ear - 42) / 2 - 2 - nudge)
+            #expect(spot.width == 42)
+        }
+    }
+
+    @Test("Content that already stops short of the lights doesn't move")
+    func fits() {
+        #expect(place(20).x == 14)
+        #expect(place(20).width == 20)
+        // Inward nudges only take it further from them.
+        #expect(place(30, nudge: 12).x == -3)
+        // Ending exactly at the lane, as the waveform does, is room enough.
+        let snug = ear - lane - 20
+        #expect(place(20, nudge: (ear - 20) / 2 - snug).x == snug)
+        // Nor is a rounding hair past it: the waveform must not twitch.
+        let hair = snug + 0.2
+        #expect(place(20, nudge: (ear - 20) / 2 - hair).x == hair)
+    }
+
+    @Test("Nudged outward, it comes back only as far as the lane")
+    func pulledBack() {
+        let spot = place(20, nudge: -12)
+        #expect(spot.x + spot.width == ear - lane)
+        #expect(spot.width == 20)
+        #expect(spot.x >= (ear - 20) / 2)
+    }
+
+    @Test("Never further in than a nudge of zero puts it; then it gets less width")
+    func shrinks() {
+        let spot = place(42, inward: 1)
+        #expect(spot.x == (ear - 42) / 2 - 1)
+        #expect(spot.x + spot.width == ear - lane)
+        let outward = place(42, nudge: -10, inward: 1)
+        #expect(outward.x == spot.x)
+        #expect(outward.width == spot.width)
+    }
+
+    /// Drawn for real, offscreen, at 2x: a bar that takes whatever width it
+    /// is offered, up to 42, as a feed's word does. Returns the red columns,
+    /// in pixels.
+    private func drawn(lights: Bool, nudge: CGFloat = 0) throws -> ClosedRange<Int> {
+        let view = TrailingEarLayout(nudge: nudge, inward: 0, lane: lights ? lane : 0) {
+            Color(red: 1, green: 0, blue: 0).frame(maxWidth: 42).frame(height: 10)
+        }
+        .frame(width: ear, height: 10)
+        .background(Color.black)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        let image = try #require(renderer.cgImage)
+        let data = try #require(image.dataProvider?.data as Data?)
+        let row = image.bytesPerRow * 10
+        let step = image.bitsPerPixel / 8
+        // Red in either byte order, and nothing half-covered.
+        let red = (0..<image.width).filter { x in
+            let pixel = row + x * step
+            let first = data[pixel], second = data[pixel + 1], third = data[pixel + 2]
+            return second < 40 && max(first, third) > 200 && min(first, third) < 40
+        }
+        let first = try #require(red.first)
+        let last = try #require(red.last)
+        return first...last
+    }
+
+    @Test("Drawn, the content ends before the lane only while the lights show")
+    func drawnForReal() throws {
+        #expect(try drawn(lights: false) == 6...89)
+        let lit = try drawn(lights: true)
+        #expect(lit == 6...Int((ear - lane) * 2) - 1)
+        #expect(try drawn(lights: true, nudge: -10) == lit)
+    }
+
+    @Test("The lane ends four points before where the lights are drawn")
+    func laneMeetsTheLights() {
+        // Ears are padded by the gutter, so their outer edge is the island's
+        // width less the gutter: the edge the lane is measured from.
+        let island: CGFloat = 300, gutter: CGFloat = 10
+        #expect(island - gutter - lane + RecordingLights.clearance
+            == RecordingLights.earEndX(islandWidth: island, gutter: gutter))
+        #expect(RecordingLights.earEndX(islandWidth: island, gutter: gutter) + RecordingLights.size
+            + RecordingLights.edgeMargin == island - gutter)
+    }
+
+    @Test("Beside the satellite the lights sit centred in the room kept for them")
+    func besideSatellite() {
+        let island: CGFloat = 300, gutter: CGFloat = 10, ear: CGFloat = 48
+        let cutout = island - gutter - ear
+        let x = RecordingLights.besideSatelliteX(islandWidth: island, gutter: gutter, earWidth: ear)
+        #expect(x - cutout == cutout + NotchLayout.recordingRoom - (x + RecordingLights.size))
+        #expect(x > cutout)
+        #expect(x + RecordingLights.size < cutout + NotchLayout.recordingRoom)
+    }
+
+    @Test("A ring is no wider than it is offered; without lights that never binds")
+    func ringFitsItsWidth() {
+        #expect(FeedEar.diameter(forHeight: 38.5, width: 23.5) == 23.5)
+        #expect(FeedEar.diameter(forHeight: 38.5, width: 60) == FeedEar.diameter(forHeight: 38.5))
+        #expect(FeedEar.diameter(forHeight: 38.5, width: .nan) == FeedEar.diameter(forHeight: 38.5))
+        // The tallest ring is narrower than the narrowest ear.
+        for height: CGFloat in [20, 32.5, 38.5, 60, 200] {
+            #expect(FeedEar.diameter(forHeight: height, width: NotchLayout.sanitizedEarWidth(0))
+                == FeedEar.diameter(forHeight: height))
+        }
+    }
+
+    /// The real ears, with a feed's ring and words on the right, at the
+    /// narrowest ear on a 14-inch Pro: 36 × 1.03 wide, 38.5 tall. Returns the
+    /// rightmost painted column of the trailing ear, in points, and the
+    /// painted width there.
+    private func feedRing(lights: Bool) throws -> (right: CGFloat, width: CGFloat) {
+        let ear: CGFloat = 36 * 1.03, cutout: CGFloat = 180, inset: CGFloat = 10
+        let island = inset * 2 + ear * 2 + cutout
+        let feed = Activity(
+            id: ActivityID(kind: .feeds, source: "test"), createdAt: 0,
+            payload: .feeds(FeedPayload(title: "Limits", compactTrailing: "91",
+                                        compactTrailingFraction: 1,
+                                        updatedAt: Date().timeIntervalSince1970))
+        )
+        let view = CompactEarsView(
+            activity: feed, cutoutWidth: cutout, inset: inset,
+            recording: lights ? RecordingLights(camera: false, microphone: true) : nil
+        )
+        .frame(width: island, height: 38.5)
+        .background(Color.black)
+        let renderer = ImageRenderer(content: view)
+        renderer.scale = 2
+        let image = try #require(renderer.cgImage)
+        let data = try #require(image.dataProvider?.data as Data?)
+        let step = image.bitsPerPixel / 8
+        let start = Int((inset + ear + cutout) * 2)
+        let painted = (start..<image.width).filter { x in
+            (0..<image.height).contains { y in
+                let pixel = y * image.bytesPerRow + x * step
+                return Int(data[pixel]) + Int(data[pixel + 1]) + Int(data[pixel + 2]) > 90
+            }
+        }
+        let first = try #require(painted.first)
+        let last = try #require(painted.last)
+        return (CGFloat(last + 1) / 2, CGFloat(last + 1 - first) / 2)
+    }
+
+    @Test("A narrow ear's ring clears the light, and is full size without one")
+    func narrowEarRing() throws {
+        let ear: CGFloat = 36 * 1.03, inset: CGFloat = 10
+        let island = inset * 2 + ear * 2 + 180
+        let plain = try feedRing(lights: false)
+        // Full size: the ring as tall as the ear allows.
+        #expect(abs(plain.width - FeedEar.diameter(forHeight: 38.5)) <= 1)
+        let lit = try feedRing(lights: true)
+        // Clear of the drawn light by the clearance, give or take a pixel.
+        let light = RecordingLights.earEndX(islandWidth: island, gutter: inset)
+        #expect(lit.right <= light - RecordingLights.clearance + 0.5)
+        #expect(lit.width < plain.width)
+    }
+
+    /// The ears hand the layout the lane only while there are lights.
+    @Test("The ears clear the lane only while lights show")
+    func wiring() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let ears = try String(
+            contentsOf: root.appending(path: "Sources/LedgeUI/Cards/CompactEarsView.swift"), encoding: .utf8
+        )
+        #expect(ears.contains("lane: recording == nil ? 0 : RecordingLights.lane"))
+        #expect(ears.contains("nudge: trailingOffset,\n                inward: inwardNudge,"))
+    }
+}

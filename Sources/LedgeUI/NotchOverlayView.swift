@@ -586,10 +586,12 @@ public struct NotchOverlayView: View {
     private func recordingLightsX(layout: NotchLayout) -> CGFloat {
         let gutter = max(0, preferences.gutterRadius.isFinite ? preferences.gutterRadius : 0)
         guard satelliteContent != nil else {
-            return layout.boundingSize.width - gutter - RecordingLights.edgeMargin - RecordingLights.size
+            return RecordingLights.earEndX(islandWidth: layout.boundingSize.width, gutter: gutter)
         }
-        let cutout = layout.boundingSize.width - gutter - NotchLayout.earWidth(for: geometry)
-        return cutout + (NotchLayout.recordingRoom - RecordingLights.size) / 2
+        return RecordingLights.besideSatelliteX(
+            islandWidth: layout.boundingSize.width, gutter: gutter,
+            earWidth: NotchLayout.earWidth(for: geometry)
+        )
     }
 
     /// Who holds the satellite seat, resolved once on the presentation so the
