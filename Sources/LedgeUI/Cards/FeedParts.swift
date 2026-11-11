@@ -221,16 +221,17 @@ struct FeedEar: View {
     private static let bareRingLineWidth: CGFloat = 2.5
 
     /// The colour of a ring with no words, which is the only thing saying how
-    /// much is left: each side by its own fraction, as a battery reads, and
-    /// not by the level of the feed as a whole.
-    static func bareRingTint(forFraction fraction: Double) -> Color {
-        if fraction < 0.15 { return .red }
-        if fraction < 0.4 { return .orange }
+    /// much is left: each side by its own fraction, as a battery reads. The
+    /// feed's level can only make it worse: a fraction read as usage rather
+    /// than what is left showed a full, critical feed in green.
+    static func bareRingTint(forFraction fraction: Double, level: FeedLevel = .normal) -> Color {
+        if level == .critical || fraction < 0.15 { return .red }
+        if fraction < 0.4 || level == .warning { return .orange }
         return .green
     }
 
     private func bareRing(fraction: Double) -> some View {
-        let tint = fixedTint ?? Self.bareRingTint(forFraction: fraction)
+        let tint = fixedTint ?? Self.bareRingTint(forFraction: fraction, level: payload.level)
         return FeedRing(
             fraction: fraction,
             tint: tint,
