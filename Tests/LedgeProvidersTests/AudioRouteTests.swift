@@ -60,6 +60,9 @@ struct AudioRouteProviderTests {
         // No ring: a route change knows where sound goes, not how much charge
         // the thing has left.
         #expect(payload.batteryLevels.isEmpty)
+        // No word in the ear: the name is said in full by the banner below
+        // the island, and squeezed beside the cutout it ran off the notch.
+        #expect(payload.statusText == nil)
     }
 
     /// It shares the device *kind* with the Bluetooth cards, so it needs its

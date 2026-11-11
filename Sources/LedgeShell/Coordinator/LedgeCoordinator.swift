@@ -1794,8 +1794,12 @@ public final class LedgeCoordinator {
             return true
         }
         // A device arriving or leaving says so in full below the island,
-        // whichever way the ears end up carrying it — peek or satellite.
-        let banner = Self.bannerPayload(for: activity)
+        // whichever way the ears end up carrying it — peek or satellite. So
+        // does sound moving: the ears carry the glyph, the banner the name.
+        let isRoute = activity.id == AudioRouteProvider.activityID
+        let banner = isRoute
+            ? Self.routeBannerPayload(for: activity)
+            : Self.bannerPayload(for: activity)
         if let banner { self.showDeviceBanner(banner) }
         // While the companion rests, a device or charger announcement is
         // satellite material, not a takeover: the music keeps the island
@@ -1822,7 +1826,7 @@ public final class LedgeCoordinator {
 
         // The route peek that got there first is the same echo the other way
         // round. The connection replaces it in place and nothing is put back.
-        if banner != nil, self.state.phase == .peek,
+        if banner != nil, !isRoute, self.state.phase == .peek,
            self.presentation.peeked?.id == AudioRouteProvider.activityID {
             self.presentation.peeked = activity
             self.presentation.announcement = announcement
@@ -1915,6 +1919,26 @@ public final class LedgeCoordinator {
               !payload.name.isEmpty
         else { return nil }
         return payload
+    }
+
+    /// The caption under a route change's name in the banner.
+    static let routeBannerCaption = "Sound Output"
+
+    /// The banner for sound moving: the destination's full name, what it now
+    /// is, and no connection state — a route change is not a device arriving,
+    /// and calling it "Connected" would also arm the echo check against it.
+    static func routeBannerPayload(for activity: Activity) -> DevicePayload? {
+        guard case .device(let route) = activity.payload,
+              !route.name.isEmpty
+        else { return nil }
+        return DevicePayload(
+            name: route.name,
+            symbolName: route.symbolName,
+            batteryLevels: [:],
+            isConnected: nil,
+            isApple: route.isApple,
+            statusText: routeBannerCaption
+        )
     }
 
     private func showDeviceBanner(_ payload: DevicePayload) {
