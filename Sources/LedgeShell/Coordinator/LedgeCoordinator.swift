@@ -2002,7 +2002,7 @@ public final class LedgeCoordinator {
                     },
                     webMedia: { [weak self] in self?.preferences.webMedia ?? .hidden },
                     ownerIsApp: { BrowserCatalogue.shared.isOpenableApp(bundleID: $0) },
-                    fullScreenOwner: { FullScreenSpace.ownerBundleID() }
+                    fullScreenOwners: { [weak self] in self?.fullScreenOwners.current() ?? [] }
                 )
                 self.nowPlayingProviderRef = provider
                 return provider
@@ -2204,7 +2204,10 @@ public final class LedgeCoordinator {
     /// immediate re-poll instead of waiting for its steady tick. Weak: the hub
     /// owns it, and it is rebuilt whenever the provider is toggled.
     private weak var nowPlayingProviderRef: NowPlayingProvider?
-    private var fullScreenSpaceToken: NSObjectProtocol?
+
+    /// Which apps fill the notched display, asked again only when something
+    /// that can change it happens. See `observeFullScreenSpace()`.
+    private let fullScreenOwners = FullScreenOwners()
 
     /// The live timer provider, so the menu bar and the card can drive the
     /// session. Weak: the hub owns it, and it is rebuilt when toggled.
@@ -3169,14 +3172,32 @@ public final class LedgeCoordinator {
 
     /// Going in and out of a full-screen Space decides whether the player may
     /// hold the ears, so it is answered at once rather than on the next poll.
+    /// Entering or leaving full screen and Split View are Space changes too.
+    /// A display coming or going, an app quitting and a wake can also change
+    /// who fills the notched display. Each forgets the remembered answer, so
+    /// the player is reconsidered against a fresh one. Kept with the other
+    /// observers, so `stop()` removes them and a start after a stop does not
+    /// answer every change twice.
     private func observeFullScreenSpace() {
-        fullScreenSpaceToken = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.nowPlayingProviderRef?.reconsider() }
+        let changed: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.fullScreenOwners.forget()
+                self?.nowPlayingProviderRef?.reconsider()
+            }
         }
+        for name in [
+            NSWorkspace.activeSpaceDidChangeNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didWakeNotification,
+        ] {
+            observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name, object: nil, queue: .main, using: changed
+            ))
+        }
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main, using: changed
+        ))
     }
 
     /// The ear width is draft-edited in Settings and lands only when the

@@ -559,13 +559,13 @@ struct WebMediaGateTests {
 @MainActor
 struct FullScreenPlayerTests {
 
-    private func showsInCompact(owner: String?, playingIn bundleID: String) async -> Bool? {
+    private func showsInCompact(owners: Set<String>, playingIn bundleID: String) async -> Bool? {
         let source = ScriptedSource()
         source.current = media("Dune", duration: 9000, bundleID: bundleID)
         let provider = NowPlayingProvider(
             source: source, artwork: ArtworkLoader(),
             playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
-            fullScreenOwner: { owner }
+            fullScreenOwners: { owners }
         )
         let stream = provider.start()
         await provider.refreshNow()
@@ -581,52 +581,210 @@ struct FullScreenPlayerTests {
 
     @Test("The player filling the screen gives up the ears and keeps its card")
     func ownPlayer() async {
-        #expect(await showsInCompact(owner: "com.spotify.client", playingIn: "com.spotify.client") == false)
+        #expect(await showsInCompact(owners: ["com.spotify.client"], playingIn: "com.spotify.client") == false)
     }
 
     @Test("Music keeps the ears behind someone else's full screen")
     func otherApp() async {
-        #expect(await showsInCompact(owner: "com.microsoft.vscode", playingIn: "com.spotify.client") == true)
+        #expect(await showsInCompact(owners: ["com.microsoft.vscode"], playingIn: "com.spotify.client") == true)
     }
 
     @Test("An ordinary desktop changes nothing")
     func desktop() async {
-        #expect(await showsInCompact(owner: nil, playingIn: "com.spotify.client") == true)
+        #expect(await showsInCompact(owners: [], playingIn: "com.spotify.client") == true)
+    }
+
+    @Test("In Split View a player on either side gives up the ears")
+    func splitView() async {
+        let sides: Set<String> = ["com.microsoft.vscode", "com.spotify.client"]
+        #expect(await showsInCompact(owners: sides, playingIn: "com.spotify.client") == false)
+        #expect(await showsInCompact(owners: sides, playingIn: "com.apple.music") == true)
+    }
+
+    @Test("A player's identifier matches whatever its case")
+    func caseOfTheIdentifier() async {
+        #expect(await showsInCompact(owners: ["com.spotify.client"], playingIn: "com.Spotify.Client") == false)
     }
 }
 
-@Suite("Reading the owner of a full-screen Space")
+@Suite("Reading the owners of a full-screen Space")
 struct FullScreenSpaceTests {
 
-    private func monitor(_ identifier: String, current: Int) -> [String: Any] {
+    private func monitor(_ identifier: String, current: Int, fullScreen: [String: Any] = ["pid": 63987]) -> [String: Any] {
         [
             "Display Identifier": identifier,
             "Current Space": ["ManagedSpaceID": current, "type": current == 5218 ? 4 : 0],
             "Spaces": [
                 ["ManagedSpaceID": 3, "type": 0],
-                ["ManagedSpaceID": 5218, "type": 4, "pid": 63987],
+                ["ManagedSpaceID": 5218, "type": 4].merging(fullScreen) { $1 },
             ] as [[String: Any]],
         ]
     }
 
     @Test("A full-screen Space names its app")
     func fullScreen() {
-        #expect(FullScreenSpace.ownerPID(monitors: [monitor("A", current: 5218)], displayIdentifier: "A") == 63987)
+        #expect(FullScreenSpace.ownerPIDs(monitors: [monitor("A", current: 5218)], displayIdentifier: "A") == [63987])
     }
 
     @Test("A desktop has no owner, even with a full-screen Space elsewhere")
     func desktop() {
-        #expect(FullScreenSpace.ownerPID(monitors: [monitor("A", current: 3)], displayIdentifier: "A") == nil)
+        #expect(FullScreenSpace.ownerPIDs(monitors: [monitor("A", current: 3)], displayIdentifier: "A").isEmpty)
     }
 
     @Test("Another display's full screen is not this one's")
     func otherDisplay() {
         let monitors = [monitor("A", current: 3), monitor("B", current: 5218)]
-        #expect(FullScreenSpace.ownerPID(monitors: monitors, displayIdentifier: "A") == nil)
+        #expect(FullScreenSpace.ownerPIDs(monitors: monitors, displayIdentifier: "A").isEmpty)
     }
 
     @Test("One shared set of Spaces is called Main")
     func sharedSpaces() {
-        #expect(FullScreenSpace.ownerPID(monitors: [monitor("Main", current: 5218)], displayIdentifier: "A") == 63987)
+        #expect(FullScreenSpace.ownerPIDs(monitors: [monitor("Main", current: 5218)], displayIdentifier: "A") == [63987])
+    }
+
+    @Test("A Split View that lists both apps names both")
+    func splitViewList() {
+        let split = monitor("A", current: 5218, fullScreen: ["pid": [63987, 70011]])
+        #expect(FullScreenSpace.ownerPIDs(monitors: [split], displayIdentifier: "A") == [63987, 70011])
+    }
+
+    @Test("A Split View that names each side under its tiles names both")
+    func splitViewTiles() {
+        let tiles: [String: Any] = ["TileLayoutManager": ["TileSpaces": [["pid": 63987], ["pid": 70011]]]]
+        let split = monitor("A", current: 5218, fullScreen: tiles)
+        #expect(FullScreenSpace.ownerPIDs(monitors: [split], displayIdentifier: "A") == [63987, 70011])
+    }
+
+    @Test("Anything that is not a process number names no one")
+    func malformed() {
+        let odd = monitor("A", current: 5218, fullScreen: ["pid": ["x", -1, 0, 3.5]])
+        #expect(FullScreenSpace.ownerPIDs(monitors: [odd], displayIdentifier: "A").isEmpty)
+    }
+
+    /// The coordinator can't be built in a test, so this reads it. The Space
+    /// observer used to sit in a token of its own that `stop()` never
+    /// removed: a start after a stop answered every Space change twice.
+    @Test("Every change that can move the owners forgets them, and goes when Ledge stops")
+    func observersAreWiredAndTornDown() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let coordinator = try String(
+            contentsOf: root.appending(path: "Sources/LedgeShell/Coordinator/LedgeCoordinator.swift"),
+            encoding: .utf8
+        )
+        let start = try #require(coordinator.range(of: "private func observeFullScreenSpace() {"))
+        let rest = coordinator[start.upperBound...]
+        let body = rest[..<(rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex)]
+        for name in [
+            "NSWorkspace.activeSpaceDidChangeNotification",
+            "NSWorkspace.didTerminateApplicationNotification",
+            "NSWorkspace.didWakeNotification",
+            "NSApplication.didChangeScreenParametersNotification",
+        ] {
+            #expect(body.contains(name), "\(name) is not heard")
+        }
+        #expect(body.contains("self?.fullScreenOwners.forget()"))
+        #expect(body.contains("self?.nowPlayingProviderRef?.reconsider()"))
+        #expect(body.components(separatedBy: "observerTokens.append(").count == 3,
+                "each observer goes in observerTokens, which stop() removes")
+        #expect(!coordinator.contains("fullScreenSpaceToken"))
+        #expect(coordinator.contains("fullScreenOwners: { [weak self] in self?.fullScreenOwners.current() ?? [] }"))
+        #expect(coordinator.contains("""
+                for token in observerTokens {
+                    NotificationCenter.default.removeObserver(token)
+                    NSWorkspace.shared.notificationCenter.removeObserver(token)
+                }
+                observerTokens.removeAll()
+        """))
+    }
+
+    /// Runs on CI's macOS 15 runner as well as on 26, so a symbol that a
+    /// supported macOS doesn't have fails here rather than turning the
+    /// feature off without a word.
+    @Test("The WindowServer calls exist on this macOS")
+    func symbolsExist() {
+        typealias MainConnection = @convention(c) () -> Int32
+        typealias CopySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
+        #expect((PrivateSymbol.lookup("CGSMainConnectionID", in: .skyLight) as MainConnection?) != nil)
+        #expect((PrivateSymbol.lookup("CGSCopyManagedDisplaySpaces", in: .skyLight) as CopySpaces?) != nil)
+    }
+}
+
+/// The full-screen owners are asked for once and remembered until something
+/// changes or ten seconds pass, rather than on every media poll.
+@Suite("Remembering who fills the screen")
+@MainActor
+struct FullScreenOwnersTests {
+
+    private final class Fake {
+        var answer: Set<String> = ["com.spotify.client"]
+        var asks = 0
+        var now = ContinuousClock.now
+    }
+
+    private func make() -> (FullScreenOwners, Fake) {
+        let fake = Fake()
+        let owners = FullScreenOwners(
+            ask: { fake.asks += 1; return fake.answer },
+            now: { fake.now }
+        )
+        return (owners, fake)
+    }
+
+    @Test("The first read asks; reads soon after are remembered")
+    func remembered() {
+        let (owners, fake) = make()
+        #expect(owners.current() == ["com.spotify.client"])
+        fake.now += .seconds(9)
+        fake.answer = []
+        #expect(owners.current() == ["com.spotify.client"])
+        #expect(fake.asks == 1)
+    }
+
+    @Test("A read ten seconds on asks again, in case a change went unheard")
+    func asksAgainLater() {
+        let (owners, fake) = make()
+        _ = owners.current()
+        fake.now += FullScreenOwners.longestTrust
+        fake.answer = []
+        #expect(owners.current().isEmpty)
+        #expect(fake.asks == 2)
+    }
+
+    @Test("After a change the very next read is a fresh answer")
+    func forgetting() {
+        let (owners, fake) = make()
+        _ = owners.current()
+        fake.answer = ["com.microsoft.vscode", "com.spotify.client"]
+        owners.forget()
+        #expect(owners.current() == ["com.microsoft.vscode", "com.spotify.client"])
+        #expect(fake.asks == 2)
+        #expect(owners.current() == ["com.microsoft.vscode", "com.spotify.client"])
+        #expect(fake.asks == 2, "forgetting once asks once")
+    }
+
+    private func asks(webMedia: WebMediaPolicy, app: Bool) async -> Int {
+        let (owners, fake) = make()
+        let source = ScriptedSource()
+        source.current = media("Dune", duration: 9000, bundleID: "com.apple.Safari")
+        let provider = NowPlayingProvider(
+            source: source, artwork: ArtworkLoader(),
+            playingInterval: 60, idleInterval: 60, playbackWatcher: nil,
+            webMedia: { webMedia }, ownerIsApp: { _ in app },
+            fullScreenOwners: { owners.current() }
+        )
+        let stream = provider.start()
+        await provider.refreshNow()
+        provider.stop()
+        var published = false
+        for await event in stream { if case .publish = event { published = true } }
+        #expect(published, "the reading never arrived")
+        return fake.asks
+    }
+
+    @Test("Media that may hold the ears asks; media kept out of them never does")
+    func onlyWhenItMatters() async {
+        #expect(await asks(webMedia: .hidden, app: true) == 1)
+        #expect(await asks(webMedia: WebMediaPolicy(showsCards: true, showsInCompact: false), app: false) == 0)
     }
 }
