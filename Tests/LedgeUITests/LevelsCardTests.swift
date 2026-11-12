@@ -96,11 +96,10 @@ struct LevelsCardTests {
 
     @Test("A card nobody is touching has nothing dimmed")
     func atRestNothingIsDimmed() {
-        // Everything but the row being touched rests back at 38%, which is
-        // right under a pointer and wrong on a card at rest. `.focusable()`
-        // on the rows made something take focus the instant the card was
-        // drawn, so every photograph showed one bright row and the rest
-        // faded.
+        // The row being touched is picked out, which is right under a
+        // pointer and wrong on a card at rest. `.focusable()` on the rows
+        // made something take focus the instant the card was drawn, so every
+        // photograph showed one row picked out for no reason.
         guard let resting = drawn(rows(external: true)) else {
             Issue.record("must draw"); return
         }
@@ -110,6 +109,17 @@ struct LevelsCardTests {
             Issue.record("must draw"); return
         }
         #expect(resting == again)
+    }
+
+    @Test("Touching one row does not fade the others")
+    func touchingOneRowLeavesTheOthers() {
+        // Hovering the sound row faded brightness to 38%, and the other way
+        // round. On a two-row card that read as half the card switching off.
+        // The touched row lifts instead; checked in the source, because a
+        // hover cannot be made in a test.
+        let source = Self.cardSource
+        #expect(!source.contains("isDimmed"))
+        #expect(source.contains("(dragging ?? hovering ?? focused) == row.id"))
     }
 
     @Test("Every row's line is the same thickness, floor or no floor")
