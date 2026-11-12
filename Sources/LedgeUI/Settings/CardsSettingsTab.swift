@@ -333,7 +333,7 @@ struct CardDetailPane: View {
         } header: {
             Text("Pressing a key")
         } footer: {
-            SettingsNote("Volume changes are read straight from the audio system, so this needs no permission at all. macOS still shows its own readout alongside — replacing it is the setting below.")
+            SettingsNote("Ledge's readout replaces the macOS one, so it shows only while the setting below is on and Accessibility is granted. Otherwise macOS shows its own and Ledge stays out of the way.")
         }
 
         Section {
