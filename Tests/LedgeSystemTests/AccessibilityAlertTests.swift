@@ -114,7 +114,7 @@ struct AccessibilityAlertTests {
         #expect(probes == 1)
     }
 
-    private final class Gate {
+    @MainActor private final class Gate {
         var released = 0
         var slept = 0
         func sleep() async {
