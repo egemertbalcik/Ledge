@@ -61,8 +61,8 @@ public struct LevelsCardView: View {
     /// Which row a drag owns, held for the whole gesture so a route changing
     /// underneath cannot move the drag to another device.
     @State private var dragging: String?
-    /// Which row the pointer is on. The others rest at 38%, so the level being
-    /// changed is the one being looked at.
+    /// Which row the pointer is on. That row lifts; the others stay as they
+    /// are.
     @State private var hovering: String?
     @FocusState private var focused: String?
 
@@ -123,7 +123,7 @@ public struct LevelsCardView: View {
                 }
                 LevelRowView(
                     row: row,
-                    isDimmed: isDimmed(row),
+                    isActive: isActive(row),
                     contrast: contrast,
                     onSet: { set(row, to: $0) },
                     onMute: { mute(row) },
@@ -163,12 +163,13 @@ public struct LevelsCardView: View {
     /// a change rather than part of its arrival.
     @State private var hasSettled = false
 
-    /// Everything but the row being touched rests back, so the level being
-    /// changed is the one being read. Nothing is dimmed when nothing is
-    /// touched: a card at rest is not a card with a selection.
-    private func isDimmed(_ row: LevelRow) -> Bool {
-        guard let focus = dragging ?? hovering ?? focused else { return false }
-        return row.id != focus
+    /// The row being touched lifts, so the level being changed is the one
+    /// being read. The others are left alone: fading them to 38% made the
+    /// level the user was *not* touching hard to read, and on a two-row card
+    /// it looked like half the card had switched off. Nothing lifts when
+    /// nothing is touched: a card at rest is not a card with a selection.
+    private func isActive(_ row: LevelRow) -> Bool {
+        (dragging ?? hovering ?? focused) == row.id
     }
 
     private func set(_ row: LevelRow, to fraction: Double) {
@@ -198,7 +199,7 @@ public struct LevelsCardView: View {
 /// One level: a glyph, a name, a number and a line.
 private struct LevelRowView: View {
     let row: LevelRow
-    let isDimmed: Bool
+    let isActive: Bool
     let contrast: ColorSchemeContrast
     let onSet: (Double) -> Void
     let onMute: () -> Void
@@ -210,6 +211,9 @@ private struct LevelRowView: View {
 
     /// One thickness for every row, floor or no floor.
     static let lineThickness: CGFloat = 3
+    /// The touched row's line, drawn a point thicker. A scale rather than a
+    /// taller frame, so the row's layout does not move under the pointer.
+    static let activeLineScale: CGFloat = 4 / 3
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -244,15 +248,21 @@ private struct LevelRowView: View {
         // of this one's line.
         .padding(.vertical, 4)
         .frame(minHeight: LevelsCardView.rowHeight, alignment: .top)
-        .opacity(isDimmed ? 0.38 : 1)
-        // Its own short fade, so it never inherits one. The rows rest at 38%
-        // while the pointer is on one of them, and the pointer leaves this
-        // card on its way out of the island — so the brightening landed in
-        // whatever transaction the island's closing was running, and three
-        // rows came back up over the length of that spring, while the card
-        // was shrinking. A twelfth of a second, finished before anything else
+        // A faint plate behind the touched row, reaching a little past the
+        // text into the card's own margin so the glyph and the number are not
+        // flush against its edge.
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(.white.opacity(isActive ? (contrast == .increased ? 0.14 : 0.07) : 0))
+                .padding(.horizontal, -6)
+        )
+        // Its own short fade, so it never inherits one. The pointer leaves
+        // this card on its way out of the island, so the change otherwise
+        // landed in whatever transaction the island's closing was running,
+        // and played out over the length of that spring while the card was
+        // shrinking. A tenth of a second, finished before anything else
         // starts.
-        .animation(.easeOut(duration: 0.08), value: isDimmed)
+        .animation(.easeOut(duration: 0.1), value: isActive)
         .contentShape(Rectangle())
         .gesture(drag)
         .onHover(perform: onHover)
@@ -262,8 +272,8 @@ private struct LevelRowView: View {
         // people a scroll gesture was meant to serve.
         // Deliberately not `.focusable()`. Saying so unconditionally made
         // something take focus the instant the card was drawn, so every other
-        // row rested back at 38% in a card nobody had touched — and every
-        // photograph of it showed one bright row and the rest dimmed.
+        // row was drawn as touched in a card nobody had touched — and every
+        // photograph of it showed one row picked out for no reason.
         .onKeyPress(.leftArrow) { nudge(-1) }
         .onKeyPress(.rightArrow) { nudge(1) }
         .onKeyPress(.downArrow) { nudge(-1) }
@@ -437,6 +447,7 @@ private struct LevelRowView: View {
                 .onChange(of: geo.size.width) { _, new in width = new }
             }
             .frame(height: Self.lineThickness)
+            .scaleEffect(x: 1, y: isActive ? Self.activeLineScale : 1)
         } else {
             // No line to drag. A dashed rule says the row exists and cannot be
             // moved, which is a different thing from an empty bar.
