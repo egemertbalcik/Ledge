@@ -134,7 +134,8 @@ public enum FeedParser {
             else { return nil }
             return FeedGauge(
                 label: label, value: value, fraction: fraction,
-                level: FeedLevel(word: gauge["level"] as? String)
+                level: FeedLevel(word: gauge["level"] as? String),
+                color: color(gauge["color"])
             )
         }
 
@@ -178,6 +179,8 @@ public enum FeedParser {
             compactTrailing: string(root["compact_trailing"], limit: Limit.compact),
             compactLeadingFraction: number(root["compact_leading_fraction"]),
             compactTrailingFraction: number(root["compact_trailing_fraction"]),
+            compactLeadingColor: color(root["compact_leading_color"]),
+            compactTrailingColor: color(root["compact_trailing_color"]),
             level: FeedLevel(word: root["level"] as? String),
             gauges: gauges,
             rows: rows,
@@ -194,6 +197,15 @@ public enum FeedParser {
         guard let raw = value as? String else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : String(trimmed.prefix(limit))
+    }
+
+    /// A colour written as `#RRGGBB`. Anything else is absent, and the side
+    /// falls back to the colour of its level.
+    private static func color(_ value: Any?) -> String? {
+        guard let raw = value as? String else { return nil }
+        let digits = raw.dropFirst()
+        guard raw.first == "#", digits.count == 6, digits.allSatisfy(\.isHexDigit) else { return nil }
+        return raw
     }
 
     private static func number(_ value: Any?) -> Double? {

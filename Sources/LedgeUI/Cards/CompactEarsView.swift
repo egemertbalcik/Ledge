@@ -18,6 +18,10 @@ public struct CompactEarsView: View {
     /// the satellite owns the right.
     private let trailingHidden: Bool
 
+    /// The recording lights showing beside these ears, if any. Drawn by
+    /// `NotchOverlayView`; here only so they are said with the ears.
+    private let recording: RecordingLights?
+
     private let activity: Activity
     private let cutoutWidth: CGFloat
     private let inset: CGFloat
@@ -34,6 +38,7 @@ public struct CompactEarsView: View {
     public init(activity: Activity, cutoutWidth: CGFloat, inset: CGFloat,
         audioLevels: @escaping () -> [Double] = { [] },
         trailingHidden: Bool = false,
+        recording: RecordingLights? = nil,
         leadingOffset: CGFloat = 0,
         trailingOffset: CGFloat = 0) {
         self.activity = activity
@@ -41,6 +46,7 @@ public struct CompactEarsView: View {
         self.inset = inset
         self.audioLevels = audioLevels
         self.trailingHidden = trailingHidden
+        self.recording = recording
         self.leadingOffset = leadingOffset.isFinite ? min(max(leadingOffset, -24), 24) : 0
         self.trailingOffset = trailingOffset.isFinite ? min(max(trailingOffset, -24), 24) : 0
     }
@@ -77,13 +83,20 @@ public struct CompactEarsView: View {
             // Reserved space for the physical cutout. Nothing may draw here.
             Color.clear.frame(width: cutoutWidth)
 
-            ZStack {
-                trailing
-                    .id(activity.id)
-                    .transition(Motion.earSwap(reduced: reduceMotion))
+            // Centred and nudged like the leading ear, except that while the
+            // recording lights show, the content stays out of their lane at
+            // the ear's outer end.
+            TrailingEarLayout(
+                nudge: trailingOffset,
+                inward: inwardNudge,
+                lane: recording == nil ? 0 : RecordingLights.lane
+            ) {
+                ZStack {
+                    trailing
+                        .id(activity.id)
+                        .transition(Motion.earSwap(reduced: reduceMotion))
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .center)
-            .offset(x: -(trailingOffset + inwardNudge))
         }
         .padding(.horizontal, inset)
         .onAppear { coverChanged() }
@@ -96,6 +109,8 @@ public struct CompactEarsView: View {
         // animating on the whole activity would restart this on every tick.
         .animation(Motion.earContent, value: activity.id)
         .animation(Motion.earContent, value: trailingHidden)
+        // Content giving way to the lights, or taking its place back.
+        .animation(Motion.earContent, value: recording != nil)
         // Charging starting or stopping refreshes the same card in place, so
         // the swap above never runs. Both ears follow it on one beat, from
         // here rather than inside each: the readout's ear re-centres a row
@@ -106,12 +121,21 @@ public struct CompactEarsView: View {
         // level HUD's ears read, instead of VoiceOver landing on an unlabelled
         // image and then a bare "24°".
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityDescription)
+        .accessibilityLabel(spokenDescription)
     }
 
     /// What the two ears say together, as VoiceOver reads them: the kind first,
     /// then whatever the trailing ear draws, spelled out.
-    private var accessibilityDescription: String {
+    /// What VoiceOver says for the ears: what rests there, then the
+    /// recording lights. The ears are one element, so lights drawn as their
+    /// own view were dropped from it: "Microphone in use" was right and never
+    /// said. Said here instead, once, the lights themselves are hidden.
+    var spokenDescription: String {
+        guard let recording else { return accessibilityDescription }
+        return "\(accessibilityDescription), \(recording.label.prefix(1).lowercased())\(recording.label.dropFirst())"
+    }
+
+    var accessibilityDescription: String {
         func percent(_ fraction: Double) -> String {
             "\(Int((min(max(fraction, 0), 1) * 100).rounded())) percent"
         }
@@ -176,7 +200,12 @@ public struct CompactEarsView: View {
             }
         case .feeds(let payload):
             var parts = [payload.title]
-            parts += [payload.compactLeading, payload.compactTrailing].compactMap { $0 }
+            // A ring with no words is still a reading, and VoiceOver cannot see
+            // its colour.
+            parts += [
+                payload.compactLeading ?? payload.compactLeadingFraction.map(percent),
+                payload.compactTrailing ?? payload.compactTrailingFraction.map(percent),
+            ].compactMap { $0 }
             if payload.level != .normal { parts.append(payload.level.rawValue) }
             return parts.joined(separator: ", ")
         }
@@ -958,5 +987,150 @@ extension EnvironmentValues {
     var chargeChangeAnimation: Animation? {
         get { self[ChargeChangeAnimationKey.self] }
         set { self[ChargeChangeAnimationKey.self] = newValue }
+    }
+}
+
+
+/// Which recording lights the ears draw: green for the camera, orange for the
+/// microphone, as macOS draws them. Both can be on at once, and then both
+/// show, one above the other: a single dot used to show only the camera.
+public struct RecordingLights: Equatable, Sendable {
+    public var camera: Bool
+    public var microphone: Bool
+
+    public init(camera: Bool, microphone: Bool) {
+        self.camera = camera
+        self.microphone = microphone
+    }
+
+    /// Each light's diameter, and the gap between two stacked.
+    static let size: CGFloat = 5
+    static let gap: CGFloat = 2.5
+
+    /// The box the lights are drawn in: room for two stacked.
+    static var height: CGFloat { size * 2 + gap }
+
+    /// From the island's outer edge, past its gutter, to the lights: midway
+    /// between the waveform's end and the shape's edge.
+    static let edgeMargin: CGFloat = 4.5
+
+    /// What the trailing ear's content leaves clear at its outer end while
+    /// the lights show: the lights and their margin, plus the gap the
+    /// waveform already leaves before them, so music at the default nudge
+    /// does not move.
+    static let clearance: CGFloat = 4
+    static var lane: CGFloat { edgeMargin + size + clearance }
+
+    /// The lights' left edge at the outer end of the trailing ear, in the
+    /// island's coordinates.
+    static func earEndX(islandWidth: CGFloat, gutter: CGFloat) -> CGFloat {
+        islandWidth - gutter - edgeMargin - size
+    }
+
+    /// The lights' left edge beside the satellite: centred in the room the
+    /// island keeps just past the cutout.
+    static func besideSatelliteX(islandWidth: CGFloat, gutter: CGFloat, earWidth: CGFloat) -> CGFloat {
+        let cutout = islandWidth - gutter - earWidth
+        return cutout + (NotchLayout.recordingRoom - size) / 2
+    }
+
+    /// A light alone sits centred. Two stack around the centre, camera above.
+    var cameraOffset: CGFloat { microphone ? -(Self.size + Self.gap) / 2 : 0 }
+    var microphoneOffset: CGFloat { camera ? (Self.size + Self.gap) / 2 : 0 }
+
+    var label: String {
+        camera && microphone ? "Camera and microphone in use"
+            : camera ? "Camera in use" : "Microphone in use"
+    }
+}
+
+/// The trailing ear: its content centred, then moved by the user's nudge and
+/// the narrow-ear correction, as the leading ear's is. While the recording
+/// lights show, the content also keeps out of `lane` at the ear's outer end,
+/// so it never runs under them. It slides back inward first, but no further
+/// than where a nudge of zero would put it; if that is still not enough it is
+/// offered less width, which a feed's words take by shrinking.
+struct TrailingEarLayout: Layout {
+    /// The user's nudge; positive moves toward the cutout.
+    var nudge: CGFloat
+    /// The narrow-ear correction, also toward the cutout.
+    var inward: CGFloat
+    /// Kept clear at the outer end. Zero without lights.
+    var lane: CGFloat
+
+    /// Where the content's leading edge goes, and how wide it may be, in an
+    /// ear `earWidth` wide.
+    static func placement(earWidth: CGFloat, contentWidth: CGFloat,
+                          nudge: CGFloat, inward: CGFloat, lane: CGFloat) -> (x: CGFloat, width: CGFloat) {
+        let resting = (earWidth - contentWidth) / 2 - inward
+        let x = resting - nudge
+        guard lane > 0 else { return (x, contentWidth) }
+        let limit = earWidth - lane
+        // A quarter point of slack, so content that already ends at the lane,
+        // as the waveform does, is not moved by rounding.
+        if x + contentWidth <= limit + 0.25 { return (x, contentWidth) }
+        let floor = max(0, min(x, resting))
+        if limit - contentWidth >= floor { return (limit - contentWidth, contentWidth) }
+        return (floor, max(0, limit - floor))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let size = content.sizeThatFits(proposal)
+        return CGSize(width: proposal.width ?? size.width, height: size.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let content = subviews.first else { return }
+        let offered = ProposedViewSize(width: bounds.width, height: proposal.height)
+        let natural = content.sizeThatFits(offered).width
+        let place = Self.placement(earWidth: bounds.width, contentWidth: natural,
+                                   nudge: nudge, inward: inward, lane: lane)
+        // Offered what it was always offered, unless it has to make do with less.
+        content.place(
+            at: CGPoint(x: bounds.minX + place.x, y: bounds.midY),
+            anchor: .leading,
+            proposal: place.width < natural
+                ? ProposedViewSize(width: place.width, height: proposal.height) : offered
+        )
+    }
+}
+
+/// The recording lights themselves. `NotchOverlayView` places them: at the
+/// outer end of the trailing ear, or in the room the island keeps beside the
+/// satellite, gliding between the two.
+///
+/// One light sits centred. When the other comes on, the first slides aside
+/// to make room and the newcomer fades in: camera above, microphone below,
+/// whichever came first. Animated here, so it happens the same wherever the
+/// lights sit.
+public struct RecordingLightsView: View {
+    let lights: RecordingLights
+
+    public init(lights: RecordingLights) {
+        self.lights = lights
+    }
+
+    public var body: some View {
+        ZStack {
+            if lights.camera {
+                Circle()
+                    .fill(.green)
+                    .frame(width: RecordingLights.size, height: RecordingLights.size)
+                    .offset(y: lights.cameraOffset)
+                    .transition(.opacity)
+            }
+            if lights.microphone {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: RecordingLights.size, height: RecordingLights.size)
+                    .offset(y: lights.microphoneOffset)
+                    .transition(.opacity)
+            }
+        }
+        .frame(width: RecordingLights.size, height: RecordingLights.height)
+        .animation(Motion.earContent, value: lights)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(lights.label)
     }
 }

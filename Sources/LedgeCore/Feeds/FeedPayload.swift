@@ -64,13 +64,17 @@ public struct FeedGauge: Equatable, Sendable, Codable {
 
     public var level: FeedLevel
 
-    public init(label: String, value: String, fraction: Double, level: FeedLevel = .normal) {
+    /// A fixed colour for the ring, as `#RRGGBB`. Without one, `level` colours it.
+    public var color: String?
+
+    public init(label: String, value: String, fraction: Double, level: FeedLevel = .normal, color: String? = nil) {
         self.label = label
         self.value = value
         // Clamped here so no view has to, and a non-number is an empty ring
         // rather than something to draw.
         self.fraction = fraction.isFinite ? min(max(fraction, 0), 1) : 0
         self.level = level
+        self.color = color
     }
 }
 
@@ -86,9 +90,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     /// enthusiasm stops being a glance.
     public static let maxRows = 8
 
-    /// The most gauges a card draws: three rings fit across it and a fourth
-    /// would not.
-    public static let maxGauges = 3
+    /// The most gauges a card draws: four rings fit across it.
+    public static let maxGauges = 4
 
     public var title: String
 
@@ -102,10 +105,15 @@ public struct FeedPayload: Equatable, Sendable, Codable {
     public var compactTrailing: String?
 
     /// How far round a ring in the closed notch goes, on each side. With one
-    /// the side draws a ring beside its text; without, a tile for the feed's
-    /// symbol.
+    /// the side draws a ring around its text, or a small coloured ring if it
+    /// has none; without, a tile for the feed's symbol.
     public var compactLeadingFraction: Double?
     public var compactTrailingFraction: Double?
+
+    /// A fixed colour for each side, as `#RRGGBB`, when what is shown has a
+    /// colour of its own. Without one the side takes its colour from `level`.
+    public var compactLeadingColor: String?
+    public var compactTrailingColor: String?
 
     /// The feed as a whole, which is not necessarily the worst of its rows:
     /// the producer knows what its numbers mean.
@@ -139,6 +147,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         compactTrailing: String? = nil,
         compactLeadingFraction: Double? = nil,
         compactTrailingFraction: Double? = nil,
+        compactLeadingColor: String? = nil,
+        compactTrailingColor: String? = nil,
         level: FeedLevel = .normal,
         gauges: [FeedGauge] = [],
         rows: [FeedRow] = [],
@@ -152,6 +162,8 @@ public struct FeedPayload: Equatable, Sendable, Codable {
         self.compactTrailing = compactTrailing
         self.compactLeadingFraction = Self.clamped(compactLeadingFraction)
         self.compactTrailingFraction = Self.clamped(compactTrailingFraction)
+        self.compactLeadingColor = compactLeadingColor
+        self.compactTrailingColor = compactTrailingColor
         self.level = level
         self.gauges = Array(gauges.prefix(Self.maxGauges))
         self.rows = Array(rows.prefix(Self.maxRows))

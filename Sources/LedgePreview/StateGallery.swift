@@ -172,6 +172,19 @@ enum StateGallery {
             presentation.restingFeed = PreviewFixtures.feed(level: .critical, ears: .ringsLong)
             presentation.selected = PreviewFixtures.feed(level: .critical, ears: .ringsLong)
         },
+        // No words: a small ring each side, its colour from its own fraction.
+        State(name: "companion-feed-bare") { presentation in
+            let feed = PreviewFixtures.feed(ears: .bare(leading: 0.89, trailing: 0.3))
+            presentation.phase = .companion
+            presentation.restingFeed = feed
+            presentation.selected = feed
+        },
+        State(name: "companion-feed-bare-low") { presentation in
+            let feed = PreviewFixtures.feed(ears: .bare(leading: 0.1, trailing: 1))
+            presentation.phase = .companion
+            presentation.restingFeed = feed
+            presentation.selected = feed
+        },
         State(name: "companion-feed-words") { presentation in
             presentation.phase = .companion
             presentation.restingFeed = PreviewFixtures.feed(ears: .words)
@@ -499,7 +512,7 @@ enum StateGallery {
         /// One gauge and nothing under it.
         State(name: "card-feeds-gauge") { presentation in
             presentation.phase = .expanded
-            presentation.selected = PreviewFixtures.feed(gauges: 1, rows: 0)
+            presentation.selected = PreviewFixtures.feed(gauges: 4, rows: 0)
             presentation.count = 3
         },
         State(name: "card-feeds-empty") { presentation in
@@ -671,7 +684,9 @@ extension PreviewFixtures {
     // MARK: - Feeds
 
     /// What the ears of a feed fixture carry.
-    enum FeedEars {
+    enum FeedEars: Equatable {
+        /// A small coloured ring on each side, with no words.
+        case bare(leading: Double, trailing: Double)
         /// A ring with a few characters inside it on each side.
         case rings
         /// The same with five characters, the most a ring is asked to hold.
@@ -694,11 +709,14 @@ extension PreviewFixtures {
     ) -> Activity {
         let critical = level == .critical
         let gaugeSet: [FeedGauge] = [
-            FeedGauge(label: "API", value: critical ? "85%" : "42%",
-                      fraction: critical ? 0.85 : 0.42, level: critical ? .warning : .normal),
-            FeedGauge(label: "Quota", value: critical ? "~100%" : "68%",
-                      fraction: critical ? 1 : 0.68, level: critical ? .critical : .warning),
-            FeedGauge(label: "Storage", value: "23%", fraction: 0.23),
+            FeedGauge(label: "Claude 5h", value: critical ? "85%" : "42%",
+                      fraction: critical ? 0.85 : 0.42, level: critical ? .warning : .normal,
+                      color: critical ? nil : "#D97757"),
+            FeedGauge(label: "Claude 7d", value: critical ? "~100%" : "68%",
+                      fraction: critical ? 1 : 0.68, level: critical ? .critical : .warning,
+                      color: critical ? nil : "#D97757"),
+            FeedGauge(label: "Codex 5h", value: "23%", fraction: 0.23, color: "#7A9DFF"),
+            FeedGauge(label: "Codex 7d", value: "91%", fraction: 0.91, color: "#7A9DFF"),
         ]
         let readings: [FeedRow] = [
             FeedRow(label: "Today", value: "1.2k calls", detail: "resets 05:00",
@@ -715,16 +733,21 @@ extension PreviewFixtures {
                         fraction: index % 3 == 0 ? nil : Double(index * 7 % 100) / 100)
             }
         let rings = ears != .words
+        var bareFractions: (leading: Double, trailing: Double)?
+        if case let .bare(leading, trailing) = ears { bareFractions = (leading, trailing) }
         return Activity(
             id: ActivityID(kind: .feeds, source: "preview"),
             createdAt: 0,
             payload: .feeds(FeedPayload(
                 title: "Usage",
                 symbolName: "gauge.with.dots.needle.67percent",
-                compactLeading: critical ? "85%" : "42%",
-                compactTrailing: ears == .ringsLong ? "~100%" : (critical ? "100%" : "68%"),
-                compactLeadingFraction: rings ? (critical ? 0.85 : 0.42) : nil,
-                compactTrailingFraction: rings ? (critical ? 1 : 0.68) : nil,
+                compactLeading: bareFractions != nil ? nil : (critical ? "85%" : "42"),
+                compactTrailing: bareFractions != nil
+                    ? nil : (ears == .ringsLong ? "~100%" : (critical ? "100%" : "68%")),
+                compactLeadingFraction: bareFractions?.leading ?? (rings ? (critical ? 0.85 : 0.42) : nil),
+                compactTrailingFraction: bareFractions?.trailing ?? (rings ? (critical ? 1 : 0.68) : nil),
+                compactLeadingColor: critical ? nil : "#D97757",
+                compactTrailingColor: critical ? nil : "#7A9DFF",
                 level: level,
                 gauges: Array(gaugeSet.prefix(gaugeCount)),
                 rows: rows,

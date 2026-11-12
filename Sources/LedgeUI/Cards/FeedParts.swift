@@ -76,7 +76,7 @@ struct FeedGaugeView: View {
             ZStack {
                 FeedRing(
                     fraction: gauge.fraction,
-                    tint: gauge.level.feedTint,
+                    tint: FeedEar.tint(fixed: gauge.color, level: gauge.level, otherwise: gauge.level.feedTint),
                     track: .white.opacity(0.15),
                     lineWidth: 4
                 )
@@ -134,8 +134,10 @@ struct FeedSymbolTile: View {
 ///
 /// A side with a fraction is a ring with the producer's words inside it, the
 /// way the timer's satellite holds its countdown: the ring says how full, the
-/// digits say how much. A side with only words wears the feed's tile and the
-/// words beside it. Both sides read the same either side of the cutout.
+/// digits say how much. A side with a fraction and no words is a small ring
+/// whose colour says how full it is. A side with only words wears the feed's
+/// tile and the words beside it. Both sides read the same either side of the
+/// cutout.
 struct FeedEar: View {
 
     enum Side { case leading, trailing }
@@ -157,13 +159,68 @@ struct FeedEar: View {
         side == .leading ? payload.compactLeadingFraction : payload.compactTrailingFraction
     }
 
+    /// The producer's colour for this side, if it chose one.
+    private var fixedHex: String? {
+        side == .leading ? payload.compactLeadingColor : payload.compactTrailingColor
+    }
+
+    /// What a side or a gauge is drawn in. Critical is red whatever colour
+    /// the producer chose: a chosen colour used to stay blue at the one
+    /// moment it mattered most. Otherwise the chosen colour, otherwise what
+    /// the caller would draw anyway.
+    static func tint(fixed hex: String?, level: FeedLevel, otherwise: Color) -> Color {
+        if level == .critical { return level.feedTint }
+        return color(hex: hex) ?? otherwise
+    }
+
+    /// `#RRGGBB` as a colour, never too dark to see on the black notch.
+    /// The parser has already checked the shape.
+    static func color(hex: String?) -> Color? {
+        guard let hex, let value = Int(hex.dropFirst(), radix: 16) else { return nil }
+        let (red, green, blue) = readableOnBlack(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+        return Color(.sRGB, red: red, green: green, blue: blue)
+    }
+
+    /// The least lift toward white that gives a colour 3:1 against black,
+    /// the contrast a graphic needs to be seen. A producer could choose
+    /// `#111111`, and its ring and words were then invisible on the notch.
+    /// Colours that already have the contrast come back unchanged.
+    static func readableOnBlack(red: Double, green: Double, blue: Double) -> (Double, Double, Double) {
+        func luminance(_ r: Double, _ g: Double, _ b: Double) -> Double {
+            func linear(_ c: Double) -> Double { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+            return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+        // (L + 0.05) / 0.05 ≥ 3, against black.
+        let floor = 0.1
+        guard luminance(red, green, blue) < floor else { return (red, green, blue) }
+        func lifted(_ t: Double) -> (Double, Double, Double) {
+            (red + (1 - red) * t, green + (1 - green) * t, blue + (1 - blue) * t)
+        }
+        var low = 0.0, high = 1.0
+        for _ in 0..<20 {
+            let mid = (low + high) / 2
+            let (r, g, b) = lifted(mid)
+            if luminance(r, g, b) < floor { low = mid } else { high = mid }
+        }
+        return lifted(high)
+    }
+
     var body: some View {
-        if let fraction {
+        if let fraction, text == nil {
+            bareRing(fraction: fraction)
+        } else if let fraction {
             // As tall as the ear comfortably allows, which is the notch's own
             // height on this Mac: 32 on an Air, 38 on a Pro. Measured because
-            // a ring that fits one is lost on the other.
+            // a ring that fits one is lost on the other. No wider than the ear
+            // offers, which only binds while recording lights take the end of
+            // a narrow one.
             GeometryReader { proxy in
-                ring(fraction: fraction, diameter: Self.diameter(forHeight: proxy.size.height))
+                ring(fraction: fraction,
+                     diameter: Self.diameter(forHeight: proxy.size.height, width: proxy.size.width))
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
         } else if text != nil {
@@ -173,7 +230,7 @@ struct FeedEar: View {
                     Text(text)
                         .font(.system(size: 9.5, weight: .semibold))
                         .monospacedDigit()
-                        .foregroundStyle(payload.level.feedTint)
+                        .foregroundStyle(Self.tint(fixed: fixedHex, level: payload.level, otherwise: payload.level.feedTint))
                         .lineLimit(1)
                         .minimumScaleFactor(0.55)
                 }
@@ -195,10 +252,48 @@ struct FeedEar: View {
         }
     }
 
-    /// The ring's outer diameter in an ear of this height.
+    /// A ring with no words holds nothing, so it needs no more room than the
+    /// timer's dial beside it: about the same outer size and the same stroke.
+    static let bareRingDiameter: CGFloat = 18
+    private static let bareRingLineWidth: CGFloat = 2.5
+
+    /// The colour of a ring with no words, which is the only thing saying how
+    /// much is left: each side by its own fraction, as a battery reads. The
+    /// feed's level can only make it worse: a fraction read as usage rather
+    /// than what is left showed a full, critical feed in green. A chosen
+    /// colour stands in for the fraction's, and critical is red regardless.
+    static func bareRingTint(forFraction fraction: Double, level: FeedLevel = .normal, fixed hex: String? = nil) -> Color {
+        if level == .critical { return .red }
+        if let chosen = color(hex: hex) { return chosen }
+        if fraction < 0.15 { return .red }
+        if fraction < 0.4 || level == .warning { return .orange }
+        return .green
+    }
+
+    private func bareRing(fraction: Double) -> some View {
+        let tint = Self.bareRingTint(forFraction: fraction, level: payload.level, fixed: fixedHex)
+        return FeedRing(
+            fraction: fraction,
+            tint: tint,
+            track: tint.opacity(0.3),
+            lineWidth: Self.bareRingLineWidth
+        )
+        .frame(width: Self.bareRingDiameter, height: Self.bareRingDiameter)
+    }
+
+    /// The ring's outer diameter in an ear of this height, when it holds words.
     static func diameter(forHeight height: CGFloat) -> CGFloat {
         guard height.isFinite, height > 0 else { return 25 }
         return min(max(height - 2 * verticalMargin, 20), 34)
+    }
+
+    /// The same, but never wider than the room offered. The largest ring, 34,
+    /// is narrower than the narrowest ear, 36, so only the recording lights'
+    /// lane can make this bind: a narrow ear on a tall notch, with a light on.
+    static func diameter(forHeight height: CGFloat, width: CGFloat) -> CGFloat {
+        let tall = diameter(forHeight: height)
+        guard width.isFinite, width > 0 else { return tall }
+        return min(tall, width)
     }
 
     /// The stroke that goes with a diameter. Thinner in a small ring, where
@@ -216,6 +311,18 @@ struct FeedEar: View {
         min(max(diameter * 0.32, 8), 10)
     }
 
+    /// Up to three bare digits have room in the ring, so they can skip the
+    /// condensed face longer strings need and match Ledge's rounded numerals.
+    static func isPlainNumber(_ text: String) -> Bool {
+        !text.isEmpty && text.count <= 3 && text.allSatisfy(\.isNumber)
+    }
+
+    /// The size for those digits: a touch under `fontSize`, since a rounded
+    /// face at full width looks larger than a condensed one.
+    static func plainNumberSize(forDiameter diameter: CGFloat) -> CGFloat {
+        min(max(diameter * 0.28, 8), 9)
+    }
+
     /// What the ring leaves for the digits: its inside, less a little air at
     /// each end. Without the air the first and last characters of a long
     /// string touch the stroke.
@@ -225,21 +332,27 @@ struct FeedEar: View {
 
     private func ring(fraction: Double, diameter: CGFloat) -> some View {
         let lineWidth = Self.lineWidth(forDiameter: diameter)
+        let tint = Self.tint(fixed: fixedHex, level: payload.level, otherwise: payload.level.feedTint)
         return ZStack {
             // The timer ear's own dial geometry, with no hand: this is how full
             // something is, not a count of time.
             FeedRing(
                 fraction: fraction,
-                tint: payload.level.feedTint,
-                track: payload.level.feedTint.opacity(0.3),
+                tint: tint,
+                track: tint.opacity(0.3),
                 lineWidth: lineWidth
             )
             if let text {
+                let plain = Self.isPlainNumber(text)
                 Text(text)
-                    .font(.system(size: Self.fontSize(forDiameter: diameter), weight: .semibold))
-                    .fontWidth(.condensed)
+                    .font(.system(
+                        size: plain ? Self.plainNumberSize(forDiameter: diameter) : Self.fontSize(forDiameter: diameter),
+                        weight: plain ? .bold : .semibold,
+                        design: plain ? .rounded : .default
+                    ))
+                    .fontWidth(plain ? .standard : .condensed)
                     .monospacedDigit()
-                    .foregroundStyle(payload.level.feedTint)
+                    .foregroundStyle(tint)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                     .frame(width: Self.textWidth(forDiameter: diameter))

@@ -2001,7 +2001,8 @@ public final class LedgeCoordinator {
                         self?.preferences.showVideoInCompact ?? Prefs.showVideoInCompact.defaultValue
                     },
                     webMedia: { [weak self] in self?.preferences.webMedia ?? .hidden },
-                    ownerIsApp: { BrowserCatalogue.shared.isOpenableApp(bundleID: $0) }
+                    ownerIsApp: { BrowserCatalogue.shared.isOpenableApp(bundleID: $0) },
+                    fullScreenOwners: { [weak self] in self?.fullScreenOwners.current() ?? [] }
                 )
                 self.nowPlayingProviderRef = provider
                 return provider
@@ -2203,6 +2204,10 @@ public final class LedgeCoordinator {
     /// immediate re-poll instead of waiting for its steady tick. Weak: the hub
     /// owns it, and it is rebuilt whenever the provider is toggled.
     private weak var nowPlayingProviderRef: NowPlayingProvider?
+
+    /// Which apps fill the notched display, asked again only when something
+    /// that can change it happens. See `observeFullScreenSpace()`.
+    private let fullScreenOwners = FullScreenOwners()
 
     /// The live timer provider, so the menu bar and the card can drive the
     /// session. Weak: the hub owns it, and it is rebuilt when toggled.
@@ -3065,6 +3070,7 @@ public final class LedgeCoordinator {
         observeLiveEffectPreferences()
         permissionCompanion.start()
         observeMediaPreferences()
+        observeFullScreenSpace()
         observeCalendarChoice()
     }
 
@@ -3162,6 +3168,36 @@ public final class LedgeCoordinator {
                 self.observeMediaPreferences()
             }
         }
+    }
+
+    /// Going in and out of a full-screen Space decides whether the player may
+    /// hold the ears, so it is answered at once rather than on the next poll.
+    /// Entering or leaving full screen and Split View are Space changes too.
+    /// A display coming or going, an app quitting and a wake can also change
+    /// who fills the notched display. Each forgets the remembered answer, so
+    /// the player is reconsidered against a fresh one. Kept with the other
+    /// observers, so `stop()` removes them and a start after a stop does not
+    /// answer every change twice.
+    private func observeFullScreenSpace() {
+        let changed: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.fullScreenOwners.forget()
+                self?.nowPlayingProviderRef?.reconsider()
+            }
+        }
+        for name in [
+            NSWorkspace.activeSpaceDidChangeNotification,
+            NSWorkspace.didTerminateApplicationNotification,
+            NSWorkspace.didWakeNotification,
+        ] {
+            observerTokens.append(NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name, object: nil, queue: .main, using: changed
+            ))
+        }
+        observerTokens.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil, queue: .main, using: changed
+        ))
     }
 
     /// The ear width is draft-edited in Settings and lands only when the
@@ -3383,7 +3419,10 @@ public final class LedgeCoordinator {
     private func settleBeforeReducing(_ event: NotchEvent) {
         // A hover with nothing on screen starts on the first card rather than
         // the one last read, so what opens doesn't depend on the last visit.
-        if event == .hoverChanged(true), state.phase == .idle {
+        // "Last one read" under "Opens first" asks for the other way and
+        // keeps the card the notch closed on. A pinned card is the first
+        // card, so it opens every time either way.
+        if event == .hoverChanged(true), state.phase == .idle, preferences.pinnedCard != Prefs.lastReadCard {
             activities.selectFirst()
         }
         // A collapse can sever a slider drag without its onEnded ever firing —
@@ -3866,31 +3905,39 @@ public final class LedgeCoordinator {
             at: NSEvent.mouseLocation,
             cutoutWidth: controller.geometry.notchSize.width
         )
-        guard zone == .trailing || zone == .satellite else { return nil }
-
         let musicIsMainIsland: Bool = {
             guard let playing = presentation.nowPlaying,
                   case .nowPlaying(let payload) = playing.payload
             else { return false }
             return payload.isPlaying
         }()
-
-        let candidate: ActivityID?
-        if presentation.hudSatellite != nil {
-            candidate = satelliteSourceID
-        } else if let session = presentation.timerSession,
+        let runningTimer: ActivityID? = {
+            guard let session = presentation.timerSession,
                   case .timer(let payload) = session.payload,
-                  !payload.isIdle, musicIsMainIsland {
-            candidate = session.id
-        } else if let privacy = presentation.privacyActive,
-                  case .privacy(let payload) = privacy.payload,
-                  payload.cameraActive || payload.micActive {
-            candidate = privacy.id
-        } else {
-            candidate = nil
-        }
+                  !payload.isIdle, musicIsMainIsland
+            else { return nil }
+            return session.id
+        }()
+        let candidate = Self.trailingTarget(
+            zone: zone,
+            transientShown: presentation.hudSatellite != nil,
+            transient: satelliteSourceID,
+            runningTimer: runningTimer
+        )
         guard let candidate, activities.activity(withID: candidate) != nil else { return nil }
         return candidate
+    }
+
+    /// What a pointer on the trailing side opens, in the order the satellite
+    /// is drawn: a transient readout first, then a running timer.
+    static func trailingTarget(
+        zone: CompactZone?,
+        transientShown: Bool,
+        transient: ActivityID?,
+        runningTimer: ActivityID?
+    ) -> ActivityID? {
+        guard zone == .trailing || zone == .satellite else { return nil }
+        return transientShown ? transient : runningTimer
     }
 
     /// Every display's resting region, in the panels' own (notched-first) order

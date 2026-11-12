@@ -220,7 +220,7 @@ struct FixedCardOrderTests {
     /// `LedgeCoordinator` can't be built in a test, so this reads it. Each line
     /// is a way for the rule to die quietly: the queue would still pass above
     /// while nothing ever asked it for the first card.
-    @Test("The shell asks for the first card only when nothing is on screen")
+    @Test("The shell asks for the first card with nothing on screen, unless told to keep the last one")
     func hoverWiring() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -232,7 +232,7 @@ struct FixedCardOrderTests {
         let settling = coordinator[start.upperBound...]
         let end = settling.range(of: "\n    }\n")?.lowerBound ?? settling.endIndex
         let hook = settling[..<end]
-        #expect(hook.contains("if event == .hoverChanged(true), state.phase == .idle {"))
+        #expect(hook.contains("if event == .hoverChanged(true), state.phase == .idle, preferences.pinnedCard != Prefs.lastReadCard {"))
         #expect(hook.contains("activities.selectFirst()"))
 
         // The ears keep their rule: what they show is what opens.
@@ -243,6 +243,36 @@ struct FixedCardOrderTests {
                             self.activities.selectFirst()
                         }
 """))
+    }
+
+    /// The order reads `pinnedCard` as a card kind. "Last one read" has to
+    /// read as no pin there, or choosing it would move a card to the front.
+    @Test("Last one read names no card and is not the default")
+    func lastReadIsNoPin() throws {
+        #expect(ActivityKind(rawValue: Prefs.lastReadCard) == nil)
+        #expect(Prefs.lastReadCard != Prefs.pinnedCard.defaultValue)
+
+        var queue = Self.queue(Self.deck)
+        queue.pinnedKind = ActivityKind(rawValue: Prefs.lastReadCard)
+        let levels = try #require(queue.activities.first { $0.kind == .levels })
+        queue.select(levels.id)
+        #expect(queue.selected?.kind == .levels)
+        queue.selectFirst()
+        #expect(queue.selected?.kind == .nowPlaying)
+    }
+
+    @Test("Settings offers Last one read under Opens first")
+    func lastReadIsOffered() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let tab = try String(
+            contentsOf: root.appending(path: "Sources/LedgeUI/Settings/CardsSettingsTab.swift"),
+            encoding: .utf8
+        )
+        let start = try #require(tab.range(of: "Picker(\"Opens first\""))
+        let picker = tab[start.upperBound...].prefix { $0 != "}" }
+        #expect(picker.contains("Text(\"Last one read\").tag(Prefs.lastReadCard)"))
+        #expect(picker.contains("Text(\"Whatever matters most\").tag(\"\")"))
     }
 
     // MARK: - What the order must not change

@@ -30,6 +30,22 @@ struct FeedParserTests {
         return feed
     }
 
+    // MARK: - Fixed colours
+
+    @Test("A side's colour is read only as #RRGGBB")
+    func compactColours() {
+        let good = feed(##"{"version":1,"compact_leading_color":"#D97757","compact_trailing_color":"#2F80ED"}"##)
+        #expect(good?.payload.compactLeadingColor == "#D97757")
+        #expect(good?.payload.compactTrailingColor == "#2F80ED")
+        for bad in ["D97757", "#D9775", "#D977577", "#GGGGGG", "orange", ""] {
+            // The colour is dropped, not the file: a file thrown away whole
+            // would also have no colour, and passed this for the wrong reason.
+            let parsed = feed(#"{"version":1,"title":"Kept","compact_leading_color":"\#(bad)"}"#)
+            #expect(parsed?.payload.title == "Kept", "the file was thrown away over \(bad)")
+            #expect(parsed?.payload.compactLeadingColor == nil, "\(bad)")
+        }
+    }
+
     // MARK: - What a whole file says
 
     @Test("A complete file reads field for field")
@@ -248,14 +264,21 @@ struct FeedParserTests {
         #expect(gauges.map(\.label) == ["Kept", "Also kept"])
     }
 
-    @Test("A card draws at most three gauges, counted after the broken ones are dropped")
+    @Test("A gauge reads a fixed colour")
+    func gaugeColour() throws {
+        let json = ##"{"version": 1, "gauges": [{"label": "A", "value": "1", "fraction": 0.1, "color": "#D97757"}, {"label": "B", "value": "2", "fraction": 0.2, "color": "blue"}]}"##
+        let payload = try #require(feed(json)?.payload)
+        #expect(payload.gauges.map(\.color) == ["#D97757", nil])
+    }
+
+    @Test("A card draws at most four gauges, counted after the broken ones are dropped")
     func gaugeCap() throws {
         let broken = #"{"label": "broken", "value": "1%"}"#
         let good = (1...5).map { #"{"label": "G\#($0)", "value": "\#($0)%", "fraction": 0.\#($0)}"# }
         let json = #"{"version": 1, "gauges": [\#(([broken] + good).joined(separator: ","))]}"#
         let payload = try #require(feed(json)?.payload)
         #expect(payload.gauges.count == FeedPayload.maxGauges)
-        #expect(payload.gauges.map(\.label) == ["G1", "G2", "G3"])
+        #expect(payload.gauges.map(\.label) == ["G1", "G2", "G3", "G4"])
     }
 
     @Test("A gauge's fraction is held to 0...1, and its level reads like a row's")

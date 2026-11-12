@@ -13,6 +13,7 @@ public enum PrivateSymbol {
         case mediaRemote = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
         case displayServices = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
         case coreBrightness = "/System/Library/PrivateFrameworks/CoreBrightness.framework/CoreBrightness"
+        case skyLight = "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight"
     }
 
     private static let lock = NSLock()

@@ -584,7 +584,8 @@ public struct NotchLayout: Sendable, Equatable {
         islandSize: CGSize,
         geometry: NotchGeometry,
         gutterRadius: CGFloat,
-        offset: CGFloat
+        offset: CGFloat,
+        recordingRoom: CGFloat = 0
     ) -> CGRect {
         let diameter = geometry.notchSize.height + 1
         let gutter = gutterRadius.isFinite ? max(0, gutterRadius) : 0
@@ -592,6 +593,7 @@ public struct NotchLayout: Sendable, Equatable {
         // the seat is measured from where that edge actually lands.
         let seat = islandSize.width - (gutter + earWidth(for: geometry))
             + (offset.isFinite ? min(max(offset, -60), 200) : 5)
+            + recordingRoom
         return CGRect(
             x: seat,
             y: (islandSize.height - diameter) / 2,
@@ -599,6 +601,13 @@ public struct NotchLayout: Sendable, Equatable {
             height: diameter
         )
     }
+
+    /// How much of the trailing ear the island keeps while the satellite is
+    /// out and a camera or microphone is on: room for the recording lights
+    /// on black, just past the cutout. The satellite moves out by the same
+    /// amount, so its gap to the island stays what it was. Only in that case:
+    /// everywhere else the island and the satellite sit as they always have.
+    public static let recordingRoom: CGFloat = 12
 
     /// How much wider an open card sits than the compact island.
     ///
