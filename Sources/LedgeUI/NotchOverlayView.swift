@@ -81,13 +81,6 @@ public final class NotchPresentation {
     /// device announcement — holding it for a dwell. Nil between transients.
     public var hudSatellite: SatelliteContent?
 
-    /// The device that has just connected or left, while the banner below the
-    /// island is saying so. Nil the rest of the time.
-    ///
-    /// Kept apart from the peek because the ears cannot carry it: a name does
-    /// not fit beside the cutout, and one ring cannot say three batteries.
-    public var deviceBanner: DevicePayload?
-
     /// What the notch is standing up to say, while it is saying it. Nil the
     /// rest of the time, which is nearly always.
     public var announcement: NotchAnnouncement?
@@ -695,24 +688,6 @@ public struct NotchOverlayView: View {
             ),
             value: satelliteContent
         )
-        // The device banner: a glass capsule that drops out from under the
-        // island with the device's full name and every battery it reports.
-        // Outside the black shape on purpose — glass over black is just
-        // black — and below whatever height the island currently has, so a
-        // readout row growing above it pushes it down rather than under.
-        .overlay(alignment: .top) {
-            if let banner = presentation.deviceBanner, !isOpen {
-                DeviceBannerView(payload: banner)
-                    .offset(y: layout.boundingSize.height + DeviceBannerView.gap)
-                    .transition(Motion.deviceBanner(reduced: reduceMotion))
-                    .allowsHitTesting(false)
-            }
-        }
-        .animation(
-            Motion.deviceBannerArrival(reduced: reduceMotion),
-            value: presentation.deviceBanner != nil
-        )
-        .animation(Motion.deviceBannerArrival(reduced: reduceMotion), value: isOpen)
         // Anchored to the drawn shape, not the card content: content can run
         // taller than the shape on cards with height floors, and dots pinned
         // to its bottom were half-clipped by the shape on exactly those cards.

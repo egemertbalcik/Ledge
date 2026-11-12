@@ -67,10 +67,11 @@ public final class AudioRouteProvider: ActivityProvider {
                 // have. The Bluetooth card carries the battery when there is
                 // one to carry.
                 batteryLevels: [:],
-                isApple: Self.readsAsApple(name)
-                // No word in the far ear. The destination is said in full by
-                // the banner below the island; "Speakers" squeezed beside the
-                // cutout ran past the notch and was cut off mid-word.
+                isApple: Self.readsAsApple(name),
+                // The far ear names the destination. A speaker glyph alone
+                // says sound moved without saying where, which is the half of
+                // the message nobody needed.
+                statusText: Self.shortName(name)
             ))
         )))
     }

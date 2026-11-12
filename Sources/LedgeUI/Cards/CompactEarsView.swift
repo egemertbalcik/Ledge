@@ -365,7 +365,7 @@ public struct CompactEarsView: View {
                         .font(.cardLabel)
                         .foregroundStyle(.white.opacity(0.9))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.6)
+                        .minimumScaleFactor(0.75)
                 }
             }
         case .power(let payload):

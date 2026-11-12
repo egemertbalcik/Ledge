@@ -219,46 +219,6 @@ public final class BluetoothProvider: ActivityProvider {
                 isApple: device.isApple
             ))
         )))
-        if device.batteryLevels.isEmpty { readLevelsLate(for: device, id: id) }
-    }
-
-    /// One more look for a battery the connect did not come with.
-    ///
-    /// Earbuds often attach a second or two before macOS has their levels, so
-    /// the hello card went out bare and the charge — the reason anyone looks
-    /// — never arrived. The same card is republished with the levels if they
-    /// turn up while it is still on screen; after that it is too late to be
-    /// part of the hello and the ten-minute refresh carries them instead.
-    private func readLevelsLate(for device: BluetoothDeviceSnapshot, id: ActivityID) {
-        let session = self.session
-        let shownAt = now()
-        var read: Task<Void, Never>!
-        read = Task { @MainActor [weak self] in
-            defer { self?.reads.remove(read) }
-            try? await Task.sleep(for: .milliseconds(900))
-            guard let self, !Task.isCancelled, self.session == session else { return }
-            let connected = await self.source.connectedDevices()
-            guard !Task.isCancelled, self.session == session,
-                  self.published[device.address] == id,
-                  self.now() - shownAt < Self.lifetime,
-                  let fresh = connected.first(where: { $0.address == device.address }),
-                  !fresh.batteryLevels.isEmpty
-            else { return }
-            self.report(fresh, cause: .periodicRefresh)
-            self.continuation?.yield(.publish(Activity(
-                id: id,
-                createdAt: shownAt,
-                expiresAfter: Self.lifetime,
-                payload: .device(DevicePayload(
-                    name: device.name,
-                    symbolName: device.symbolName,
-                    batteryLevels: fresh.batteryLevels,
-                    isConnected: true,
-                    isApple: device.isApple
-                ))
-            )))
-        }
-        reads.insert(read)
     }
 
     private func disconnected(_ address: String) {
