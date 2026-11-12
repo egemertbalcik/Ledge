@@ -6,7 +6,7 @@ import Testing
 @Suite("Notes opening lifecycle")
 @MainActor
 struct NotesOpeningTests {
-    private final class Gate {
+    @MainActor private final class Gate {
         var started: CheckedContinuation<Void, Never>?
         var release: CheckedContinuation<NoteBody?, Never>?
         func load() async -> NoteBody? {

@@ -8,17 +8,15 @@ import os
 
 /// Drives the level HUD.
 ///
-/// Two ways in, and they are not equivalent:
+/// Ledge's readout only ever stands *in place of* the system's, never beside
+/// it. It is shown when the tap is intercepting (needs Accessibility): the key
+/// press is swallowed and this app applies the change itself, so the system
+/// never learns the key was pressed and never draws its HUD.
 ///
-/// - **Observing** (default). CoreAudio reports volume changes, brightness is
-///   polled. No permission, no event tap, nothing intercepted — the system's
-///   own HUD still appears alongside ours.
-/// - **Intercepting** (opt-in, needs Accessibility). The key press is swallowed
-///   and this app applies the change itself, so the system never learns the key
-///   was pressed and never draws its HUD.
-///
-/// The second is what people actually want to look at, and also the one that
-/// can leave the volume keys doing nothing if it goes wrong. Hence the split.
+/// When the tap is not running — no grant, suppression switched off, no
+/// notched display — the keys belong to macOS and so does the readout. Ledge
+/// used to draw its own anyway, from CoreAudio and a brightness poll, and the
+/// result was two readouts for one key press.
 @MainActor
 public final class HUDCoordinator {
 
@@ -28,10 +26,8 @@ public final class HUDCoordinator {
     private let presentation: NotchPresentation
 
     private let volume = VolumeController()
-    private let brightness = BrightnessController()
-    /// Per-display brightness. `brightness` above still watches the built-in
-    /// panel for externally-made changes; this one applies levels, to whichever
-    /// display the user means.
+    /// Per-display brightness: applies levels, to whichever display the user
+    /// means.
     private let displayBrightness = DisplayBrightnessController()
 
     /// Coalesces the external-brightness preference write.
@@ -69,22 +65,14 @@ public final class HUDCoordinator {
     }
 
     public func start() {
-        volume.onChange = { [weak self] readout in self?.show(readout) }
-        brightness.onChange = { [weak self] readout in
+        volume.onChange = { [weak self] readout in
             guard let self else { return }
-            // Brightness has no change notification, so the watcher *polls* and
-            // guesses whether a change was the user by its size. Ambient
-            // auto-brightness breaks that guess: walking into sunlight moves the
-            // backlight further between two samples than a key press does, and
-            // the readout appears for something the user never did.
-            //
-            // When the interceptor is running there is no need to guess. The
-            // key press itself is the signal, `handleBrightness` shows the
-            // readout, and the poll goes back to being what its own comment
-            // calls it — a display-sync backstop. Only when suppression is off
-            // is the poll the sole source, and the size heuristic the best
-            // available.
-            guard !self.isSuppressing else { return }
+            // Only while intercepting. Otherwise the change came from a key
+            // macOS handled and is already drawing its own readout for, and
+            // showing ours as well is the double popup this used to produce.
+            // While intercepting it also covers changes made elsewhere — the
+            // menu bar slider, another app — which macOS draws nothing for.
+            guard self.isSuppressing else { return }
             self.show(readout)
         }
         interceptor.onPress = { [weak self] press in
@@ -111,7 +99,6 @@ public final class HUDCoordinator {
         trustRetry?.cancel()
         trustRetry = nil
         volume.stopWatching()
-        brightness.stopWatching()
         interceptor.stop()
         // Flush rather than wait out the debounce — `stop()` may be the last
         // thing that runs.
@@ -158,7 +145,6 @@ public final class HUDCoordinator {
         }
 
         volume.startWatching()
-        applyBrightnessWatching()
 
         // Re-enabling after a disable must bring the external dim back the
         // same way a launch does — `stop()` released the ramps, and without
@@ -185,7 +171,6 @@ public final class HUDCoordinator {
             // macOS show its own OSD. Re-checked whenever the panels change, so
             // opening the lid or plugging in the notched display takes it back.
             interceptor.stop()
-            applyBrightnessWatching()
             onSuppressionChanged?(false)
             trustRetry?.cancel()
             trustRetry = nil
@@ -202,7 +187,6 @@ public final class HUDCoordinator {
             if !startTap() { waitForTrust() }
         } else {
             interceptor.stop()
-            applyBrightnessWatching()
             onSuppressionChanged?(false)
             if preferences.suppressSystemHUD {
                 Self.log.notice("suppression requested but Accessibility is not granted — waiting")
@@ -230,7 +214,6 @@ public final class HUDCoordinator {
         } else {
             Self.log.error("suppression requested but the tap did not start")
         }
-        applyBrightnessWatching()
         onSuppressionChanged?(started)
         return started
     }
@@ -241,26 +224,6 @@ public final class HUDCoordinator {
     public var onSuppressionChanged: ((Bool) -> Void)?
 
     public var isSuppressing: Bool { interceptor.isRunning }
-
-    /// The screens are dark (asleep or locked): the brightness poll stands
-    /// down until they light again. Set by the coordinator.
-    public func setDormant(_ dormant: Bool) {
-        guard dormant != isDormant else { return }
-        isDormant = dormant
-        applyBrightnessWatching()
-    }
-    private var isDormant = false
-
-    /// The brightness watcher polls (there is no change notification), so it
-    /// runs only when something consumes its readouts: brightness HUD on, the
-    /// screens lit, and the interceptor *not* running — with suppression
-    /// active the key press itself is the signal and `onChange` discards the
-    /// poll's readout, so the poll would be two wake-ups a second for nothing.
-    private func applyBrightnessWatching() {
-        let wanted = preferences.hudEnabled && preferences.hudBrightnessEnabled
-            && !isDormant && !interceptor.isRunning
-        if wanted { brightness.startWatching() } else { brightness.stopWatching() }
-    }
 
     /// Fixes what a drag on the row acts on, at the first touch. Asking again
     /// on every tick meant headphones plugged in mid-drag took the drag with
@@ -389,6 +352,9 @@ public final class HUDCoordinator {
         case .soundUp, .soundDown, .mute:
             return handleVolume(key)
         case .brightnessUp, .brightnessDown:
+            // Brightness readout switched off: the key goes to macOS, which
+            // changes the level and draws its own readout, as it always did.
+            guard preferences.hudBrightnessEnabled else { return false }
             return handleBrightness(key)
         case .keyboardBacklightUp, .keyboardBacklightDown:
             // Not applied here: there is no reliable way to *set* the backlight

@@ -761,12 +761,10 @@ public final class LedgeCoordinator {
         if dormancy.isDark {
             notesWindow.cancelPendingOpening()
             hoverTracker?.stop()
-            hud.setDormant(true)
             readoutHandBack.setDormant(true)
-            Self.log.notice("screens dark — pointer and brightness polling paused")
+            Self.log.notice("screens dark — pointer polling paused")
         } else {
             hoverTracker?.start()
-            hud.setDormant(false)
             // The pointer may be anywhere now; forget the pre-sleep answer —
             // and tell the reducer, or a card left open under the pointer at
             // lock time stays open until the pointer re-enters and leaves.
