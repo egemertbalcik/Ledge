@@ -39,16 +39,117 @@ public struct NotchAnnouncement: Equatable, Sendable {
     /// done. Zero draws nothing.
     public var completedSessions: Int
 
+    /// A quieter word after the title — a device's "Disconnected". Nil draws
+    /// nothing.
+    public var detail: String?
+
+    /// One battery a device reports, drawn after the title as a small ring
+    /// and its number.
+    public struct Battery: Equatable, Sendable {
+        public var label: String
+        public var level: Double
+
+        public init(label: String, level: Double) {
+            self.label = label
+            self.level = level
+        }
+    }
+
+    /// Every battery the device reports, in the order they are worn and read.
+    /// Empty draws nothing.
+    public var batteries: [Battery]
+
+    /// Whether the shape stands up wider than the peek as well as taller.
+    ///
+    /// A device's name and up to three batteries are a longer line than
+    /// anything the timer says, and at the peek's own width the name was cut
+    /// after a word — the complaint the device news started from.
+    public var isWide: Bool
+
+    /// Whether the stand-up lasts as long as the user's peek setting rather
+    /// than `duration`.
+    ///
+    /// The end of a pomodoro has to catch eyes that are elsewhere, which is
+    /// what the fixed three seconds are for. A device or a sound output is
+    /// news the user mostly caused, and it was holding the notch for longer
+    /// than "Announcement" in the settings said whatever that was set to.
+    public var followsPeekDuration: Bool
+
     public init(
         title: String,
         symbolName: String,
         accent: AccentColor = .neutral,
-        completedSessions: Int = 0
+        completedSessions: Int = 0,
+        detail: String? = nil,
+        batteries: [Battery] = [],
+        isWide: Bool = false,
+        followsPeekDuration: Bool = false
     ) {
         self.title = title
         self.symbolName = symbolName
         self.accent = accent
         self.completedSessions = completedSessions
+        self.detail = detail
+        self.batteries = batteries
+        self.isWide = isWide
+        self.followsPeekDuration = followsPeekDuration
+    }
+
+    /// How long this stand-up lasts, given the user's peek setting.
+    public func duration(peek: TimeInterval) -> TimeInterval {
+        followsPeekDuration ? peek : Self.duration
+    }
+
+    /// What a device attaching or leaving should say, or nil when the card is
+    /// not that news.
+    ///
+    /// The full name, and either every battery or — with none to show —
+    /// whether it came or went. Only cards that say they are a connection
+    /// qualify; see `DevicePayload.announcesConnection` for the two that only
+    /// look like one.
+    public static func forDevice(_ payload: DevicePayload) -> NotchAnnouncement? {
+        guard payload.announcesConnection,
+              let connected = payload.isConnected,
+              !payload.name.isEmpty
+        else { return nil }
+        let batteries = connected ? orderedBatteries(payload.batteryLevels) : []
+        return NotchAnnouncement(
+            title: payload.name,
+            symbolName: payload.symbolName,
+            // Lit while attached, the quiet grey once it has gone.
+            accent: connected ? deviceAccent : .neutral,
+            detail: connected ? (batteries.isEmpty ? "Connected" : nil) : "Disconnected",
+            batteries: batteries,
+            isWide: true,
+            followsPeekDuration: true
+        )
+    }
+
+    /// What a change of sound output should say: the full name of where sound
+    /// went. The ears used to carry a shortened name beside the cutout, and a
+    /// long one still ran out past the shape.
+    public static func forSoundOutput(_ payload: DevicePayload) -> NotchAnnouncement? {
+        guard !payload.name.isEmpty else { return nil }
+        return NotchAnnouncement(
+            title: payload.name,
+            symbolName: payload.symbolName,
+            accent: deviceAccent,
+            isWide: true,
+            followsPeekDuration: true
+        )
+    }
+
+    /// Near-white, as the ears draw a device: hardware is not a status.
+    private static let deviceAccent = AccentColor(red: 0.93, green: 0.93, blue: 0.95)
+
+    /// Left, Right, Case — the order earbuds are worn and read in, rather than
+    /// the alphabet's, which put the case first. Anything else after them.
+    static func orderedBatteries(_ levels: [String: Double]) -> [Battery] {
+        let order = ["Left": 0, "Right": 1, "Battery": 2, "Case": 3]
+        return levels
+            .filter { $0.value.isFinite }
+            .sorted { (order[$0.key] ?? 9, $0.key) < (order[$1.key] ?? 9, $1.key) }
+            .map { Battery(label: $0.key, level: min(max($0.value, 0), 1)) }
     }
 
     /// What a timer card should say when it lands, or nil when it is not the

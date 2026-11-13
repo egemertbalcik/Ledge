@@ -22,7 +22,8 @@ extension NotchPresentation {
             bottomRadius: preferences.bottomRadius,
             closedBottomRadius: preferences.closedBottomRadius,
             gutterRadius: preferences.gutterRadius,
-            isAnnouncing: announcement != nil
+            isAnnouncing: announcement != nil,
+            isAnnouncingWide: announcement?.isWide ?? false
         )
     }
 
