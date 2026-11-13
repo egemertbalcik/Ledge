@@ -39,12 +39,26 @@ public struct NotchAnnouncement: Equatable, Sendable {
     /// done. Zero draws nothing.
     public var completedSessions: Int
 
-    /// A quieter word after the title — a device's "Disconnected". Nil draws
-    /// nothing.
-    public var detail: String?
+    /// How the strip lays out what it says.
+    public enum Style: Equatable, Sendable {
+        /// One centred line, the height of the cutout: the timer and Keep
+        /// Awake.
+        case line
+        /// A device or a sound output: its glyph, the full name with a line
+        /// under it, and every battery it reports. Taller and as wide as it
+        /// needs, so the shape is sized to what it says rather than to a
+        /// fixed width that left a short name sitting in empty black.
+        case device
+    }
 
-    /// One battery a device reports, drawn after the title as a small ring
-    /// and its number.
+    public var style: Style
+
+    /// The line under the title in the device style — "Connected",
+    /// "Disconnected", "Sound Output". Nil draws nothing.
+    public var subtitle: String?
+
+    /// One battery a device reports, drawn after the name as a ring and its
+    /// percentage.
     public struct Battery: Equatable, Sendable {
         public var label: String
         public var level: Double
@@ -58,13 +72,6 @@ public struct NotchAnnouncement: Equatable, Sendable {
     /// Every battery the device reports, in the order they are worn and read.
     /// Empty draws nothing.
     public var batteries: [Battery]
-
-    /// Whether the shape stands up wider than the peek as well as taller.
-    ///
-    /// A device's name and up to three batteries are a longer line than
-    /// anything the timer says, and at the peek's own width the name was cut
-    /// after a word — the complaint the device news started from.
-    public var isWide: Bool
 
     /// Whether the stand-up lasts as long as the user's peek setting rather
     /// than `duration`.
@@ -80,18 +87,18 @@ public struct NotchAnnouncement: Equatable, Sendable {
         symbolName: String,
         accent: AccentColor = .neutral,
         completedSessions: Int = 0,
-        detail: String? = nil,
+        style: Style = .line,
+        subtitle: String? = nil,
         batteries: [Battery] = [],
-        isWide: Bool = false,
         followsPeekDuration: Bool = false
     ) {
         self.title = title
         self.symbolName = symbolName
         self.accent = accent
         self.completedSessions = completedSessions
-        self.detail = detail
+        self.style = style
+        self.subtitle = subtitle
         self.batteries = batteries
-        self.isWide = isWide
         self.followsPeekDuration = followsPeekDuration
     }
 
@@ -103,8 +110,8 @@ public struct NotchAnnouncement: Equatable, Sendable {
     /// What a device attaching or leaving should say, or nil when the card is
     /// not that news.
     ///
-    /// The full name, and either every battery or — with none to show —
-    /// whether it came or went. Only cards that say they are a connection
+    /// The full name, whether it came or went under it, and every battery it
+    /// reports. Only cards that say they are a connection
     /// qualify; see `DevicePayload.announcesConnection` for the two that only
     /// look like one.
     public static func forDevice(_ payload: DevicePayload) -> NotchAnnouncement? {
@@ -118,23 +125,24 @@ public struct NotchAnnouncement: Equatable, Sendable {
             symbolName: payload.symbolName,
             // Lit while attached, the quiet grey once it has gone.
             accent: connected ? deviceAccent : .neutral,
-            detail: connected ? (batteries.isEmpty ? "Connected" : nil) : "Disconnected",
+            style: .device,
+            subtitle: connected ? "Connected" : "Disconnected",
             batteries: batteries,
-            isWide: true,
             followsPeekDuration: true
         )
     }
 
     /// What a change of sound output should say: the full name of where sound
-    /// went. The ears used to carry a shortened name beside the cutout, and a
-    /// long one still ran out past the shape.
+    /// went, with "Sound Output" under it. The ears used to carry a shortened
+    /// name beside the cutout, and a long one still ran out past the shape.
     public static func forSoundOutput(_ payload: DevicePayload) -> NotchAnnouncement? {
         guard !payload.name.isEmpty else { return nil }
         return NotchAnnouncement(
             title: payload.name,
             symbolName: payload.symbolName,
             accent: deviceAccent,
-            isWide: true,
+            style: .device,
+            subtitle: "Sound Output",
             followsPeekDuration: true
         )
     }

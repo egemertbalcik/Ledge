@@ -22,17 +22,17 @@ struct DeviceAnnouncementTests {
         #expect(a.title == "Ali's AirPods Pro")
         #expect(a.batteries.map(\.label) == ["Left", "Right", "Case"])
         #expect(a.batteries.map(\.level) == [0.8, 0.75, 0.4])
-        #expect(a.detail == nil)
-        #expect(a.isWide)
+        #expect(a.subtitle == "Connected")
+        #expect(a.style == .device)
     }
 
-    @Test("With no battery to show, it says whether the device came or went")
-    func connectionWordsWithoutBatteries() throws {
-        #expect(try #require(NotchAnnouncement.forDevice(hello())).detail == "Connected")
+    @Test("Under the name it says whether the device came or went")
+    func connectionWords() throws {
+        #expect(try #require(NotchAnnouncement.forDevice(hello())).subtitle == "Connected")
         var goodbye = hello(["Left": 0.5])
         goodbye.isConnected = false
         let a = try #require(NotchAnnouncement.forDevice(goodbye))
-        #expect(a.detail == "Disconnected")
+        #expect(a.subtitle == "Disconnected")
         #expect(a.batteries.isEmpty, "a device that has gone has no live reading")
     }
 
@@ -59,7 +59,8 @@ struct DeviceAnnouncementTests {
                                   statusText: "Speakers")
         let a = try #require(NotchAnnouncement.forSoundOutput(route))
         #expect(a.title == "MacBook Pro Speakers")
-        #expect(a.isWide)
+        #expect(a.subtitle == "Sound Output")
+        #expect(a.style == .device)
         #expect(a.batteries.isEmpty)
     }
 
@@ -104,7 +105,7 @@ struct DevicePayloadConnectionFlagTests {
 }
 
 @Suite("The shape when a device stands it up")
-struct WideAnnouncingLayoutTests {
+struct SizedAnnouncingLayoutTests {
 
     private let geometry = NotchGeometry(
         screenSize: CGSize(width: 1470, height: 956),
@@ -113,26 +114,31 @@ struct WideAnnouncingLayoutTests {
         isHardwareNotch: true
     )
 
-    private func size(announcing: Bool, wide: Bool) -> CGSize {
+    private func size(announcing: Bool, content: CGSize?) -> CGSize {
         NotchLayout.layout(
             for: .peek, geometry: geometry,
             expandedSize: CGSize(width: 320, height: 160),
             bottomRadius: 12, closedBottomRadius: 10, gutterRadius: 10,
-            isAnnouncing: announcing, isAnnouncingWide: wide
+            isAnnouncing: announcing, announceContent: content
         ).bodySize
     }
 
-    @Test("Wide stands up as tall as any announcement, and wider")
-    func wideIsWider() {
-        let standard = size(announcing: true, wide: false)
-        let wide = size(announcing: true, wide: true)
-        #expect(wide.height == standard.height)
-        #expect(wide.width > standard.width)
-        #expect(wide.width == geometry.notchSize.width + NotchLayout.wideAnnounceEarWidth * 2)
+    @Test("It is exactly as big as what it says, below the hardware")
+    func sizedToContent() {
+        let s = size(announcing: true, content: CGSize(width: 430, height: 50))
+        #expect(s.width == 430)
+        #expect(s.height == geometry.notchSize.height + NotchLayout.compactExtraHeight + 50)
     }
 
-    @Test("Wide means nothing when nothing is being announced")
-    func wideNeedsAnnouncement() {
-        #expect(size(announcing: false, wide: true) == size(announcing: false, wide: false))
+    @Test("A short message still shows a margin either side of the cutout")
+    func neverNarrowerThanTheCutout() {
+        let s = size(announcing: true, content: CGSize(width: 60, height: 50))
+        #expect(s.width == geometry.notchSize.width + NotchLayout.announceMinimumMargin * 2)
+    }
+
+    @Test("A size means nothing when nothing is being announced")
+    func sizeNeedsAnnouncement() {
+        #expect(size(announcing: false, content: CGSize(width: 430, height: 50))
+                == size(announcing: false, content: nil))
     }
 }

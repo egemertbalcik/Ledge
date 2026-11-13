@@ -203,19 +203,35 @@ public struct NotchLayout: Sendable, Equatable {
         geometry.notchSize.height
     }
 
-    /// The ear width of a *wide* stand-up — see `NotchAnnouncement.isWide`.
-    /// The widest an ear may be, so a device's name and its batteries share
-    /// one line beside nothing but the hardware's own black.
-    public static let wideAnnounceEarWidth: CGFloat = 90
+    /// The least a sized stand-up shows either side of the cutout, so even a
+    /// short message reads as the notch growing rather than a lip under it.
+    public static let announceMinimumMargin: CGFloat = 14
 
     public static func peek(
         _ geometry: NotchGeometry,
         bottomRadius: CGFloat,
         gutterRadius: CGFloat,
         announcing: Bool = false,
-        earWidth: CGFloat? = nil
+        earWidth: CGFloat? = nil,
+        announceContent: CGSize? = nil
     ) -> NotchLayout {
-        expanded(
+        // A stand-up that brings its own size — a device's name and batteries
+        // — gets exactly that below the hardware, never narrower than the
+        // cutout and a margin. Sized to the content in both directions: a
+        // fixed width left a short name like a sound output sitting in a
+        // field of empty black.
+        if announcing, let content = announceContent {
+            return expanded(
+                geometry,
+                size: CGSize(
+                    width: max(geometry.notchSize.width + announceMinimumMargin * 2, content.width),
+                    height: geometry.notchSize.height + compactExtraHeight + content.height
+                ),
+                bottomRadius: bottomRadius,
+                gutterRadius: gutterRadius
+            )
+        }
+        return expanded(
             geometry,
             size: CGSize(
                 width: geometry.notchSize.width
@@ -798,7 +814,7 @@ public struct NotchLayout: Sendable, Equatable {
         closedBottomRadius: CGFloat,
         gutterRadius: CGFloat,
         isAnnouncing: Bool = false,
-        isAnnouncingWide: Bool = false
+        announceContent: CGSize? = nil
     ) -> NotchLayout {
         // The radii are preference-driven and a corrupted defaults database
         // can hand this NaN, which slips *through* min/max (the stdlib returns
@@ -825,10 +841,7 @@ public struct NotchLayout: Sendable, Equatable {
                 bottomRadius: bottomRadius,
                 gutterRadius: gutterRadius,
                 announcing: isAnnouncing,
-                // Never narrower than the user's own peek.
-                earWidth: isAnnouncing && isAnnouncingWide
-                    ? max(peekEarWidth, wideAnnounceEarWidth)
-                    : nil
+                announceContent: announceContent
             )
         case .hud:
             return .hudReadout(geometry, bottomRadius: bottomRadius, gutterRadius: gutterRadius)
