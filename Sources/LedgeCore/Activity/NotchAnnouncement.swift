@@ -143,6 +143,9 @@ public struct NotchAnnouncement: Equatable, Sendable {
             accent: deviceAccent,
             style: .device,
             subtitle: "Sound Output",
+            // Earbuds that sound moved to carry their levels when the paired
+            // list had them; a speaker carries none and draws none.
+            batteries: orderedBatteries(payload.batteryLevels),
             followsPeekDuration: true
         )
     }

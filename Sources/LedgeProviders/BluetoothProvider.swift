@@ -18,6 +18,10 @@ public final class BluetoothProvider: ActivityProvider {
     /// How long a connect or disconnect card stays up.
     static let lifetime: TimeInterval = 4
 
+    /// When a hello that came without levels looks for them, in ms after the
+    /// connect; after the last one it goes out bare.
+    static let lateLevelSteps = [250, 500, 800, 1200, 1600, 2000]
+
     /// How often connected devices are re-asked for their levels. Battery
     /// data otherwise only arrives at connect time, and AirPods die hours
     /// later.
@@ -203,7 +207,19 @@ public final class BluetoothProvider: ActivityProvider {
             levels=\(device.batteryLevels.count, privacy: .public)
             """)
         report(device, cause: .connectionEvent)
+        RecentConnections.noteConnected(device.name, at: now())
 
+        // A hello without levels waits for them instead of going out bare and
+        // filling in a moment later: the bare row and then the full one read
+        // as a jump. See `readLevelsLate`.
+        if device.batteryLevels.isEmpty {
+            readLevelsLate(for: device, id: id)
+        } else {
+            sayHello(device, levels: device.batteryLevels, id: id)
+        }
+    }
+
+    private func sayHello(_ device: BluetoothDeviceSnapshot, levels: [String: Double], id: ActivityID) {
         continuation?.yield(.publish(Activity(
             id: id,
             createdAt: now(),
@@ -214,51 +230,49 @@ public final class BluetoothProvider: ActivityProvider {
                 // Absent battery data is normal, not a failure — the levels are
                 // transient and vanish once a device goes idle. The card renders
                 // fine without them.
-                batteryLevels: device.batteryLevels,
+                batteryLevels: levels,
                 isConnected: true,
                 isApple: device.isApple,
                 announcesConnection: true
             ))
         )))
-        if device.batteryLevels.isEmpty { readLevelsLate(for: device, id: id) }
     }
 
-    /// One more look for a battery the connect did not come with.
+    /// The hello for a device that connected before macOS had its levels.
     ///
-    /// Earbuds often attach a second or two before macOS has their levels, so
-    /// the hello went out bare and the charge — the reason anyone looks —
-    /// never arrived. The same card is republished with the levels if they
-    /// turn up while it is still on screen; after that it is too late to be
-    /// part of the hello and the ten-minute refresh carries them instead.
+    /// Earbuds often attach a second or two before the levels exist. The
+    /// hello used to go out bare and be republished with them, which drew the
+    /// row twice in quick succession. Now it waits — a few looks over two
+    /// seconds — and goes out once: with the levels if they came, bare if
+    /// they did not. A goodbye inside the wait cancels it.
     private func readLevelsLate(for device: BluetoothDeviceSnapshot, id: ActivityID) {
         let session = self.session
-        let shownAt = now()
         var read: Task<Void, Never>!
         read = Task { @MainActor [weak self] in
             defer { self?.reads.remove(read) }
-            try? await Task.sleep(for: .milliseconds(900))
-            guard let self, !Task.isCancelled, self.session == session else { return }
-            let connected = await self.source.connectedDevices()
-            guard !Task.isCancelled, self.session == session,
+            var levels: [String: Double] = [:]
+            var waited = 0
+            for step in Self.lateLevelSteps {
+                try? await Task.sleep(for: .milliseconds(step - waited))
+                waited = step
+                guard let self, !Task.isCancelled, self.session == session,
+                      self.published[device.address] == id,
+                      self.pendingGoodbyes[device.address] == nil
+                else { return }
+                let connected = await self.source.connectedDevices()
+                guard !Task.isCancelled, self.session == session else { return }
+                if let fresh = connected.first(where: { $0.address == device.address }),
+                   !fresh.batteryLevels.isEmpty {
+                    self.report(fresh, cause: .periodicRefresh)
+                    levels = fresh.batteryLevels
+                    break
+                }
+            }
+            guard let self, !Task.isCancelled, self.session == session,
                   self.published[device.address] == id,
-                  self.now() - shownAt < Self.lifetime,
-                  let fresh = connected.first(where: { $0.address == device.address }),
-                  !fresh.batteryLevels.isEmpty
+                  self.pendingGoodbyes[device.address] == nil
             else { return }
-            self.report(fresh, cause: .periodicRefresh)
-            self.continuation?.yield(.publish(Activity(
-                id: id,
-                createdAt: shownAt,
-                expiresAfter: Self.lifetime,
-                payload: .device(DevicePayload(
-                    name: device.name,
-                    symbolName: device.symbolName,
-                    batteryLevels: fresh.batteryLevels,
-                    isConnected: true,
-                    isApple: device.isApple,
-                    announcesConnection: true
-                ))
-            )))
+            self.sayHello(device, levels: levels, id: id)
         }
         reads.insert(read)
     }
