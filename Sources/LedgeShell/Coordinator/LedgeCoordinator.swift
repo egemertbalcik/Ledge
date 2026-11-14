@@ -980,6 +980,8 @@ public final class LedgeCoordinator {
     private var systemMediaOwner: String? {
         (resolvedNowPlayingSource as? CompositeNowPlayingSource)?.systemOwnerBundleID
     }
+    private let systemBannerHider = SystemBannerHider()
+
     private lazy var hud = HUDCoordinator(
         preferences: preferences,
         presentation: presentation,
@@ -1665,6 +1667,8 @@ public final class LedgeCoordinator {
         // is exactly the user who would never get their screen back if this
         // lived inside the provider that the setting decides not to build.
         lidConserve.recover()
+        // macOS's own headphone banner yields to the notch's — see `SystemBannerHider`.
+        systemBannerHider.start()
         wireRestingContent()
         // Fixtures are development scaffolding, not something a normal run
         // should show. Now that a real provider exists they are opt-in.
@@ -1797,6 +1801,7 @@ public final class LedgeCoordinator {
     /// nothing will be shown for it.
     @discardableResult
     private func announce(_ activity: Activity, byUser: Bool = false) -> Bool {
+        if case .device = activity.payload { systemBannerHider.sweepSoon() }
         guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
             return false
