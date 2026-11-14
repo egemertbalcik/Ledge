@@ -980,6 +980,8 @@ public final class LedgeCoordinator {
     private var systemMediaOwner: String? {
         (resolvedNowPlayingSource as? CompositeNowPlayingSource)?.systemOwnerBundleID
     }
+    private let systemBannerHider = SystemBannerHider()
+
     private lazy var hud = HUDCoordinator(
         preferences: preferences,
         presentation: presentation,
@@ -1632,9 +1634,23 @@ public final class LedgeCoordinator {
             // nobody asked for it, the second because the Mac's behaviour
             // changed while the user was away.
             return NotchAnnouncement.forKeepAwake(payload)
+        case .device(let payload):
+            // A device attaching or leaving, and sound moving somewhere: a
+            // full name and up to three batteries, which the ears beside the
+            // cutout could not hold. The notch grows to say it rather than
+            // dropping a separate banner below itself.
+            if activity.id == AudioRouteProvider.activityID {
+                return NotchAnnouncement.forSoundOutput(payload)
+            }
+            return NotchAnnouncement.forDevice(payload)
         default:
             return nil
         }
+    }
+
+    /// How long a peek lasts: the user's setting, or a stand-up's own length.
+    private func peekDuration(for announcement: NotchAnnouncement?) -> TimeInterval {
+        announcement?.duration(peek: self.preferences.peekDuration) ?? self.preferences.peekDuration
     }
 
     /// Wires the activity hub up and starts it.
@@ -1651,6 +1667,8 @@ public final class LedgeCoordinator {
         // is exactly the user who would never get their screen back if this
         // lived inside the provider that the setting decides not to build.
         lidConserve.recover()
+        // macOS's own headphone banner yields to the notch's — see `SystemBannerHider`.
+        systemBannerHider.start()
         wireRestingContent()
         // Fixtures are development scaffolding, not something a normal run
         // should show. Now that a real provider exists they are opt-in.
@@ -1783,10 +1801,17 @@ public final class LedgeCoordinator {
     /// nothing will be shown for it.
     @discardableResult
     private func announce(_ activity: Activity, byUser: Bool = false) -> Bool {
+        if case .device = activity.payload { systemBannerHider.sweepSoon() }
         guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
             return false
         }
+        // Sound moving to the device that has just said hello is the same
+        // news told twice. Only a real connection arms this, and only once.
+        if activity.id == AudioRouteProvider.activityID, self.consumeRouteEcho(activity) {
+            return true
+        }
+        self.armRouteEcho(activity)
         // While the companion rests, a device or charger announcement is
         // satellite material, not a takeover: the music keeps the island
         // and the event shows beside it for its dwell.
@@ -1802,9 +1827,23 @@ public final class LedgeCoordinator {
         // a pomodoro that ends while anything else is on screen is exactly
         // the case this exists for.
         let announcement = Self.announcement(for: activity)
-        let duration = announcement == nil
-            ? self.preferences.peekDuration
-            : NotchAnnouncement.duration
+        let duration = self.peekDuration(for: announcement)
+
+        // The route that got there first is the same echo the other way
+        // round: the connection replaces it in place and nothing is put back.
+        if activity.id != AudioRouteProvider.activityID,
+           self.state.phase == .peek,
+           let shown = self.presentation.peeked,
+           shown.id == AudioRouteProvider.activityID,
+           case .device(let route) = shown.payload,
+           case .device(let device) = activity.payload,
+           device.announcesConnection, device.isConnected == true,
+           Self.namesSameDevice(route.name, device.name) {
+            self.presentation.peeked = activity
+            self.presentation.announcement = announcement
+            self.send(.peekRequested(duration))
+            return true
+        }
 
         // The SAME card announcing again — Caps Lock toggled mid-peek,
         // a second Focus flip — restarts the current peek in place with
@@ -1863,6 +1902,51 @@ public final class LedgeCoordinator {
         self.presentation.announcement = announcement
         self.send(.peekRequested(duration))
         return true
+    }
+
+    // MARK: - Route echo
+
+    /// How long after a connection a route change to the same device is the
+    /// connection's own echo rather than news.
+    nonisolated static let routeEchoWindow: TimeInterval = 8
+
+    /// The device that last said hello, and when. Cleared by the echo it
+    /// was waiting for, so it can swallow one route change and no more.
+    private var routeEcho: (name: String, at: TimeInterval)?
+
+    private func armRouteEcho(_ activity: Activity) {
+        guard case .device(let payload) = activity.payload,
+              payload.announcesConnection, payload.isConnected == true
+        else { return }
+        routeEcho = (payload.name, Date().timeIntervalSinceReferenceDate)
+    }
+
+    private func consumeRouteEcho(_ activity: Activity) -> Bool {
+        guard case .device(let route) = activity.payload, let armed = routeEcho else {
+            return false
+        }
+        guard Self.routeEchoes(
+            route: route.name, connected: armed.name,
+            elapsed: Date().timeIntervalSinceReferenceDate - armed.at
+        ) else { return false }
+        routeEcho = nil
+        return true
+    }
+
+    /// Whether a route change names the device that has just connected,
+    /// recently enough to be its echo.
+    nonisolated static func routeEchoes(route: String, connected: String, elapsed: TimeInterval) -> Bool {
+        guard elapsed >= 0, elapsed < routeEchoWindow else { return false }
+        return namesSameDevice(route, connected)
+    }
+
+    /// The audio system and Bluetooth mostly agree on a name; where they do
+    /// not, one usually contains the other.
+    nonisolated static func namesSameDevice(_ a: String, _ b: String) -> Bool {
+        let a = a.lowercased().trimmingCharacters(in: .whitespaces)
+        let b = b.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a == b || a.contains(b) || b.contains(a)
     }
 
     /// What a resting track — playing, paused, or gone — does to the ears.
@@ -2510,7 +2594,11 @@ public final class LedgeCoordinator {
             // changed the system volume, the volume listener fired, and the
             // menu was replaced by the sound readout mid-drag.
             let routeMenuOwnsVolume = readout.kind == .volume && self.presentation.routePickerRows > 0
-            if !routeMenuOwnsVolume {
+            // Earbuds in or out move sound to another device, and that device
+            // reports its level. Nobody touched the volume: the device banner
+            // is the news, and a sound readout behind it was noise.
+            let outputJustSwitched = readout.kind == .volume && VolumeController.outputSwitchedRecently()
+            if !routeMenuOwnsVolume && !outputJustSwitched {
                 // While the music companion is resting, the readout detaches
                 // into the satellite blob beside it — the split treatment the
                 // real Dynamic Island uses — instead of taking the whole
@@ -3688,9 +3776,7 @@ public final class LedgeCoordinator {
                     // a whisper.
                     let announcement = Self.announcement(for: card)
                     self.presentation.announcement = announcement
-                    self.send(.peekRequested(
-                        announcement == nil ? self.preferences.peekDuration : NotchAnnouncement.duration
-                    ))
+                    self.send(.peekRequested(self.peekDuration(for: announcement)))
                 }
                 break
             }

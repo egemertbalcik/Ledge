@@ -320,6 +320,8 @@ final class VolumeWatchBackend: @unchecked Sendable {
 
         // A genuine switch. Only the device listeners go.
         deviceListeners.removeAll()
+        // The first binding is the start of watching, not a switch.
+        if boundDevice != nil { VolumeController.noteOutputSwitch() }
         boundDevice = device
         repairAttempts = 0
 
