@@ -2594,7 +2594,11 @@ public final class LedgeCoordinator {
             // changed the system volume, the volume listener fired, and the
             // menu was replaced by the sound readout mid-drag.
             let routeMenuOwnsVolume = readout.kind == .volume && self.presentation.routePickerRows > 0
-            if !routeMenuOwnsVolume {
+            // Earbuds in or out move sound to another device, and that device
+            // reports its level. Nobody touched the volume: the device banner
+            // is the news, and a sound readout behind it was noise.
+            let outputJustSwitched = readout.kind == .volume && VolumeController.outputSwitchedRecently()
+            if !routeMenuOwnsVolume && !outputJustSwitched {
                 // While the music companion is resting, the readout detaches
                 // into the satellite blob beside it — the split treatment the
                 // real Dynamic Island uses — instead of taking the whole
