@@ -40,7 +40,7 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
     public var rationale: String {
         switch self {
         case .accessibility:
-            "Lets Ledge replace the macOS volume and brightness readout. Without it, Ledge shows its own alongside the system one."
+            "Lets Ledge replace the macOS volume and brightness readout. Without it, macOS shows its own and Ledge shows none."
         case .automation:
             "Lets Ledge read what Music and Spotify are playing. Without it, those two still show through the system's own now-playing data, with fewer details."
         case .calendars:

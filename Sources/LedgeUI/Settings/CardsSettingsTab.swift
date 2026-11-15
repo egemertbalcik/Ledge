@@ -329,11 +329,14 @@ struct CardDetailPane: View {
                 .searchRow("hudEnabled", highlighted: highlighted)
             Toggle("Show one for brightness too", isOn: $preferences.hudBrightnessEnabled)
                 .searchRow("hudBrightnessEnabled", highlighted: highlighted)
-                .disabled(!preferences.hudEnabled)
+                // Only Ledge's own readout has a brightness half, and it shows
+                // only while the tap is intercepting. The volume switch above
+                // stays live either way: it is what lets the tap start.
+                .disabled(!preferences.hudEnabled || !model.isSuppressingSystemHUD)
         } header: {
             Text("Pressing a key")
         } footer: {
-            SettingsNote("Volume changes are read straight from the audio system, so this needs no permission at all. macOS still shows its own readout alongside — replacing it is the setting below.")
+            SettingsNote("Ledge's readout replaces the macOS one, so it shows only while the setting below is on and Accessibility is granted. Otherwise macOS shows its own and Ledge stays out of the way. With brightness off, the brightness keys go to macOS, except on a display only Ledge can dim.")
         }
 
         Section {

@@ -9,6 +9,12 @@ import SwiftUI
 /// because a bar that moves when nothing moved is the control lying.
 public struct LevelsActions {
     public var rows: () -> [LevelRow]
+    /// The built-in panel's brightness, or nil when it cannot be read.
+    ///
+    /// Brightness has no change notification, and a key macOS handled tells
+    /// Ledge nothing, so the open card looks for itself. One cheap read, and
+    /// only while the card is on screen; nil means it never looks.
+    public var brightnessProbe: () -> Double?
     /// Sets a level and answers with what the device says it now is. The
     /// number on screen is always this answer, never the gesture's.
     public var setLevel: (String, Double) -> LevelRow?
@@ -23,12 +29,14 @@ public struct LevelsActions {
 
     public init(
         rows: @escaping () -> [LevelRow] = { [] },
+        brightnessProbe: @escaping () -> Double? = { nil },
         setLevel: @escaping (String, Double) -> LevelRow? = { _, _ in nil },
         toggleMute: @escaping (String) -> LevelRow? = { _ in nil },
         swapOutput: @escaping (String) -> Void = { _ in },
         setDragging: @escaping (Bool) -> Void = { _ in }
     ) {
         self.rows = rows
+        self.brightnessProbe = brightnessProbe
         self.setLevel = setLevel
         self.toggleMute = toggleMute
         self.swapOutput = swapOutput
@@ -106,6 +114,7 @@ public struct LevelsCardView: View {
                 // can see happen; anything before it is the card arriving.
                 try? await Task.sleep(for: .milliseconds(250))
                 hasSettled = true
+                await followBrightness()
             }
             .onChange(of: payload.volume) { _, _ in pull() }
             .onChange(of: payload.brightness) { _, _ in pull() }
@@ -136,6 +145,43 @@ public struct LevelsCardView: View {
                 )
                 .focused($focused, equals: row.id)
             }
+        }
+    }
+
+    /// How often an open card looks at the panel's brightness.
+    static let brightnessProbeInterval: Duration = .milliseconds(250)
+
+    /// Pulls again whenever the built-in panel's brightness moves, for as
+    /// long as the card is on screen.
+    ///
+    /// A brightness key Ledge handled already republishes; one macOS handled
+    /// (no Accessibility, or the brightness readout switched off) says
+    /// nothing, and the open card kept the level it opened with. Ends with
+    /// the card: the view's task is cancelled when it goes.
+    private func followBrightness() async {
+        await Self.followBrightness(
+            probe: actions.brightnessProbe,
+            sleep: { try? await Task.sleep(for: Self.brightnessProbeInterval) },
+            onChange: { pull() }
+        )
+    }
+
+    /// The loop behind `followBrightness`, apart from the view so it can be
+    /// run with a scripted probe. A first read that fails means the panel
+    /// has no brightness to follow, and it never looks again; a later one
+    /// that fails is skipped.
+    static func followBrightness(
+        probe: () -> Double?,
+        sleep: () async -> Void,
+        onChange: () -> Void
+    ) async {
+        guard var last = probe() else { return }
+        while !Task.isCancelled {
+            await sleep()
+            guard !Task.isCancelled, let now = probe() else { continue }
+            guard abs(now - last) >= 0.001 else { continue }
+            last = now
+            onChange()
         }
     }
 

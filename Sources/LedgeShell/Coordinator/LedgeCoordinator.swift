@@ -180,7 +180,7 @@ public final class LedgeCoordinator {
     private var distributedTokens: [any NSObjectProtocol] = []
 
     /// Whether the displays are asleep or the screen is locked. While dark
-    /// the pointer poll and the brightness watcher stand down; the panels are
+    /// the pointer poll stands down; the panels are
     /// not visible to anyone, and a laptop left locked overnight should not
     /// spend its battery watching for a hover that cannot happen.
     /// Why the screen is not worth polling. Each reason is remembered on its
@@ -761,12 +761,10 @@ public final class LedgeCoordinator {
         if dormancy.isDark {
             notesWindow.cancelPendingOpening()
             hoverTracker?.stop()
-            hud.setDormant(true)
             readoutHandBack.setDormant(true)
-            Self.log.notice("screens dark — pointer and brightness polling paused")
+            Self.log.notice("screens dark — pointer polling paused")
         } else {
             hoverTracker?.start()
-            hud.setDormant(false)
             // The pointer may be anywhere now; forget the pre-sleep answer —
             // and tell the reducer, or a card left open under the pointer at
             // lock time stays open until the pointer re-enters and leaves.
@@ -2500,10 +2498,10 @@ public final class LedgeCoordinator {
             // on the card side.
             self.presentation.latestLevel = readout
             // The Levels card is a level control too: its drags change the
-            // hardware, the hardware answers with change events — CoreAudio
-            // right behind the release, the brightness poll a beat later —
-            // and each would summon the readout over the very card being
-            // dragged. The quiet window absorbs the echo.
+            // hardware, the hardware answers with change events (CoreAudio
+            // right behind the release) and each would summon the readout
+            // over the very card being dragged. The quiet window absorbs the
+            // echo.
             guard Date().timeIntervalSinceReferenceDate >= self.levelsCardQuietUntil else { return }
             // The route menu *is* a volume control, so its own drag must not
             // summon the level HUD on top of it. Without this, moving a slider
@@ -2529,11 +2527,12 @@ public final class LedgeCoordinator {
                     // it swapped card for panel and back on every key, and the
                     // card came back showing the level it opened with.
                     //
-                    // It follows the provider's publishes instead — and a
+                    // It follows the provider's publishes instead, and a
                     // brightness key produces none of its own, because
-                    // brightness has no change notification and is polled by
-                    // whoever needs it. So ask. Only while the card is open:
-                    // nothing enumerates devices otherwise.
+                    // brightness has no change notification. So ask. Only
+                    // while the card is open: nothing enumerates devices
+                    // otherwise. A key macOS handled never reaches here; the
+                    // card's own brightness probe catches that one.
                     self.levelsProviderRef?.republish()
                 } else {
                     self.send(.hudRequested(self.preferences.hudDuration))
@@ -2608,6 +2607,10 @@ public final class LedgeCoordinator {
     private func makeLevelsActions() -> LevelsActions {
         LevelsActions(
             rows: { [weak self] in self?.levelRows() ?? [] },
+            // The built-in panel's level, read cheaply while the card is on
+            // screen. A brightness key macOS handled says nothing to Ledge,
+            // so without this an open card kept the level it opened with.
+            brightnessProbe: { BrightnessController().level() },
             setLevel: { [weak self] id, level in self?.setLevel(id, to: level) },
             toggleMute: { [weak self] id in self?.toggleMute(id) },
             // Not wired, and the rows say so by not offering it. The output
@@ -2631,8 +2634,8 @@ public final class LedgeCoordinator {
                 }
                 self.setHUDDragging(dragging)
                 // Quiet from the first touch until well after release: the
-                // hardware's answering change events (CoreAudio, the
-                // brightness poll) arrive on their own schedule.
+                // hardware's answering change events (CoreAudio) arrive on
+                // their own schedule.
                 // 30s covers any real drag; a severed one (display unplug
                 // mid-drag) self-heals instead of silencing the HUD for good.
                 self.levelsCardQuietUntil = Date().timeIntervalSinceReferenceDate + (dragging ? 30 : 2)
