@@ -3,17 +3,12 @@ import Foundation
 import LedgeCore
 import os
 
-/// Reads and sets display brightness, and notices when it changes.
+/// Reads and sets the built-in panel's brightness.
 ///
-/// Brightness has no public API and no change notification, which shapes the
-/// design twice over:
-///
-/// - Reading goes through `DisplayServices`, a private framework, so every
-///   symbol is looked up defensively.
-/// - There is nothing to subscribe to, so changes are found by polling. The
-///   poll is slow when nothing is happening and quickens only after a change,
-///   because the interesting moment is a burst of key presses, not the hours in
-///   between.
+/// Brightness has no public API and no change notification. Reading goes
+/// through `DisplayServices`, a private framework, so every symbol is looked
+/// up defensively. Nothing here watches for changes: whoever needs to know
+/// asks, as the open Levels card does.
 ///
 /// `DisplayServicesBrightnessChanged` no longer exists on macOS 26.4 — it did on
 /// earlier releases. That is why setting brightness leaves Control Centre's own
@@ -21,28 +16,9 @@ import os
 @MainActor
 public final class BrightnessController {
 
-    private static let log = Logger(subsystem: "com.egemert.ledge", category: "brightness")
-
     private typealias GetBrightness =
         @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
     private typealias SetBrightness = @convention(c) (CGDirectDisplayID, Float) -> Int32
-
-    public var onChange: (HUDReadout) -> Void = { _ in }
-
-    private var timer: Timer?
-    private var polling = BrightnessPollingState()
-
-    /// The resting beat, watching for brightness moved by something other than
-    /// this app — an ambient-light adjustment, the Touch Bar, another utility.
-    ///
-    /// Twice a second, with no tolerance, was one of the few things keeping
-    /// this process out of idle around the clock: a private-framework read
-    /// every half second, all day, for a number that changes a handful of
-    /// times a week. Two seconds with generous tolerance costs a fiftieth as
-    /// many wake-ups, and a key press does not wait for it — that path drops
-    /// straight to `activeInterval` for its burst.
-    private let idleInterval: TimeInterval = 2.0
-    private let activeInterval: TimeInterval = 1.0 / 20.0
 
     public init() {}
 
@@ -93,122 +69,5 @@ public final class BrightnessController {
     public nonisolated func readout() -> HUDReadout? {
         guard let level = level() else { return nil }
         return HUDReadout(kind: .brightness, level: level)
-    }
-
-    // MARK: - Watching
-
-    public func startWatching() {
-        stopWatching()
-        guard isSupported else {
-            Self.log.notice("DisplayServicesGetBrightness unavailable — brightness HUD disabled")
-            return
-        }
-        polling.reset(level: level())
-        schedule(interval: idleInterval)
-    }
-
-    public func stopWatching() {
-        timer?.invalidate()
-        timer = nil
-        polling.stop()
-    }
-
-    private func schedule(interval: TimeInterval) {
-        timer?.invalidate()
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.tick() }
-        }
-        // The resting beat may drift to ride along with other wake-ups; the
-        // burst that follows a key press may not — it is what draws the bar.
-        timer.tolerance = interval >= 1 ? interval * 0.5 : 0
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-    }
-
-    /// A manual key step is 1/16 (0.0625). Ambient auto-brightness moves in far
-    /// smaller, gradual increments. A change at least this large in one tick is
-    /// therefore a key press, not the light sensor — which is how the HUD is
-    /// shown only when the *user* changes brightness, never when the room does.
-    ///
-    /// There is no public API to distinguish the two, so this magnitude test is
-    /// the honest best. When Accessibility is granted the interceptor drives the
-    /// HUD from the actual key event and this is only a display-sync backstop.
-    private let manualStep: Double = 0.045
-
-    private func tick() {
-        let change = polling.observe(level(), manualStep: manualStep)
-        switch change.cadence {
-        case .active: schedule(interval: activeInterval)
-        case .idle: schedule(interval: idleInterval)
-        case nil: break
-        }
-        if let level = change.levelToPublish {
-            onChange(HUDReadout(kind: .brightness, level: level))
-        }
-    }
-}
-
-/// The hardware-independent state behind brightness polling.
-///
-/// A fast-poll window is a finite budget of timer firings, not successful
-/// DisplayServices reads. The private API can stop answering after the window
-/// starts; failed reads must still spend the budget or the main run loop stays
-/// at 20 Hz forever.
-struct BrightnessPollingState {
-    enum Cadence: Equatable {
-        case active
-        case idle
-    }
-
-    struct Change: Equatable {
-        var cadence: Cadence?
-        var levelToPublish: Double?
-    }
-
-    static let quickPollCount = 40
-
-    private var lastLevel: Double?
-    private(set) var quickPollsRemaining = 0
-
-    mutating func reset(level: Double?) {
-        lastLevel = level
-        quickPollsRemaining = 0
-    }
-
-    mutating func stop() {
-        quickPollsRemaining = 0
-    }
-
-    mutating func observe(_ current: Double?, manualStep: Double) -> Change {
-        guard let current else { return spendQuickPoll() }
-
-        guard let last = lastLevel else {
-            lastLevel = current
-            return spendQuickPoll()
-        }
-
-        let delta = abs(current - last)
-        guard delta >= 0.001 else { return spendQuickPoll() }
-
-        lastLevel = current
-
-        // Ambient changes update the baseline but do not surface as key presses
-        // and do not extend a fast window already in progress.
-        guard delta >= manualStep else { return spendQuickPoll() }
-
-        let cadence: Cadence? = quickPollsRemaining == 0 ? .active : nil
-        quickPollsRemaining = Self.quickPollCount
-        return Change(cadence: cadence, levelToPublish: current)
-    }
-
-    private mutating func spendQuickPoll() -> Change {
-        guard quickPollsRemaining > 0 else {
-            return Change(cadence: nil, levelToPublish: nil)
-        }
-        quickPollsRemaining -= 1
-        return Change(
-            cadence: quickPollsRemaining == 0 ? .idle : nil,
-            levelToPublish: nil
-        )
     }
 }

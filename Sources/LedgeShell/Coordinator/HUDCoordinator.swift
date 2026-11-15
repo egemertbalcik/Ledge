@@ -70,8 +70,8 @@ public final class HUDCoordinator {
             // Only while intercepting. Otherwise the change came from a key
             // macOS handled and is already drawing its own readout for, and
             // showing ours as well is the double popup this used to produce.
-            // While intercepting it also covers changes made elsewhere — the
-            // menu bar slider, another app — which macOS draws nothing for.
+            // While intercepting it also covers changes made elsewhere, such as
+            // the menu bar slider, which macOS draws no readout for.
             guard self.isSuppressing else { return }
             self.show(readout)
         }
@@ -352,9 +352,6 @@ public final class HUDCoordinator {
         case .soundUp, .soundDown, .mute:
             return handleVolume(key)
         case .brightnessUp, .brightnessDown:
-            // Brightness readout switched off: the key goes to macOS, which
-            // changes the level and draws its own readout, as it always did.
-            guard preferences.hudBrightnessEnabled else { return false }
             return handleBrightness(key)
         case .keyboardBacklightUp, .keyboardBacklightDown:
             // Not applied here: there is no reliable way to *set* the backlight
@@ -428,6 +425,21 @@ public final class HUDCoordinator {
         return true
     }
 
+    /// Whether Ledge takes a brightness key for a display it can dim.
+    ///
+    /// With the brightness readout switched off, a key for a panel macOS can
+    /// dim itself goes to macOS, which changes the level and draws its own
+    /// readout. A display Ledge dims through its gamma ramp is different:
+    /// macOS cannot dim it at all, and handing the key over would dim the
+    /// MacBook's panel instead of the screen under the pointer. Ledge keeps
+    /// that key, and shows its readout, because nothing else would.
+    nonisolated static func brightnessKeyIsLedges(
+        readoutEnabled: Bool,
+        backend: DisplayBrightnessController.Backend
+    ) -> Bool {
+        readoutEnabled || backend == .gamma
+    }
+
     /// Brightness keys act on the display the pointer is on, so F1/F2 dim the
     /// external monitor while the cursor is over it and the MacBook's own panel
     /// otherwise — which is what every user of a two-display Mac expects, and
@@ -439,6 +451,8 @@ public final class HUDCoordinator {
               // iPad. Passed through instead, so whatever macOS does with it
               // still happens.
               display.canDim,
+              Self.brightnessKeyIsLedges(readoutEnabled: preferences.hudBrightnessEnabled,
+                                         backend: display.backend),
               let current = displayBrightness.level(of: display)
         else { return false }
 
