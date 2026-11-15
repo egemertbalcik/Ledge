@@ -94,22 +94,128 @@ struct LevelsCardTests {
                 "a row's sentence has to cost height or it is being clipped")
     }
 
-    @Test("A card nobody is touching has nothing dimmed")
-    func atRestNothingIsDimmed() {
-        // Everything but the row being touched rests back at 38%, which is
-        // right under a pointer and wrong on a card at rest. `.focusable()`
-        // on the rows made something take focus the instant the card was
-        // drawn, so every photograph showed one bright row and the rest
-        // faded.
-        guard let resting = drawn(rows(external: true)) else {
-            Issue.record("must draw"); return
+    /// The card drawn into plain RGBA bytes, one array per row of pixels, top
+    /// first, so two pictures can be compared pixel by pixel. A render cannot
+    /// hover, so the touched row is seeded.
+    private func pixels(_ rows: [LevelRow], touched: String? = nil) -> [[UInt8]]? {
+        let renderer = ImageRenderer(
+            content: LevelsCardView(rows: rows, touched: touched).frame(width: 275)
+        )
+        renderer.scale = 1
+        guard let image = renderer.cgImage,
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let width = image.width, height = image.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        let drew = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
         }
+        guard drew else { return nil }
+        return (0..<height).map { Array(bytes[($0 * width * 4)..<(($0 + 1) * width * 4)]) }
+    }
+
+    /// The first and last rows of pixels where two pictures differ.
+    private func changedRows(_ a: [[UInt8]], _ b: [[UInt8]]) -> ClosedRange<Int>? {
+        let changed = a.indices.filter { a[$0] != b[$0] }
+        guard let first = changed.first, let last = changed.last else { return nil }
+        return first...last
+    }
+
+    @Test("A card nobody is touching has nothing picked out")
+    func atRestNothingIsDimmed() throws {
+        // The row being touched is picked out, which is right under a
+        // pointer and wrong on a card at rest. `.focusable()` on the rows
+        // made something take focus the instant the card was drawn, so every
+        // photograph showed one row picked out for no reason.
+        let resting = try #require(pixels(rows(external: true)))
         // Drawn twice: identical, because nothing in the card itself decides
         // to highlight a row.
-        guard let again = drawn(rows(external: true)) else {
-            Issue.record("must draw"); return
+        #expect(pixels(rows(external: true)) == resting)
+        // A touch on a row that is not there picks nothing out either.
+        #expect(pixels(rows(external: true), touched: "no-such-row") == resting)
+    }
+
+    @Test("Touching a row adds to that row and takes nothing from the others",
+          arguments: ["sound", "display-1", "display-2"])
+    func touchingOneRowLeavesTheOthers(touched: String) throws {
+        // Hovering the sound row faded brightness to 38%, and the other way
+        // round. On a two-row card that read as half the card switching off.
+        // The touched row lifts instead, so the picture changes, and no pixel
+        // anywhere gets fainter than it was at rest.
+        let resting = try #require(pixels(rows(external: true)))
+        let lifted = try #require(pixels(rows(external: true), touched: touched))
+        try #require(lifted.count == resting.count, "touching a row changed the card's height")
+        #expect(lifted != resting, "touching \(touched) changed nothing on the card")
+
+        var fainter = 0
+        for (restRow, liftedRow) in zip(resting, lifted) {
+            // Every fourth byte is a pixel's alpha. One step of rounding at an
+            // antialiased edge is not a fade.
+            for alpha in stride(from: 3, to: restRow.count, by: 4)
+            where Int(liftedRow[alpha]) < Int(restRow[alpha]) - 2 {
+                fainter += 1
+            }
         }
-        #expect(resting == again)
+        #expect(fainter == 0, "touching \(touched) made \(fainter) pixels fainter")
+    }
+
+    /// The highest alpha in a band of pixel rows: 255 wherever the line, which
+    /// is solid white, is drawn at full strength.
+    private func strongest(_ picture: [[UInt8]], in band: ClosedRange<Int>) -> UInt8 {
+        band.flatMap { y in stride(from: 3, to: picture[y].count, by: 4).map { picture[y][$0] } }.max() ?? 0
+    }
+
+    /// How many pixels in a band are opaque or nearly. The plate is faint and
+    /// adds none; a thicker line adds a row of them.
+    private func opaque(_ picture: [[UInt8]], in band: ClosedRange<Int>) -> Int {
+        band.reduce(0) { count, y in
+            count + stride(from: 3, to: picture[y].count, by: 4).filter { picture[y][$0] >= 250 }.count
+        }
+    }
+
+    @Test("At rest every row is drawn at full strength, and a touched row's line is thicker",
+          arguments: ["sound", "display-1", "display-2"])
+    func restingRowsAreFullStrength(touched: String) throws {
+        let resting = try #require(pixels(rows(external: true)))
+        let lifted = try #require(pixels(rows(external: true), touched: touched))
+        let band = try #require(changedRows(resting, lifted), "touching \(touched) changed nothing")
+        // Nothing faded at rest: the row's own line is solid white.
+        #expect(strongest(resting, in: band) >= 250, "\(touched) is faded at rest")
+        #expect(opaque(lifted, in: band) > opaque(resting, in: band),
+                "touching \(touched) did not thicken its line")
+    }
+
+    @Test("Moving from one row straight onto the next keeps the new row lifted, in either order")
+    func hoverHandOff() {
+        // The new row's entry first, then the old row's exit.
+        var held = LevelsCardView.hovering(nil, row: "sound", inside: true)
+        held = LevelsCardView.hovering(held, row: "display-1", inside: true)
+        held = LevelsCardView.hovering(held, row: "sound", inside: false)
+        #expect(held == "display-1")
+        // The usual order: exit, then entry.
+        held = LevelsCardView.hovering(held, row: "display-1", inside: false)
+        #expect(held == nil)
+        held = LevelsCardView.hovering(held, row: "display-2", inside: true)
+        #expect(held == "display-2")
+        // Leaving the card from the row that holds it clears it.
+        #expect(LevelsCardView.hovering("display-2", row: "display-2", inside: false) == nil)
+    }
+
+    @Test("Only the touched row changes")
+    func theChangeStaysInItsRow() throws {
+        let resting = try #require(pixels(rows(external: true)))
+        let soundLifted = try #require(pixels(rows(external: true), touched: "sound"))
+        let externalLifted = try #require(pixels(rows(external: true), touched: "display-2"))
+        let sound = try #require(changedRows(resting, soundLifted))
+        let external = try #require(changedRows(resting, externalLifted))
+        // The first row and the last: what changes for one never reaches the
+        // other, which a fade on every untouched row would.
+        #expect(sound.upperBound < external.lowerBound)
     }
 
     @Test("Every row's line is the same thickness, floor or no floor")
