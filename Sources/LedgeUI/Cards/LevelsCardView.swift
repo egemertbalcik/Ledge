@@ -77,12 +77,16 @@ public struct LevelsCardView: View {
         /// from. The card used to ignore its payload and read devices through
         /// its actions, so the preview supplied none and every photograph of
         /// it showed two empty bars.
-        rows: [LevelRow] = []
+        rows: [LevelRow] = [],
+        /// The row drawn as under the pointer, for a test or the gallery: a
+        /// render cannot hover. Nil, a card nobody is touching.
+        touched: String? = nil
     ) {
         self.payload = payload
         self.actions = actions
         self.isCompactWidth = isCompactWidth
         _rows = State(initialValue: rows.isEmpty ? payload.rows : rows)
+        _hovering = State(initialValue: touched)
     }
 
     /// 1% a notch, 5% with Shift. The same step the keys use.
@@ -132,7 +136,9 @@ public struct LevelsCardView: View {
                         dragging = began ? row.id : nil
                         actions.setDragging(began)
                     },
-                    onHover: { inside in hovering = inside ? row.id : nil }
+                    onHover: { inside in
+                        hovering = Self.hovering(hovering, row: row.id, inside: inside)
+                    }
                 )
                 .focused($focused, equals: row.id)
             }
@@ -162,6 +168,18 @@ public struct LevelsCardView: View {
     /// Whether this card has been on screen long enough that a change in it is
     /// a change rather than part of its arrival.
     @State private var hasSettled = false
+
+    /// Which row holds the hover after `row` reports the pointer coming in
+    /// or going out.
+    ///
+    /// Only the row that holds the hover may clear it. Moving straight from
+    /// one row to the next can deliver the new row's entry before the old
+    /// row's exit, and the exit used to wipe the entry, leaving the row under
+    /// the pointer without its plate.
+    static func hovering(_ current: String?, row: String, inside: Bool) -> String? {
+        if inside { return row }
+        return current == row ? nil : current
+    }
 
     /// The row being touched lifts, so the level being changed is the one
     /// being read. The others are left alone: fading them to 38% made the
@@ -208,6 +226,7 @@ private struct LevelRowView: View {
     let onHover: (Bool) -> Void
 
     @State private var isDragging = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// One thickness for every row, floor or no floor.
     static let lineThickness: CGFloat = 3
@@ -262,7 +281,9 @@ private struct LevelRowView: View {
         // and played out over the length of that spring while the card was
         // shrinking. A tenth of a second, finished before anything else
         // starts.
-        .animation(.easeOut(duration: 0.1), value: isActive)
+        // With Reduce Motion the change is immediate, and still its own
+        // transaction: an explicit nil does not inherit the island's spring.
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: isActive)
         .contentShape(Rectangle())
         .gesture(drag)
         .onHover(perform: onHover)
