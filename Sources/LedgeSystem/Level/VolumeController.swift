@@ -81,6 +81,25 @@ public final class VolumeController {
         max(0, (selfWrites.withLock { $0[device] } ?? 0) - now)
     }
 
+    /// When the default output last changed device. Switching outputs makes
+    /// the new device report its level, which is not the user turning the
+    /// volume; the shell reads this to keep the readout down.
+    private nonisolated static let outputSwitchedAt =
+        OSAllocatedUnfairLock<TimeInterval>(initialState: -.infinity)
+
+    nonisolated static func noteOutputSwitch(now: TimeInterval = Date().timeIntervalSinceReferenceDate) {
+        outputSwitchedAt.withLock { $0 = now }
+    }
+
+    /// Whether the output changed device within `window` seconds.
+    public nonisolated static func outputSwitchedRecently(
+        within window: TimeInterval = 1.0,
+        now: TimeInterval = Date().timeIntervalSinceReferenceDate
+    ) -> Bool {
+        let at = outputSwitchedAt.withLock { $0 }
+        return now - at >= 0 && now - at < window
+    }
+
     public init(hardware: (any AudioHardware)? = nil) {
         backend = VolumeWatchBackend(hardware: hardware ?? SystemAudioHardware())
     }
