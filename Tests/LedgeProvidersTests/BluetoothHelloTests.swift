@@ -44,6 +44,9 @@ private final class Heard {
     /// The battery levels each hello carried, in the order they were told.
     var hellos: [[String: Double]] = []
     var goodbyes = 0
+    /// How long each card said it would live.
+    var helloLives: [TimeInterval?] = []
+    var goodbyeLives: [TimeInterval?] = []
 }
 
 /// "Connected" and "Disconnected" are told once each and only when they are
@@ -97,8 +100,10 @@ struct BluetoothHelloTests {
                       payload.announcesConnection else { continue }
                 if payload.isConnected == true {
                     heard.hellos.append(payload.batteryLevels)
+                    heard.helloLives.append(activity.expiresAfter)
                 } else {
                     heard.goodbyes += 1
+                    heard.goodbyeLives.append(activity.expiresAfter)
                 }
             }
         }
@@ -277,6 +282,21 @@ struct BluetoothHelloTests {
         }
         #expect(result.hellos.count == 1)
         #expect(result.goodbyes == 1)
+    }
+
+    /// The card lived four seconds and a peek may wait eight for the stage. A
+    /// hello that waited longer than that was dropped when its turn came.
+    /// Sound moving to the same device is kept quiet and macOS's own card is
+    /// moved out of sight, so nothing told the arrival at all.
+    @Test("A hello's card lives longer than a peek may wait for the stage")
+    func helloOutlivesTheWait() async {
+        let result = await heard(grace: 0.15, until: { $0.goodbyes > 0 }) { source in
+            source.onConnect?(self.device(["Battery": 0.5], isApple: false))
+            source.onDisconnect?(self.address)
+        }
+        #expect(result.helloLives == [BluetoothProvider.helloLifetime])
+        #expect(BluetoothProvider.helloLifetime > PendingPeek.longestWait)
+        #expect(result.goodbyeLives == [BluetoothProvider.lifetime], "a goodbye is as short as it was")
     }
 
     /// Connected before Ledge started, so it never said hello here. Its

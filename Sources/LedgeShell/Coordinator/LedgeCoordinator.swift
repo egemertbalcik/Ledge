@@ -1554,9 +1554,8 @@ public final class LedgeCoordinator {
     /// of their card and wait at the front — see `PendingPeek`.
     private var pendingPeeks: [PendingPeek] = []
 
-    /// How long a queued peek stays worth playing. Past this it is old news —
-    /// replaying a Bluetooth connect from a minute ago reads as a glitch.
-    private static let pendingPeekLifetime: TimeInterval = 8
+    /// How long a queued peek stays worth playing. Past this it is old news.
+    private static let pendingPeekLifetime: TimeInterval = PendingPeek.longestWait
 
     /// How many may wait at once.
     private static let pendingPeekLimit = 3
@@ -1830,7 +1829,9 @@ public final class LedgeCoordinator {
     /// nothing will be shown for it.
     @discardableResult
     private func announce(_ activity: Activity, byUser: Bool = false) -> Bool {
-        if case .device = activity.payload { systemBannerHider.deviceHeard() }
+        if let lookBack = Self.bannerLookBack(for: activity) {
+            systemBannerHider.deviceHeard(lookBack: lookBack)
+        }
         guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
             return false
@@ -1842,7 +1843,6 @@ public final class LedgeCoordinator {
         }
         // A low battery the hello has just drawn in red is the same news too.
         if self.helloToldBattery(activity) { return true }
-        self.noteHello(activity)
         // While the companion rests, a charger is satellite material, not a
         // takeover: the music keeps the island and the event shows beside
         // it for its dwell. Device news is not: see `transientSatellite`.
@@ -1922,9 +1922,12 @@ public final class LedgeCoordinator {
             // A low battery alert already waiting lets the hello that draws
             // it in red go first. If the hello plays, the alert is dropped
             // then. If the hello never plays, the alert still does.
+            // The same for its own sound output card.
             if case .device(let hello) = activity.payload {
                 PendingPeek.letAhead(activity.id, in: &self.pendingPeeks) { entry in
-                    Self.isToldBattery(self.queuedCard(entry), by: hello)
+                    let card = self.queuedCard(entry)
+                    return Self.isToldBattery(card, by: hello)
+                        || (entry.id == AudioRouteProvider.activityID && Self.isRouteEcho(card, of: hello))
                 }
             }
             return true
@@ -1951,19 +1954,18 @@ public final class LedgeCoordinator {
     /// The device that last said hello. See `RouteEcho`.
     private var routeEcho = RouteEcho()
 
-    /// A device has said hello: its own sound output card is an echo from
-    /// here on, whether it comes next or is already waiting.
-    private func noteHello(_ activity: Activity) {
-        guard case .device(let payload) = activity.payload,
-              payload.announcesConnection, payload.isConnected == true
-        else { return }
-        routeEcho.arm(payload.name, at: Date().timeIntervalSinceReferenceDate)
-        // The same device's sound output card may already be waiting behind
-        // another peek. The hello tells that arrival in full, so the waiting
-        // card is dropped rather than left to take its own turn afterwards.
-        PendingPeek.drop(AudioRouteProvider.activityID, from: &pendingPeeks) { entry in
-            Self.isRouteEcho(self.queuedCard(entry), of: payload)
-        }
+    /// How far back the banner hider should look when this card arrives, or
+    /// nil when macOS shows no card of its own for it.
+    ///
+    /// Only a device connecting and sound moving bring the macOS card. Every
+    /// device card used to open the hider's window, and with the long look
+    /// back: a goodbye, a battery alert, Bluetooth switching off and a case
+    /// opening all did, for a card that was never coming.
+    static func bannerLookBack(for activity: Activity) -> TimeInterval? {
+        guard case .device(let payload) = activity.payload else { return nil }
+        if activity.id == AudioRouteProvider.activityID { return SystemBannerHider.soundOutputLookBack }
+        if payload.announcesConnection, payload.isConnected == true { return SystemBannerHider.lookBack }
+        return nil
     }
 
     // MARK: - Low battery on arrival
@@ -1983,9 +1985,19 @@ public final class LedgeCoordinator {
         guard case .device(let payload) = activity.payload,
               payload.announcesConnection, payload.isConnected == true
         else { return }
-        helloBatteries.note(payload, id: activity.id, at: Date().timeIntervalSinceReferenceDate)
+        let now = Date().timeIntervalSinceReferenceDate
+        helloBatteries.note(payload, id: activity.id, at: now)
         PendingPeek.drop(from: &pendingPeeks) { entry in
             Self.isToldBattery(self.queuedCard(entry), by: payload)
+        }
+        // Its own sound output card is an echo from here on, whether it comes
+        // next or is already waiting. From the showing as well: armed when
+        // the hello only arrived, a hello that then expired in the queue took
+        // the sound output card with it, and with macOS's own card moved out
+        // of sight nothing told the arrival at all.
+        routeEcho.arm(payload.name, at: now)
+        PendingPeek.drop(AudioRouteProvider.activityID, from: &pendingPeeks) { entry in
+            Self.isRouteEcho(self.queuedCard(entry), of: payload)
         }
     }
 
@@ -2631,6 +2643,10 @@ public final class LedgeCoordinator {
             guard payload.isCharging else { return nil }
             return .charging(level: payload.percentage)
         case .keepAwake(let payload):
+            // A hold that came back on its own, after a relaunch or when a
+            // timed one ran out into Coffee, has words to say. The cup beside
+            // the music said that something had happened and not what.
+            guard announcement(for: activity) == nil else { return nil }
             // Starting a hold while music has the ears: the cup beside the
             // island, not a takeover of it.
             guard payload.isRunning else { return nil }
@@ -2675,6 +2691,18 @@ public final class LedgeCoordinator {
         ))
     }
 
+    /// Whether a readout stays down because the output has just changed
+    /// device.
+    ///
+    /// The new device reports its level and nobody touched the volume. A key
+    /// somebody pressed in that second is not that: it was applied and
+    /// swallowed with nothing shown, which is a key that looks dead.
+    nonisolated static func outputSwitchQuiets(
+        _ readout: HUDReadout, fromKey: Bool, switchedRecently: Bool
+    ) -> Bool {
+        readout.kind == .volume && !fromKey && switchedRecently
+    }
+
     private func startHUD() {
         // The settings window draws the tap's real state, so it has to hear
         // about every attempt — including the ones that fail.
@@ -2699,7 +2727,9 @@ public final class LedgeCoordinator {
             // Earbuds in or out move sound to another device, and that device
             // reports its level. Nobody touched the volume: the device banner
             // is the news, and a sound readout behind it was noise.
-            let outputJustSwitched = readout.kind == .volume && VolumeController.outputSwitchedRecently()
+            let outputJustSwitched = Self.outputSwitchQuiets(
+                readout, fromKey: self.hud.readoutFromKey,
+                switchedRecently: VolumeController.outputSwitchedRecently())
             if !routeMenuOwnsVolume && !outputJustSwitched {
                 // While the music companion is resting, the readout detaches
                 // into the satellite blob beside it — the split treatment the

@@ -15,8 +15,18 @@ public final class BluetoothProvider: ActivityProvider {
 
     public let identifier = "bluetooth"
 
-    /// How long a connect or disconnect card stays up.
+    /// How long a disconnect card stays up.
     static let lifetime: TimeInterval = 4
+
+    /// How long a connect card stays up: a second longer than a peek may wait
+    /// for the stage.
+    ///
+    /// It lived four seconds and a peek may wait eight. A hello that waited
+    /// longer than its card lived was dropped when its turn came. Sound
+    /// moving to a device that has just connected is kept quiet on purpose
+    /// and macOS's own card is moved out of sight, so nothing told the
+    /// arrival at all.
+    static let helloLifetime: TimeInterval = PendingPeek.longestWait + 1
 
     /// When a hello that came without levels looks for them, in ms after the
     /// connect; after the last one it goes out bare.
@@ -292,7 +302,7 @@ public final class BluetoothProvider: ActivityProvider {
         continuation?.yield(.publish(Activity(
             id: id,
             createdAt: now(),
-            expiresAfter: Self.lifetime,
+            expiresAfter: Self.helloLifetime,
             payload: .device(DevicePayload(
                 name: device.name,
                 symbolName: device.symbolName,

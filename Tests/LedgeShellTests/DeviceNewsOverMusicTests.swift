@@ -62,4 +62,31 @@ struct DeviceNewsOverMusicTests {
         #expect(LedgeCoordinator.announcement(for: caseOpening) == nil)
         #expect(LedgeCoordinator.transientSatellite(for: caseOpening) != nil)
     }
+
+    // MARK: Keep Awake
+
+    private let hold = ActivityID(kind: .keepAwake, source: "keepawake")
+
+    private func holdCard(_ payload: KeepAwakePayload) -> Activity {
+        Activity(id: hold, createdAt: 0, payload: .keepAwake(payload))
+    }
+
+    /// The cup beside the music said something had happened and not what.
+    @Test("A hold that came back on its own grows the notch over the music")
+    func holdThatCameBackStandsUp() {
+        let returned = holdCard(KeepAwakePayload(phase: .running, isIndefinite: true, returned: true))
+        #expect(LedgeCoordinator.announcement(for: returned)?.title == "Back to Coffee")
+        #expect(LedgeCoordinator.transientSatellite(for: returned) == nil)
+
+        let resumed = holdCard(KeepAwakePayload(phase: .running, isIndefinite: true, resumed: true))
+        #expect(LedgeCoordinator.announcement(for: resumed)?.title == "Keep Awake resumed")
+        #expect(LedgeCoordinator.transientSatellite(for: resumed) == nil)
+    }
+
+    @Test("A hold somebody just started still shows as the cup beside the music")
+    func holdJustStartedStaysBeside() {
+        let started = holdCard(KeepAwakePayload(phase: .running, isIndefinite: true))
+        #expect(LedgeCoordinator.announcement(for: started) == nil)
+        #expect(LedgeCoordinator.transientSatellite(for: started) != nil)
+    }
 }

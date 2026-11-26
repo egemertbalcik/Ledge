@@ -40,6 +40,13 @@ public enum PeekTurn {
 /// A peek that arrived while the stage was taken, waiting for its turn.
 public struct PendingPeek: Equatable, Sendable {
 
+    /// How long a peek may wait for the stage before it is old news.
+    /// Replaying a Bluetooth connect from a minute ago reads as a glitch.
+    ///
+    /// A card that is meant to be told has to live at least this long. One
+    /// that expires sooner is dropped when its turn comes, with nothing said.
+    public static let longestWait: TimeInterval = 8
+
     /// The full id, not the kind: two queued device connects must each
     /// flash their own card, not the first `.device` in the queue twice.
     public let id: ActivityID
