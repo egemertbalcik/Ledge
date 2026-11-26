@@ -39,6 +39,36 @@ struct DeviceAnnouncementMetricsTests {
         #expect(three.height == none.height)
     }
 
+    /// The percentage sits under its ring. Beside it, earbuds with three
+    /// batteries stood the notch up at about 394 points on a Mac whose closed
+    /// notch is 275.
+    @Test("Earbuds with three batteries stay near the width of the closed notch")
+    func threeBatteriesStayNarrow() {
+        let buds = announcement("Ege's AirPods Pro", batteries: ["Left": 0.82, "Right": 0.79, "Case": 0.64])
+        let size = DeviceAnnouncementMetrics.size(for: buds, bottomRadius: 30)
+        let cells = [0.82, 0.79, 0.64].map(DeviceAnnouncementMetrics.cellWidth).reduce(0, +)
+        let expected = DeviceAnnouncementMetrics.glyphSize + DeviceAnnouncementMetrics.spacing
+            + DeviceAnnouncementMetrics.textWidth(for: buds)
+            + DeviceAnnouncementMetrics.spacing + DeviceAnnouncementMetrics.cellsLead
+            + cells + DeviceAnnouncementMetrics.cellSpacing * 2
+            + DeviceAnnouncementMetrics.sideInset(bottomRadius: 30) * 2
+        #expect(size.width == expected.rounded(.up))
+        #expect((300...345).contains(size.width), "about 323; the number beside the ring made it about 394")
+        // A cell is never narrower than its ring nor than its number.
+        #expect(DeviceAnnouncementMetrics.cellWidth(0.05) >= DeviceAnnouncementMetrics.ringSize)
+        #expect(DeviceAnnouncementMetrics.cellWidth(1) >= DeviceAnnouncementMetrics.numberWidth(1))
+    }
+
+    @Test("A name past the cap is as wide as the cap and no wider")
+    func longNameStopsAtTheCap() {
+        let long = announcement("Living Room Conference Speakerphone Pro Max")
+        #expect(DeviceAnnouncementMetrics.textWidth(for: long) == DeviceAnnouncementMetrics.maximumTextWidth)
+        #expect(DeviceAnnouncementMetrics.maximumTextWidth == 150)
+        // The names the cap was chosen for fit whole.
+        #expect(DeviceAnnouncementMetrics.textWidth(for: announcement("Ege Mert's AirPods Pro"))
+                < DeviceAnnouncementMetrics.maximumTextWidth)
+    }
+
     /// The complaint this came from: "MacBook Pro Speakers" sat in a strip
     /// sized for three batteries.
     @Test("A sound output with no batteries stays close to its words")

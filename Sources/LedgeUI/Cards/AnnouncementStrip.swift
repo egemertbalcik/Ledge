@@ -101,11 +101,11 @@ struct DeviceAnnouncementRow: View {
                     .font(Font(DeviceAnnouncementMetrics.nameFont))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
                 if let subtitle = announcement.subtitle {
                     Text(subtitle)
                         .font(Font(DeviceAnnouncementMetrics.subtitleFont))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.white.opacity(announcement.subtitleIsBright ? 0.85 : 0.55))
                         .lineLimit(1)
                 }
             }
@@ -151,24 +151,28 @@ struct DeviceAnnouncementRow: View {
 /// here with the very fonts the row renders with, not estimated.
 enum DeviceAnnouncementMetrics {
 
-    /// Below the hardware: two lines of text and a ring with room around them.
-    static let height: CGFloat = 50
+    /// Below the hardware: two lines of text, or a ring with its percentage
+    /// under it, with room around them.
+    static let height: CGFloat = 54
 
     static let glyphSize: CGFloat = 26
     static let spacing: CGFloat = 10
-    static let ringSize: CGFloat = 20
-    static let ringToNumber: CGFloat = 5
-    static let cellSpacing: CGFloat = 10
+    static let ringSize: CGFloat = 24
+    static let ringStroke: CGFloat = 3
+    /// Between a ring and the percentage under it.
+    static let ringToNumber: CGFloat = 3
+    static let cellSpacing: CGFloat = 14
     static let cellsLead: CGFloat = 4
 
-    /// The widest a name may run before it gives way in the middle, where
-    /// "Ali's AirPods Pro" loses the least.
-    static let maximumTextWidth: CGFloat = 230
+    /// The widest a name may run before it is cut at the end. "Ege Mert's
+    /// AirPods Pro" and "MacBook Pro Speakers" fit whole; three batteries
+    /// beside a longer name made the shape wider than it had any use for.
+    static let maximumTextWidth: CGFloat = 150
 
     // CTFont is immutable once made; Swift just cannot see that.
     nonisolated(unsafe) static let nameFont = systemFont(size: 13, weight: 0.3)
     nonisolated(unsafe) static let subtitleFont = systemFont(size: 11, weight: 0)
-    nonisolated(unsafe) static let numberFont = systemFont(size: 12, weight: 0.3)
+    nonisolated(unsafe) static let numberFont = systemFont(size: 11, weight: 0.3)
 
     /// Clear black either side of the row: a margin, and some of the bottom
     /// radius, which narrows the shape at the row's height.
@@ -190,13 +194,21 @@ enum DeviceAnnouncementMetrics {
         width(of: percent(level), font: numberFont).rounded(.up)
     }
 
+    /// One battery: its ring, or its percentage where that is the wider of
+    /// the two. The percentage sits under the ring rather than beside it,
+    /// which is what keeps earbuds with three batteries from making the
+    /// notch far wider than it is when closed.
+    static func cellWidth(_ level: Double) -> CGFloat {
+        max(ringSize, numberWidth(level))
+    }
+
     /// What the shape has to hold below the hardware.
     static func size(for announcement: NotchAnnouncement, bottomRadius: CGFloat) -> CGSize {
         var width = glyphSize + spacing + textWidth(for: announcement)
         if !announcement.batteries.isEmpty {
             width += spacing + cellsLead
             width += announcement.batteries
-                .map { ringSize + ringToNumber + numberWidth($0.level) }
+                .map { cellWidth($0.level) }
                 .reduce(0, +)
             width += cellSpacing * CGFloat(announcement.batteries.count - 1)
         }
@@ -243,20 +255,26 @@ private struct DeviceAnnouncementGlyph: View {
     }
 }
 
-/// One battery: a ring wearing the cell's initial, and the percentage beside
+/// One battery: a ring wearing the cell's initial with the percentage under
 /// it. Green, red under a fifth.
 private struct DeviceAnnouncementCell: View {
     let battery: NotchAnnouncement.Battery
 
-    private var tint: Color { battery.level < 0.2 ? .red : .green }
+    private var tint: Color {
+        switch battery.emphasis {
+        case .low: .red
+        case .charged: .green
+        case .plain, .dimmed: battery.level < NotchAnnouncement.Battery.redBelow ? .red : .green
+        }
+    }
 
     var body: some View {
-        HStack(spacing: DeviceAnnouncementMetrics.ringToNumber) {
+        VStack(spacing: DeviceAnnouncementMetrics.ringToNumber) {
             ZStack {
-                Circle().stroke(.white.opacity(0.16), lineWidth: 2.5)
+                Circle().stroke(.white.opacity(0.16), lineWidth: DeviceAnnouncementMetrics.ringStroke)
                 Circle()
                     .trim(from: 0, to: max(0.02, battery.level))
-                    .stroke(tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: DeviceAnnouncementMetrics.ringStroke, lineCap: .round))
                     .rotationEffect(.degrees(-90))
                     .animation(Motion.slow, value: battery.level)
                 mark
@@ -266,11 +284,13 @@ private struct DeviceAnnouncementCell: View {
 
             Text(DeviceAnnouncementMetrics.percent(battery.level))
                 .font(Font(DeviceAnnouncementMetrics.numberFont))
-                .foregroundStyle(.white)
+                .foregroundStyle(.white.opacity(0.85))
                 .lineLimit(1)
-                .frame(width: DeviceAnnouncementMetrics.numberWidth(battery.level),
-                       alignment: .leading)
+                .fixedSize()
         }
+        .frame(width: DeviceAnnouncementMetrics.cellWidth(battery.level))
+        // The batteries a battery alert is not about stay in place, faded.
+        .opacity(battery.emphasis == .dimmed ? 0.35 : 1)
     }
 
     /// A letter for the two ears, a small case shape for the case, nothing for
@@ -280,12 +300,12 @@ private struct DeviceAnnouncementCell: View {
         switch battery.label {
         case "Left", "Right":
             Text(String(battery.label.prefix(1)))
-                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .font(.system(size: 11, weight: .bold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.6))
         case "Case":
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(.white.opacity(0.6))
-                .frame(width: 7, height: 6)
+                .frame(width: 8.5, height: 7)
         default:
             EmptyView()
         }

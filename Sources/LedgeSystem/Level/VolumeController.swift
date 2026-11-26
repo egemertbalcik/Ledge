@@ -84,11 +84,10 @@ public final class VolumeController {
     /// When the default output last changed device. Switching outputs makes
     /// the new device report its level, which is not the user turning the
     /// volume; the shell reads this to keep the readout down.
-    private nonisolated static let outputSwitchedAt =
-        OSAllocatedUnfairLock<TimeInterval>(initialState: -.infinity)
+    private nonisolated static let outputSwitch = RecentOutputSwitch()
 
     nonisolated static func noteOutputSwitch(now: TimeInterval = Date().timeIntervalSinceReferenceDate) {
-        outputSwitchedAt.withLock { $0 = now }
+        outputSwitch.note(at: now)
     }
 
     /// Whether the output changed device within `window` seconds.
@@ -96,8 +95,7 @@ public final class VolumeController {
         within window: TimeInterval = 1.0,
         now: TimeInterval = Date().timeIntervalSinceReferenceDate
     ) -> Bool {
-        let at = outputSwitchedAt.withLock { $0 }
-        return now - at >= 0 && now - at < window
+        outputSwitch.happened(within: window, of: now)
     }
 
     public init(hardware: (any AudioHardware)? = nil) {
@@ -566,5 +564,27 @@ public final class VolumeController {
         // releasing this object releases those, which takes them off. That is
         // the point of holding them as objects rather than as entries in a list
         // some other method has to remember to walk.
+    }
+}
+
+/// When the sound output last changed device. Answers whether that was a
+/// moment ago.
+///
+/// Its own type so the rule can be checked on an instance of its own: the one
+/// the app shares is written by every output switch in the process, real or
+/// faked. A class because it is one piece of shared state, not a value.
+final class RecentOutputSwitch: Sendable {
+
+    private let at = OSAllocatedUnfairLock<TimeInterval>(initialState: -.infinity)
+
+    func note(at moment: TimeInterval) {
+        at.withLock { $0 = moment }
+    }
+
+    /// True from the switch until `window` seconds after it. A moment before
+    /// the switch (a clock that stepped back) is not "recently".
+    func happened(within window: TimeInterval, of now: TimeInterval) -> Bool {
+        let last = at.withLock { $0 }
+        return now - last >= 0 && now - last < window
     }
 }

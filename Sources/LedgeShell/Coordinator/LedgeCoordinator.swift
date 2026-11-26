@@ -981,6 +981,7 @@ public final class LedgeCoordinator {
         (resolvedNowPlayingSource as? CompositeNowPlayingSource)?.systemOwnerBundleID
     }
     private let systemBannerHider = SystemBannerHider()
+    private var deviceHeardTokens: [NSObjectProtocol] = []
 
     private lazy var hud = HUDCoordinator(
         preferences: preferences,
@@ -1624,7 +1625,7 @@ public final class LedgeCoordinator {
     /// Kept beside the arrival handler rather than inside the payloads: what
     /// deserves raising the voice is a decision about this app's manners, and
     /// the list of things that qualify will grow.
-    private static func announcement(for activity: Activity) -> NotchAnnouncement? {
+    static func announcement(for activity: Activity) -> NotchAnnouncement? {
         switch activity.payload {
         case .timer(let payload):
             return NotchAnnouncement.forTimer(payload)
@@ -1642,7 +1643,10 @@ public final class LedgeCoordinator {
             if activity.id == AudioRouteProvider.activityID {
                 return NotchAnnouncement.forSoundOutput(payload)
             }
-            return NotchAnnouncement.forDevice(payload)
+            // A battery running low or filling up stands the notch up the
+            // same way. As two ears it was a glyph and a ring with no name
+            // and no words. Nobody could tell what it was saying.
+            return NotchAnnouncement.forDevice(payload) ?? NotchAnnouncement.forBatteryAlert(payload)
         default:
             return nil
         }
@@ -1667,8 +1671,35 @@ public final class LedgeCoordinator {
         // is exactly the user who would never get their screen back if this
         // lived inside the provider that the setting decides not to build.
         lidConserve.recover()
-        // macOS's own headphone banner yields to the notch's — see `SystemBannerHider`.
+        // macOS's own headphone banner yields to the notch's — see
+        // `SystemBannerHider`. Only while the notch would tell the arrival
+        // itself: with the device card switched off, or a Focus keeping the
+        // notch quiet, hiding the banner left the user with nothing at all.
+        systemBannerHider.mayHide = { [weak self] in
+            guard let self else { return false }
+            return SystemBannerHider.mayHide(
+                deviceCardOn: self.preferences.isProviderEnabled("bluetooth"),
+                bluetoothGranted: self.permissions.status(of: .bluetooth) == .granted,
+                admitsDeviceNews: self.admitPeek(kind: .device)
+            )
+        }
         systemBannerHider.start()
+        // The providers say when they hear a device, which is before the
+        // notch tells it. The banner can be a second or two ahead of the
+        // hello. This is what catches it in that gap.
+        if deviceHeardTokens.isEmpty {
+            let heard: [(Notification.Name, TimeInterval)] = [
+                (.ledgeDeviceConnectHeard, SystemBannerHider.lookBack),
+                (.ledgeSoundOutputHeard, SystemBannerHider.soundOutputLookBack),
+            ]
+            for (name, lookBack) in heard {
+                deviceHeardTokens.append(NotificationCenter.default.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.systemBannerHider.deviceHeard(lookBack: lookBack) }
+                })
+            }
+        }
         wireRestingContent()
         // Fixtures are development scaffolding, not something a normal run
         // should show. Now that a real provider exists they are opt-in.
@@ -1801,7 +1832,7 @@ public final class LedgeCoordinator {
     /// nothing will be shown for it.
     @discardableResult
     private func announce(_ activity: Activity, byUser: Bool = false) -> Bool {
-        if case .device = activity.payload { systemBannerHider.sweepSoon() }
+        if case .device = activity.payload { systemBannerHider.deviceHeard() }
         guard self.admitPeek(kind: activity.kind, byUser: byUser) else {
             Self.log.debug("peek suppressed: \(activity.kind.rawValue, privacy: .public)")
             return false
@@ -1811,10 +1842,12 @@ public final class LedgeCoordinator {
         if activity.id == AudioRouteProvider.activityID, self.consumeRouteEcho(activity) {
             return true
         }
-        self.armRouteEcho(activity)
-        // While the companion rests, a device or charger announcement is
-        // satellite material, not a takeover: the music keeps the island
-        // and the event shows beside it for its dwell.
+        // A low battery the hello has just drawn in red is the same news too.
+        if self.helloToldBattery(activity) { return true }
+        self.noteHello(activity)
+        // While the companion rests, a charger is satellite material, not a
+        // takeover: the music keeps the island and the event shows beside
+        // it for its dwell. Device news is not: see `transientSatellite`.
         if Self.satellitesBesideRest(phase: self.state.phase, resting: self.restingContent()?.kind),
            let content = Self.transientSatellite(for: activity) {
             self.showSatellite(content, source: activity.id, priority: activity.priority)
@@ -1831,17 +1864,14 @@ public final class LedgeCoordinator {
 
         // The route that got there first is the same echo the other way
         // round: the connection replaces it in place and nothing is put back.
-        if activity.id != AudioRouteProvider.activityID,
-           self.state.phase == .peek,
+        // The same for a low battery alert that got there first.
+        if self.state.phase == .peek,
            let shown = self.presentation.peeked,
-           shown.id == AudioRouteProvider.activityID,
-           case .device(let route) = shown.payload,
-           case .device(let device) = activity.payload,
-           device.announcesConnection, device.isConnected == true,
-           Self.namesSameDevice(route.name, device.name) {
+           Self.helloReplaces(shown, with: activity) {
             self.presentation.peeked = activity
             self.presentation.announcement = announcement
             self.send(.peekRequested(duration))
+            self.helloShown(activity)
             return true
         }
 
@@ -1874,6 +1904,7 @@ public final class LedgeCoordinator {
             self.presentation.peeked = activity
             self.presentation.announcement = announcement
             self.send(.peekRequested(duration))
+            self.helloShown(activity)
             return true
         }
         // A peek already on screen keeps the stage; this one waits its
@@ -1890,6 +1921,14 @@ public final class LedgeCoordinator {
                 PendingPeek(activity, at: Date().timeIntervalSinceReferenceDate, byUser: byUser),
                 into: &self.pendingPeeks, limit: Self.pendingPeekLimit
             )
+            // A low battery alert already waiting lets the hello that draws
+            // it in red go first. If the hello plays, the alert is dropped
+            // then. If the hello never plays, the alert still does.
+            if case .device(let hello) = activity.payload {
+                PendingPeek.letAhead(activity.id, in: &self.pendingPeeks) { entry in
+                    Self.isToldBattery(self.queuedCard(entry), by: hello)
+                }
+            }
             return true
         }
         // The card the peek is *for*: selection only moves for standings
@@ -1901,6 +1940,7 @@ public final class LedgeCoordinator {
         // stands up instead — see `NotchAnnouncement`.
         self.presentation.announcement = announcement
         self.send(.peekRequested(duration))
+        self.helloShown(activity)
         return true
     }
 
@@ -1910,27 +1950,86 @@ public final class LedgeCoordinator {
     /// connection's own echo rather than news.
     nonisolated static let routeEchoWindow: TimeInterval = 8
 
-    /// The device that last said hello, and when. Cleared by the echo it
-    /// was waiting for, so it can swallow one route change and no more.
-    private var routeEcho: (name: String, at: TimeInterval)?
+    /// The device that last said hello. See `RouteEcho`.
+    private var routeEcho = RouteEcho()
 
-    private func armRouteEcho(_ activity: Activity) {
+    /// A device has said hello: its own sound output card is an echo from
+    /// here on, whether it comes next or is already waiting.
+    private func noteHello(_ activity: Activity) {
         guard case .device(let payload) = activity.payload,
               payload.announcesConnection, payload.isConnected == true
         else { return }
-        routeEcho = (payload.name, Date().timeIntervalSinceReferenceDate)
+        routeEcho.arm(payload.name, at: Date().timeIntervalSinceReferenceDate)
+        // The same device's sound output card may already be waiting behind
+        // another peek. The hello tells that arrival in full, so the waiting
+        // card is dropped rather than left to take its own turn afterwards.
+        PendingPeek.drop(AudioRouteProvider.activityID, from: &pendingPeeks) { entry in
+            Self.isRouteEcho(self.queuedCard(entry), of: payload)
+        }
+    }
+
+    // MARK: - Low battery on arrival
+
+    /// What recent hellos showed of a low battery. See `HelloBatteries`.
+    private var helloBatteries = HelloBatteries()
+
+    /// A hello has been put on screen: from here on it answers for a low
+    /// battery it draws in red, whether that alert comes next or is already
+    /// waiting.
+    ///
+    /// Counted from the showing and not from the arrival. A hello that only
+    /// waited behind another peek can expire there, and an alert turned away
+    /// on its account was then lost with it: neither was seen and the alert
+    /// does not fire again until the battery has been charged.
+    private func helloShown(_ activity: Activity) {
+        guard case .device(let payload) = activity.payload,
+              payload.announcesConnection, payload.isConnected == true
+        else { return }
+        helloBatteries.note(payload, id: activity.id, at: Date().timeIntervalSinceReferenceDate)
+        PendingPeek.drop(from: &pendingPeeks) { entry in
+            Self.isToldBattery(self.queuedCard(entry), by: payload)
+        }
+    }
+
+    /// Whether this arrival is a low battery alert that a hello has just
+    /// shown, so that the notch does not stand up a second time for it.
+    private func helloToldBattery(_ activity: Activity) -> Bool {
+        guard case .device(let payload) = activity.payload, payload.alert != nil else { return false }
+        return helloBatteries.told(payload, at: Date().timeIntervalSinceReferenceDate)
+    }
+
+    /// Whether a waiting card is a low battery alert that this hello shows.
+    /// A card that has gone from the queue is nothing's repeat.
+    nonisolated static func isToldBattery(_ card: Activity?, by hello: DevicePayload) -> Bool {
+        guard case .device(let payload)? = card?.payload else { return false }
+        return HelloBatteries.tells(hello, payload)
+    }
+
+    /// Whether a hello takes the place of the card on screen and nothing is
+    /// put back: the sound output card of the same device, or a low battery
+    /// alert the hello shows in red.
+    static func helloReplaces(_ shown: Activity, with arrival: Activity) -> Bool {
+        guard arrival.id != AudioRouteProvider.activityID,
+              case .device(let hello) = arrival.payload,
+              hello.announcesConnection, hello.isConnected == true,
+              case .device(let onScreen) = shown.payload
+        else { return false }
+        if shown.id == AudioRouteProvider.activityID {
+            return namesSameDevice(onScreen.name, hello.name)
+        }
+        return HelloBatteries.tells(hello, onScreen)
+    }
+
+    /// Whether a waiting sound output card names the device that is saying
+    /// hello. A card that has gone from the queue is nothing's echo.
+    nonisolated static func isRouteEcho(_ route: Activity?, of hello: DevicePayload) -> Bool {
+        guard case .device(let payload)? = route?.payload else { return false }
+        return namesSameDevice(payload.name, hello.name)
     }
 
     private func consumeRouteEcho(_ activity: Activity) -> Bool {
-        guard case .device(let route) = activity.payload, let armed = routeEcho else {
-            return false
-        }
-        guard Self.routeEchoes(
-            route: route.name, connected: armed.name,
-            elapsed: Date().timeIntervalSinceReferenceDate - armed.at
-        ) else { return false }
-        routeEcho = nil
-        return true
+        guard case .device(let route) = activity.payload else { return false }
+        return routeEcho.swallows(route: route.name, at: Date().timeIntervalSinceReferenceDate)
     }
 
     /// Whether a route change names the device that has just connected,
@@ -1943,8 +2042,8 @@ public final class LedgeCoordinator {
     /// The audio system and Bluetooth mostly agree on a name; where they do
     /// not, one usually contains the other.
     nonisolated static func namesSameDevice(_ a: String, _ b: String) -> Bool {
-        let a = a.lowercased().trimmingCharacters(in: .whitespaces)
-        let b = b.lowercased().trimmingCharacters(in: .whitespaces)
+        let a = DeviceNameKey.of(a)
+        let b = DeviceNameKey.of(b)
         guard !a.isEmpty, !b.isEmpty else { return false }
         return a == b || a.contains(b) || b.contains(a)
     }
@@ -2517,12 +2616,17 @@ public final class LedgeCoordinator {
     /// The satellite form of a transient arrival, when it has one: AirPods and
     /// friends show their glyph, a charger shows a green bolt. Anything else
     /// (calendar, keyboard, messages) returns nil and takes the normal path.
-    private static func transientSatellite(for activity: Activity) -> SatelliteContent? {
+    static func transientSatellite(for activity: Activity) -> SatelliteContent? {
         switch activity.payload {
         case .device(let payload):
-            // Anything but a departure. A goodbye has no glyph to flash; an
-            // arrival does, and so does a case opening on the desk, whose
-            // connection to this Mac is unknown either way.
+            // A device arriving, leaving, becoming the sound output or
+            // running low stands the notch up, music or no music. As a glyph
+            // beside the island it said that something had happened and not
+            // what: no name, no "Connected", no battery. Only the goodbye
+            // grew the notch, so one device was told two different ways.
+            guard announcement(for: activity) == nil else { return nil }
+            // What is left is a case opening on the desk, which keeps the
+            // glyph beside the music.
             guard payload.isConnected != false else { return nil }
             return .device(symbolName: payload.symbolName, tint: .neutral)
         case .power(let payload):
@@ -3769,7 +3873,10 @@ public final class LedgeCoordinator {
                     }
                     // Re-fetched in the gap too — and if it vanished in these
                     // few milliseconds, there is nothing left to announce.
-                    guard let card = self.queuedCard(entry) else { return }
+                    // Asked again as well: a Focus that came on in the gap
+                    // means the user no longer wants this shown.
+                    guard self.admitPeek(kind: entry.id.kind, byUser: entry.byUser),
+                          let card = self.queuedCard(entry) else { return }
                     self.presentation.peeked = card
                     // A queued announcement is still an announcement when its
                     // turn comes: waiting for the stage must not demote it to
@@ -3777,6 +3884,7 @@ public final class LedgeCoordinator {
                     let announcement = Self.announcement(for: card)
                     self.presentation.announcement = announcement
                     self.send(.peekRequested(self.peekDuration(for: announcement)))
+                    self.helloShown(card)
                 }
                 break
             }

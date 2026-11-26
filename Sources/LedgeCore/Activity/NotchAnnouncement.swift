@@ -63,9 +63,29 @@ public struct NotchAnnouncement: Equatable, Sendable {
         public var label: String
         public var level: Double
 
-        public init(label: String, level: Double) {
+        /// How a battery is drawn when one of them is the news.
+        public enum Emphasis: Equatable, Sendable {
+            /// Green, red under a fifth: every battery of a device that has
+            /// just connected.
+            case plain
+            /// Still there and in its place but faded: not what this is about.
+            case dimmed
+            /// The battery an alert is about. Red whatever its level, since a
+            /// rule can be set to fire above the fifth that turns a ring red.
+            case low
+            /// The battery that has finished charging. Green.
+            case charged
+        }
+
+        public var emphasis: Emphasis
+
+        /// Under this a ring is red without anything having to say so.
+        public static let redBelow: Double = 0.2
+
+        public init(label: String, level: Double, emphasis: Emphasis = .plain) {
             self.label = label
             self.level = level
+            self.emphasis = emphasis
         }
     }
 
@@ -82,6 +102,13 @@ public struct NotchAnnouncement: Equatable, Sendable {
     /// than "Announcement" in the settings said whatever that was set to.
     public var followsPeekDuration: Bool
 
+    /// Whether the line under the title is drawn brighter than usual.
+    ///
+    /// "Connected" is said quietly: the rings are the content. "Battery Low"
+    /// is the content and has to read as different from "Connected" at a
+    /// glance on the same device with the same rings.
+    public var subtitleIsBright: Bool
+
     public init(
         title: String,
         symbolName: String,
@@ -90,7 +117,8 @@ public struct NotchAnnouncement: Equatable, Sendable {
         style: Style = .line,
         subtitle: String? = nil,
         batteries: [Battery] = [],
-        followsPeekDuration: Bool = false
+        followsPeekDuration: Bool = false,
+        subtitleIsBright: Bool = false
     ) {
         self.title = title
         self.symbolName = symbolName
@@ -100,6 +128,7 @@ public struct NotchAnnouncement: Equatable, Sendable {
         self.subtitle = subtitle
         self.batteries = batteries
         self.followsPeekDuration = followsPeekDuration
+        self.subtitleIsBright = subtitleIsBright
     }
 
     /// How long this stand-up lasts, given the user's peek setting.
@@ -147,6 +176,47 @@ public struct NotchAnnouncement: Equatable, Sendable {
             // list had them; a speaker carries none and draws none.
             batteries: orderedBatteries(payload.batteryLevels),
             followsPeekDuration: true
+        )
+    }
+
+    /// What a battery running low, or finishing its charge, should say. Nil
+    /// when the card is not a battery alert.
+    ///
+    /// The same row as a connection, so there is one thing to learn. Every
+    /// battery keeps its place. The one the alert is about is at full
+    /// strength and the others are faded, which is how the eye finds it.
+    /// Another battery that is also under a fifth stays lit as well: it is
+    /// just as low, whichever of the two happened to set the alert off.
+    public static func forBatteryAlert(_ payload: DevicePayload) -> NotchAnnouncement? {
+        guard let alert = payload.alert, !payload.name.isEmpty else { return nil }
+        let batteries = orderedBatteries(payload.batteryLevels).map { battery -> Battery in
+            var battery = battery
+            switch alert.kind {
+            case .low:
+                battery.emphasis = battery.label == alert.component || battery.level < Battery.redBelow ? .low : .dimmed
+            case .charged:
+                battery.emphasis = battery.label == alert.component ? .charged : .dimmed
+            }
+            return battery
+        }
+        let subtitle: String
+        switch alert.kind {
+        case .low:
+            subtitle = "Battery Low"
+        case .charged:
+            // "Case Charged" for one part of several; a device with a single
+            // battery has no part to name.
+            subtitle = batteries.count > 1 ? "\(alert.component) Charged" : "Charged"
+        }
+        return NotchAnnouncement(
+            title: payload.name,
+            symbolName: payload.symbolName,
+            accent: deviceAccent,
+            style: .device,
+            subtitle: subtitle,
+            batteries: batteries,
+            followsPeekDuration: true,
+            subtitleIsBright: true
         )
     }
 
