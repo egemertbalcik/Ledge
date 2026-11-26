@@ -36,11 +36,29 @@ public enum PermissionKind: String, Equatable, Sendable, CaseIterable, Codable {
         }
     }
 
+    /// Whether this macOS is one where Ledge moves the system's headphone
+    /// banner out of sight. Only macOS 26: the banner has not been seen on
+    /// anything older, so it is left alone there.
+    public static var movesHeadphoneBanner: Bool {
+        if #available(macOS 26, *) { return true }
+        return false
+    }
+
+    /// What Accessibility is asked for. The sentence about headphones is only
+    /// said where it is true. It comes last: "Ledge shows none" is about the
+    /// readout, and Ledge's own hello needs no permission.
+    public static func accessibilityRationale(movesHeadphoneBanner: Bool) -> String {
+        let readout = "Lets Ledge replace the macOS volume and brightness readout. Without it, macOS shows its own and Ledge shows none."
+        return movesHeadphoneBanner
+            ? readout + " It also lets one announcement show when headphones connect, in place of two."
+            : readout
+    }
+
     /// What this app loses without it, in the user's terms.
     public var rationale: String {
         switch self {
         case .accessibility:
-            "Lets Ledge replace the macOS volume and brightness readout. Without it, macOS shows its own and Ledge shows none."
+            Self.accessibilityRationale(movesHeadphoneBanner: Self.movesHeadphoneBanner)
         case .automation:
             "Lets Ledge read what Music and Spotify are playing. Without it, those two still show through the system's own now-playing data, with fewer details."
         case .calendars:

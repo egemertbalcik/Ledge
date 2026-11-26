@@ -207,9 +207,11 @@ playing; nothing is written, and nothing else is touched. Every private symbol
 is looked up at runtime and checked, so when Apple removes one the feature
 quietly stops instead of the app crashing.
 
-Accessibility, if you grant it, is used for one purpose: catching the volume and
-brightness keys so Ledge's readout can replace the system's. Without it, Ledge
-leaves the readout to macOS.
+Accessibility, if you grant it, is used for three things. One is catching the
+volume and brightness keys so Ledge's readout can replace the system's. One is
+noticing Caps Lock. The third, on macOS 26 only, is moving macOS's own headphone
+banner out of sight while the notch says the same arrival, so it is told once.
+Without it, Ledge leaves the readout and the banner to macOS.
 
 Keep Awake's lid-shut stop installs a helper that runs as root, because only root
 can stop a MacBook from sleeping when the lid closes. It holds the Mac awake on a
@@ -255,7 +257,7 @@ on without it.
 
 | Permission | What it gives you | If you say no |
 |---|---|---|
-| Accessibility | Ledge's readout instead of the system one | Only the macOS readout |
+| Accessibility | Ledge's readout instead of the system one. On macOS 26, one announcement when headphones connect | Only the macOS readout. macOS's headphone banner shows beside the notch's |
 | Automation | Cover art and scrubbing in Music and Spotify, and sending a note to Apple Notes | Music still shows up, just without the artwork; notes stay in Ledge |
 | Calendars | Your next event, and the month | No calendar card |
 | Camera | The mirror on the Join button | No mirror; Join still works |
