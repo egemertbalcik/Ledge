@@ -559,7 +559,7 @@ struct HUDRowControlTests {
 
         // Whatever says which display a readout is about has to say it to `show`.
         let brightnessKey = try body(of: "private func handleBrightness(", in: hud)
-        #expect(brightnessKey.contains("about: display.id)"))
+        #expect(brightnessKey.contains("about: display.id,"))
         let oneDisplay = try body(of: "public func adjustBrightness(", in: hud)
         #expect(oneDisplay.contains("about: display.id)"))
         let shown = try body(of: "private func show(", in: hud)
