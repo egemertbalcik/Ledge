@@ -339,7 +339,7 @@ public final class HUDCoordinator {
             return swallowedKeyDowns.remove(press.key) != nil
         }
 
-        let handled = applyKeyDown(press.key)
+        let handled = applyKeyDown(press.key, fine: press.isFine)
         if handled { swallowedKeyDowns.insert(press.key) }
         return handled
     }
@@ -347,12 +347,12 @@ public final class HUDCoordinator {
     /// Keys whose press we swallowed, and whose release we therefore owe.
     private var swallowedKeyDowns: Set<MediaKey> = []
 
-    private func applyKeyDown(_ key: MediaKey) -> Bool {
+    private func applyKeyDown(_ key: MediaKey, fine: Bool) -> Bool {
         switch key {
         case .soundUp, .soundDown, .mute:
-            return handleVolume(key)
+            return handleVolume(key, fine: fine)
         case .brightnessUp, .brightnessDown:
-            return handleBrightness(key)
+            return handleBrightness(key, fine: fine)
         case .keyboardBacklightUp, .keyboardBacklightDown:
             // Not applied here: there is no reliable way to *set* the backlight
             // without a header for the private class. Letting the press through
@@ -362,7 +362,13 @@ public final class HUDCoordinator {
         }
     }
 
-    private func handleVolume(_ key: MediaKey) -> Bool {
+    /// The last press of our own on each output and each display. A press
+    /// steps from where the one before was sent while the hardware is still
+    /// getting there: see `LevelStep.start`.
+    private var volumeLandings: [AudioDeviceID: LevelStep.Landing] = [:]
+    private var brightnessLandings: [CGDirectDisplayID: (landing: LevelStep.Landing, at: TimeInterval)] = [:]
+
+    private func handleVolume(_ key: MediaKey, fine: Bool) -> Bool {
         guard let device = VolumeController.defaultOutputDevice(),
               // The *logical* level: stepping from a clamped zero's 0.062
               // would skip the first step on the way back up.
@@ -386,19 +392,34 @@ public final class HUDCoordinator {
         // min/max pass NaN straight through (`min(max(nan,0),1)` is NaN),
         // and a NaN target would be written into CoreAudio verbatim.
         let step = preferences.hudVolumeStep.isFinite ? preferences.hudVolumeStep : 0.0625
-        let target = min(max(current + Double(key.delta) * step, 0), 1)
-        guard let result = VolumeController.apply(level: target, on: device) else { return false }
+        // To the next line, or a quarter step with Option and Shift held.
+        let start = LevelStep.start(
+            reading: current, last: volumeLandings[device],
+            settling: VolumeController.selfWriteRemaining(on: device) > 0, step: step, direction: key.delta)
+        var target = LevelStep.target(from: start, direction: key.delta, step: step, fine: fine)
+        guard var result = VolumeController.apply(level: target, on: device) else { return false }
+        // An output with a few coarse levels can snap back from the line it
+        // was sent to. Sent once more, a whole step on, as the key used to.
+        if let again = LevelStep.secondTry(
+            reading: current, shown: result.shownLevel, target: target,
+            direction: key.delta, step: step, fine: fine),
+           let retried = VolumeController.apply(level: again, on: device), retried.didSomething {
+            target = again
+            result = retried
+        }
 
         // Swallow (and show) whenever we could act — the level moved, or the
         // mute did. Only a device that answered neither falls through, so the
         // native "locked" indicator can appear rather than the keys silently
         // dying. This is what stops the native sound OSD flickering in.
         guard result.didSomething else { return false }
+        volumeLandings = [device: LevelStep.Landing(
+            direction: key.delta, target: target, shown: result.shownLevel)]
 
         show(HUDReadout(
             kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
             deviceName: VolumeController.defaultOutputName()
-        ))
+        ), fromKey: true)
         return true
     }
 
@@ -421,7 +442,7 @@ public final class HUDCoordinator {
         show(HUDReadout(
             kind: .volume, level: result.shownLevel, isMuted: result.showsMuted,
             deviceName: VolumeController.defaultOutputName()
-        ))
+        ), fromKey: true)
         return true
     }
 
@@ -444,7 +465,7 @@ public final class HUDCoordinator {
     /// external monitor while the cursor is over it and the MacBook's own panel
     /// otherwise — which is what every user of a two-display Mac expects, and
     /// what macOS itself does not do.
-    private func handleBrightness(_ key: MediaKey) -> Bool {
+    private func handleBrightness(_ key: MediaKey, fine: Bool) -> Bool {
         guard let display = displayBrightness.displayUnderCursor(),
               // Swallowing the key for a display the ramp cannot reach would
               // make the brightness keys dead while the pointer sat on the
@@ -462,22 +483,40 @@ public final class HUDCoordinator {
         // The gamma floor is not zero, so stepping down on an external display
         // has to clamp there or the last step would appear to do nothing.
         let floor = display.backend == .gamma ? DisplayBrightnessController.gammaFloor : 0
-        let target = min(max(current + Double(key.delta) * step, floor), 1)
+        // A panel may still be on its way to where the last press sent it,
+        // for as long as a volume write takes to settle.
+        let now = Date().timeIntervalSinceReferenceDate
+        let last = brightnessLandings[display.id]
+        let start = LevelStep.start(
+            reading: current, last: last?.landing,
+            settling: last.map { now - $0.at < VolumeController.selfWriteQuiet } ?? false,
+            step: step, direction: key.delta)
+        let target = LevelStep.target(from: start, direction: key.delta, step: step, fine: fine, floor: floor)
 
         guard displayBrightness.setLevel(target, on: display) else { return false }
+        brightnessLandings = [display.id: (
+            LevelStep.Landing(direction: key.delta, target: target, shown: target), now)]
         if display.backend == .gamma {
             persistBrightnessSoon()
         }
 
-        show(HUDReadout(kind: .brightness, level: target, deviceName: display.name), about: display.id)
+        show(HUDReadout(kind: .brightness, level: target, deviceName: display.name), about: display.id,
+             fromKey: true)
         return true
     }
 
     // MARK: - Presenting
 
-    private func show(_ readout: HUDReadout, about display: CGDirectDisplayID? = nil) {
+    /// Whether the readout being handed on answers a key or the readout's
+    /// own speaker, and not a change seen from outside. Read by the shell
+    /// while it handles that readout.
+    public private(set) var readoutFromKey = false
+
+    private func show(_ readout: HUDReadout, about display: CGDirectDisplayID? = nil, fromKey: Bool = false) {
         if readout.kind == .brightness { shownBrightnessDisplay = display }
         presentation.hud = readout
+        readoutFromKey = fromKey
         onReadout(readout)
+        readoutFromKey = false
     }
 }

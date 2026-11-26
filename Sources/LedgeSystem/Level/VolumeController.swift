@@ -44,7 +44,7 @@ public final class VolumeController {
     /// going — we sent it there, and drew it — so the ramp is redraw with
     /// nothing to say. One readout is taken at the end of the ramp, which is
     /// also what catches a device clamping the value we asked for.
-    private nonisolated static let selfWriteQuiet: TimeInterval = 0.15
+    public nonisolated static let selfWriteQuiet: TimeInterval = 0.15
 
     /// When each output's last write of our own settles.
     ///
@@ -74,7 +74,7 @@ public final class VolumeController {
     }
 
     /// How long this output's current self-write still has to settle, or zero.
-    nonisolated static func selfWriteRemaining(
+    public nonisolated static func selfWriteRemaining(
         on device: AudioObjectID,
         now: TimeInterval = Date().timeIntervalSinceReferenceDate
     ) -> TimeInterval {

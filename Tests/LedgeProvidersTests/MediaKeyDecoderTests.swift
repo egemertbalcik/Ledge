@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 
@@ -30,6 +31,29 @@ struct MediaKeyDecoderTests {
     func decodesRepeat() {
         let held = MediaKeyDecoder.decode(data1: data1(key: 0, isDown: true, isRepeat: true))
         #expect(held?.isRepeat == true)
+    }
+
+    /// macOS moves a quarter of a step with Option and Shift held. Ledge took
+    /// the key and moved a whole one.
+    @Test("Option and Shift together ask for the fine step and nothing else does")
+    func fineStepModifiers() {
+        #expect(MediaKeyDecoder.isFine([.option, .shift]))
+        #expect(MediaKeyDecoder.isFine([.option, .shift, .function]), "the volume keys are fn keys on some keyboards")
+        #expect(MediaKeyDecoder.isFine([.option, .shift, .capsLock]))
+        #expect(!MediaKeyDecoder.isFine([]))
+        #expect(!MediaKeyDecoder.isFine([.option]))
+        #expect(!MediaKeyDecoder.isFine([.shift]))
+        #expect(!MediaKeyDecoder.isFine([.option, .shift, .command]))
+        #expect(!MediaKeyDecoder.isFine([.option, .shift, .control]))
+    }
+
+    @Test("A press carries whether it is the fine one")
+    func decodesFine() {
+        let plain = MediaKeyDecoder.decode(data1: data1(key: 0, isDown: true))
+        let fine = MediaKeyDecoder.decode(data1: data1(key: 0, isDown: true), modifiers: [.option, .shift])
+        #expect(plain?.isFine == false)
+        #expect(fine?.isFine == true)
+        #expect(fine?.key == .soundUp)
     }
 
     @Test("Keys this app does not handle are ignored, not guessed at")

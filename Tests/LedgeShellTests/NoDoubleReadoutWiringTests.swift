@@ -94,8 +94,9 @@ struct NoDoubleReadoutWiringTests {
     @Test("The brightness keys reach that decision, with the live preference and the display's backend")
     func brightnessKeysAreDecidedByThePolicy() throws {
         let code = try Self.code(Self.hud)
-        let keyDown = try Self.lines(in: code, from: "private func applyKeyDown(", through: "return handleBrightness(key)")
-        #expect(keyDown.suffix(2) == ["case .brightnessUp, .brightnessDown:", "return handleBrightness(key)"])
+        let keyDown = try Self.lines(
+            in: code, from: "private func applyKeyDown(", through: "return handleBrightness(key, fine: fine)")
+        #expect(keyDown.suffix(2) == ["case .brightnessUp, .brightnessDown:", "return handleBrightness(key, fine: fine)"])
 
         let handle = try Self.lines(in: code, from: "private func handleBrightness(", through: "else { return false }")
         #expect(handle.contains("Self.brightnessKeyIsLedges(readoutEnabled: preferences.hudBrightnessEnabled,"))

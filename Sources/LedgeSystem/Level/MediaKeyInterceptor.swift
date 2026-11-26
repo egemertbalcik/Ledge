@@ -32,11 +32,31 @@ public enum MediaKeyDecoder {
         public let key: MediaKey
         public let isDown: Bool
         public let isRepeat: Bool
+        /// Option and Shift were held: a quarter of a step, as on macOS.
+        public let isFine: Bool
+
+        public init(key: MediaKey, isDown: Bool, isRepeat: Bool, isFine: Bool = false) {
+            self.key = key
+            self.isDown = isDown
+            self.isRepeat = isRepeat
+            self.isFine = isFine
+        }
+    }
+
+    /// Whether the modifiers held with a key ask for the fine step.
+    ///
+    /// Option and Shift together, which is what macOS uses. Either alone
+    /// means something else there, and Command or Control with them is some
+    /// other shortcut. Caps Lock and the fn key say nothing either way: the
+    /// volume keys are fn keys on some keyboards.
+    public static func isFine(_ modifiers: NSEvent.ModifierFlags) -> Bool {
+        let held = modifiers.intersection(.deviceIndependentFlagsMask)
+        return held.isSuperset(of: [.option, .shift]) && held.isDisjoint(with: [.command, .control])
     }
 
     /// `data1` packs the key code in the high 16 bits, and the state in bits
     /// 8...15 — `0xA` for down, `0xB` for up. Bit 0 marks a key repeat.
-    public static func decode(data1: Int) -> Press? {
+    public static func decode(data1: Int, modifiers: NSEvent.ModifierFlags = []) -> Press? {
         let keyCode = (data1 & 0xFFFF_0000) >> 16
         guard let key = MediaKey(rawValue: keyCode) else { return nil }
 
@@ -46,7 +66,8 @@ public enum MediaKeyDecoder {
         return Press(
             key: key,
             isDown: state == 0x0A,
-            isRepeat: (data1 & 0x1) == 1
+            isRepeat: (data1 & 0x1) == 1,
+            isFine: isFine(modifiers)
         )
     }
 }
@@ -304,7 +325,7 @@ public final class MediaKeyInterceptor {
         guard type == Self.systemDefinedType,
               let nsEvent = NSEvent(cgEvent: event),
               nsEvent.subtype.rawValue == 8,
-              let press = MediaKeyDecoder.decode(data1: nsEvent.data1)
+              let press = MediaKeyDecoder.decode(data1: nsEvent.data1, modifiers: nsEvent.modifierFlags)
         else { return Unmanaged.passUnretained(event) }
 
         // Only ever swallow when both suppressing *and* the handler says it
