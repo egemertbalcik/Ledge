@@ -200,7 +200,9 @@ extension Activity {
                 // after a relaunch, and the first the user knows of it is the
                 // notch saying so. The provider marks that publish by carrying
                 // what was given back in `resumable`.
-                return payload.resumed
+                // So is one a timed hold has just gone back to: the time ran
+                // out by itself and the Mac is still being kept awake.
+                return payload.resumed || payload.returned == true
             case .finished(let reason):
                 // A session ending on its own is a power change nobody asked
                 // for at that moment, which is the whole reason each reason

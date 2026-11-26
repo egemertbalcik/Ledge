@@ -48,6 +48,12 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
     /// now. A resume nobody asked for has to announce itself, with End one tap
     /// away — so the fact has to reach the card, not just the provider.
     public var resumed: Bool
+    /// Running, timed: when the time is up this goes back to the plain hold
+    /// it was started over and the Mac stays awake. Nil is no.
+    public var returnsToHold: Bool?
+    /// Running, plain: this is the hold a timed one has just gone back to.
+    /// Nobody pressed anything, so the notch says it. Nil is no.
+    public var returned: Bool?
     /// Ready: the last attempt failed, and why. Running: only `partialHold`.
     /// Nil when nothing is wrong.
     public var problem: Problem?
@@ -78,6 +84,8 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
         resumable: TimeInterval? = nil,
         endUnrecorded: Bool = false,
         resumed: Bool = false,
+        returnsToHold: Bool? = nil,
+        returned: Bool? = nil,
         problem: Problem? = nil
     ) {
         self.phase = phase
@@ -93,6 +101,8 @@ public struct KeepAwakePayload: Equatable, Sendable, Codable {
         self.resumable = resumable
         self.endUnrecorded = endUnrecorded
         self.resumed = resumed
+        self.returnsToHold = returnsToHold
+        self.returned = returned
         self.problem = problem
     }
 

@@ -29,6 +29,11 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
     public var total: TimeInterval
     public var boot: String
     public var lidHoldRequested: Bool
+    /// A timed hold picked over a plain one goes back to it when its time is
+    /// up: see `KeepAwakeSession.returnsToHold`. Optional and without a new
+    /// version number, so a record from before this still reads, and a build
+    /// from before this reads a record with it as the timed hold it knows.
+    public var returnsToHold: Bool?
     public var endReason: KeepAwakeEndReason?
     public var endedAt: Date?
     /// The session ended while no notch panel was on screen, so its summary
@@ -44,6 +49,7 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
         total: TimeInterval = 0,
         boot: String,
         lidHoldRequested: Bool = false,
+        returnsToHold: Bool? = nil,
         endReason: KeepAwakeEndReason? = nil,
         endedAt: Date? = nil,
         summaryPending: Bool = false
@@ -56,6 +62,7 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
         self.total = total
         self.boot = boot
         self.lidHoldRequested = lidHoldRequested
+        self.returnsToHold = returnsToHold
         self.endReason = endReason
         self.endedAt = endedAt
         self.summaryPending = summaryPending
@@ -64,12 +71,14 @@ public struct KeepAwakeRecord: Equatable, Sendable, Codable {
     public init(running session: KeepAwakeSession) {
         self.init(id: session.id, state: .running, startedAt: session.startedAt,
                   deadline: session.deadline, total: session.total, boot: session.bootID,
-                  lidHoldRequested: session.lidHoldRequested)
+                  lidHoldRequested: session.lidHoldRequested,
+                  returnsToHold: session.returnsToHold)
     }
 
     public var session: KeepAwakeSession {
         KeepAwakeSession(id: id, startedAt: startedAt, deadline: deadline,
-                         total: total, bootID: boot, lidHoldRequested: lidHoldRequested)
+                         total: total, bootID: boot, lidHoldRequested: lidHoldRequested,
+                         returnsToHold: returnsToHold)
     }
 
     public func ended(_ reason: KeepAwakeEndReason, at date: Date, summaryPending: Bool) -> Self {

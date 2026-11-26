@@ -68,6 +68,14 @@ public struct KeepAwakeSession: Equatable, Sendable, Codable {
     public var bootID: String
     /// Phase 2: whether the user asked for the lid-closed hold.
     public var lidHoldRequested: Bool
+    /// Whether this timed hold was started over a plain one that had no end,
+    /// so that running out goes back to that plain hold and not to nothing.
+    ///
+    /// Espresso picked while Coffee was on used to end in the Mac being free
+    /// to sleep: the Coffee it replaced was forgotten the moment it was
+    /// replaced. Optional because records written before this have no such
+    /// field. Missing means no.
+    public var returnsToHold: Bool?
 
     public init(
         id: String = UUID().uuidString,
@@ -75,7 +83,8 @@ public struct KeepAwakeSession: Equatable, Sendable, Codable {
         deadline: Date? = nil,
         total: TimeInterval = 0,
         bootID: String,
-        lidHoldRequested: Bool = false
+        lidHoldRequested: Bool = false,
+        returnsToHold: Bool? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -83,6 +92,19 @@ public struct KeepAwakeSession: Equatable, Sendable, Codable {
         self.total = total
         self.bootID = bootID
         self.lidHoldRequested = lidHoldRequested
+        self.returnsToHold = returnsToHold
+    }
+
+    /// What a timed hold picked over `previous` should remember: whether to
+    /// go back to it when the time is up.
+    ///
+    /// Yes over a plain hold with no end, which is Coffee. Carried along when
+    /// only the length of the timed hold changes. A plain hold that has an
+    /// end of its own, from a record an earlier version wrote, is not
+    /// something to go back to: its time would be up as well.
+    public static func returnsToHold(after previous: KeepAwakeSession) -> Bool {
+        if previous.lidHoldRequested { return previous.returnsToHold == true }
+        return previous.deadline == nil
     }
 
     /// How long is left, or nil when nothing is counting down.

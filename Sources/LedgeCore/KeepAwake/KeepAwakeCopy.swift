@@ -102,16 +102,6 @@ public enum KeepAwakeCopy {
 
     private static func pad(_ value: Int) -> String { String(format: "%02d", value) }
 
-    public static func resumed(remaining: String, until time: String) -> String {
-        "Keep Awake resumed. \(remaining) left, until \(time)."
-    }
-
-    /// Resumed with no end to resume to. The timed sentence read "Keep Awake
-    /// resumed. On left, until ." once the label it was handed stopped being
-    /// a duration — a time and an "until" are both wrong for a hold that runs
-    /// until it is switched off.
-    public static let resumedIndefinitely = "Keep Awake resumed. Until you switch it off."
-
     // MARK: - Finished
 
     /// One sentence per reason. Each says what happened and what the Mac will
@@ -213,11 +203,79 @@ public enum KeepAwakeCopy {
     public static func consequenceTimed(until time: String) -> String {
         "Ends at \(time). Then your Mac can sleep again."
     }
+    /// The same line for a timed hold picked while the plain one was on. Its
+    /// time running out goes back to the plain hold, so "can sleep again"
+    /// would not be true.
+    public static func consequenceTimedThenAwake(until time: String) -> String {
+        "Ends at \(time). Then back to \(railAwake)."
+    }
+
+    /// What the notch says when a timed hold has run out and the plain one
+    /// it was picked over is on again, and the line under it. The lid-shut
+    /// hold is over, so the lid is the thing to know about.
+    public static let returnedToAwake = "Back to \(railAwake)"
+    public static let returnedToAwakeAdvice = "Keep the lid open"
+
+    // MARK: - The notch
+
+    /// What the notch says when a hold ends or comes back, in two lines: what
+    /// happened and under it why, or what is left.
+    ///
+    /// It used to say the Finished card's whole sentence in one line. The
+    /// notch stands up no wider than the compact view and nearly every one of
+    /// those sentences is wider than that: "Ended at 15% battery so your Mac
+    /// can sleep before it runs out." showed its middle and nothing else. The
+    /// full sentence stays on the card, which has room for it.
+    public static let announcedEnded = "Keep Awake ended"
+    public static let announcedResumed = "Keep Awake resumed"
+
+    /// The line under "Keep Awake ended". Short enough to fit under the name
+    /// cap of the row it is drawn in, with a time written the long way.
+    public static func announcedReason(_ reason: KeepAwakeEndReason,
+                                       at time: String,
+                                       floor: Int,
+                                       lidClosed: Bool) -> String {
+        switch reason {
+        case .timeUp:
+            time.isEmpty ? "Time up" : "Time up at \(time)"
+        case .endedByYou:
+            "Your Mac can sleep again"
+        case .batteryFloor:
+            "Battery at \(floor)%"
+        case .batteryUnreadable:
+            "Battery level unreadable"
+        case .thermal:
+            lidClosed ? "Too hot. Open the lid." : "Your Mac is very hot"
+        case .macRestarted:
+            "Your Mac restarted"
+        case .ledgeNotRunning:
+            // Without the time. It is when the hold ran out and not when
+            // Ledge went away, and with it written "10:30 PM" the line was
+            // wider than the row lets a line be. The card says the time.
+            "Ledge was not running"
+        case .sleepChangedElsewhere:
+            "Another app changed sleep"
+        case .quit, .turnedOff:
+            // Never announced: the surface is gone.
+            ""
+        }
+    }
+
+    /// The line under "Keep Awake resumed".
+    public static func announcedRemaining(_ remaining: String, until time: String) -> String {
+        "\(remaining) left, until \(time)"
+    }
+    /// The same for a hold with no end to resume to. The timed line read
+    /// "On left, until ." once the label it was handed stopped being a
+    /// duration: a time and an "until" are both wrong for a hold that runs
+    /// until it is switched off.
+    public static let announcedUntilSwitchedOff = "Until you switch it off"
 
     /// What a press would do, shown on hover and on keyboard focus before
-    /// anybody commits to it. The asymmetry between the two ways out of the
-    /// lid mode — stepping back keeps the Mac awake, the clock running out
-    /// does not — is the thing the old two-switch card could not say.
+    /// anybody commits to it. The two ways out of the lid mode differ when it
+    /// was picked from Off: stepping back keeps the Mac awake and the clock
+    /// running out does not. Picked over Coffee, the clock running out goes
+    /// back to Coffee too, and the line under the rail says which it will be.
     public static let previewToAwake = "Stays awake until you switch it off."
     public static let previewToOffFromAwake = "Lets your Mac sleep again."
     public static let previewToOffFromLid = "Ends now. Your Mac can sleep again."

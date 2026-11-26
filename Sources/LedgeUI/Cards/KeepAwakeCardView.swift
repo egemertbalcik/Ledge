@@ -684,8 +684,9 @@ public struct KeepAwakeCardView: View {
                                           lidClosed: payload.lidClosed)
         case .ready: return KeepAwakeCopy.consequenceOff
         case .running:
-            return payload.isIndefinite
-                ? KeepAwakeCopy.consequenceAwake
+            if payload.isIndefinite { return KeepAwakeCopy.consequenceAwake }
+            return payload.returnsToHold == true
+                ? KeepAwakeCopy.consequenceTimedThenAwake(until: payload.until)
                 : KeepAwakeCopy.consequenceTimed(until: payload.until)
         }
     }

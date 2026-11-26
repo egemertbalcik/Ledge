@@ -71,6 +71,15 @@ public final class ActivityCoordinator {
     private var timerPausedSince: TimeInterval?
     static let pausedTimerLinger: TimeInterval = 5 * 60
 
+    /// Whether each Keep Awake card already said it had gone back to the
+    /// plain hold, so that it is announced at the first reading and not at
+    /// every one after it.
+    private var keepAwakeHadReturned: [ActivityID: Bool] = [:]
+
+    nonisolated static func keepAwakeJustReturned(_ payload: KeepAwakePayload, sawItBefore: Bool) -> Bool {
+        payload.isRunning && payload.returned == true && !sawItBefore
+    }
+
     /// Whether each Keep Awake session was running at the last sync, so the
     /// moment it starts can be told from the once-a-second republishes every
     /// running session makes. Nil means not seen yet.
@@ -440,9 +449,18 @@ public final class ActivityCoordinator {
                 keepAwakeStarts.append(activity)
             }
             keepAwakeWasRunning[activity.id] = payload.isRunning
+            // A timed hold going back to the plain one keeps the card running
+            // under the same id, so nothing above sees it. It is news once,
+            // at the reading that first carries it.
+            if Self.keepAwakeJustReturned(payload, sawItBefore: keepAwakeHadReturned[activity.id] == true) {
+                arrived.insert(activity.id)
+                changed.insert(activity.id)
+            }
+            keepAwakeHadReturned[activity.id] = payload.returned == true
         }
         for id in Array(keepAwakeWasRunning.keys) where !currentIDs.contains(id) {
             keepAwakeWasRunning[id] = nil
+            keepAwakeHadReturned[id] = nil
         }
 
         // A feed turning critical is the one thing about a feed that is news.

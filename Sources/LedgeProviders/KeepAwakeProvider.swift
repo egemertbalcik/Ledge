@@ -167,6 +167,18 @@ public final class KeepAwakeProvider: ActivityProvider {
     /// Set when a session came back from the journal, so the announcement can
     /// say so. A resume the user did not ask for has to be visible.
     private var announcesResume = false
+    /// When the plain hold now running was gone back to by a timed one, if
+    /// it was. Carried on the card for `returnNewsLife` and no longer, so the
+    /// notch can say it once.
+    private var returnedAt: Date?
+
+    /// How long "back to Coffee" is news.
+    ///
+    /// The card republishes every second and each reading for these few
+    /// seconds carries it, which is enough for the shell to see it once.
+    /// Carried for as long as the Coffee ran, a card swiped away and shown
+    /// again an hour later announced a return that was an hour old.
+    static let returnNewsLife: TimeInterval = 10
     private var summaryPending = false
 
     /// Consecutive failures to read the battery.
@@ -514,6 +526,7 @@ public final class KeepAwakeProvider: ActivityProvider {
         problem = coverageProblem
         endUnrecorded = false
         announcesResume = false
+        returnedAt = nil
         state = .running(session)
         beginWatching()
         armDeadline()
@@ -559,6 +572,12 @@ public final class KeepAwakeProvider: ActivityProvider {
     ///   switched off.
     @discardableResult
     public func changeMode(toLidClosed minutes: Int?) async -> ModeChange {
+        await changeMode(toLidClosed: minutes, returning: false)
+    }
+
+    /// - Parameter returning: the change is a timed hold handing back to the
+    ///   plain one at the end of its time, and not somebody's press.
+    private func changeMode(toLidClosed minutes: Int?, returning: Bool) async -> ModeChange {
         guard case .running(let old) = state else { return .nothingRunning }
         // One at a time. Two overlapping changes both wrote, both returned
         // refused, and left the journal holding a session the provider was
@@ -589,7 +608,11 @@ public final class KeepAwakeProvider: ActivityProvider {
             replacement = KeepAwakeSession(
                 id: makeID(), startedAt: old.startedAt,
                 deadline: now().addingTimeInterval(total), total: total,
-                bootID: boot, lidHoldRequested: true
+                bootID: boot, lidHoldRequested: true,
+                // Picked over Coffee, it goes back to Coffee when its time is
+                // up. Written into the record with it, so a relaunch in the
+                // middle does not forget.
+                returnsToHold: KeepAwakeSession.returnsToHold(after: old) ? true : nil
             )
         } else {
             replacement = KeepAwakeSession(
@@ -671,6 +694,7 @@ public final class KeepAwakeProvider: ActivityProvider {
         problem = coverageProblem
         endUnrecorded = false
         announcesResume = false
+        returnedAt = returning ? now() : nil
         state = .running(replacement)
         beginWatching()
         armDeadline()
@@ -1241,7 +1265,40 @@ public final class KeepAwakeProvider: ActivityProvider {
             armDeadline()
             return
         }
+        // A timed hold picked over Coffee goes back to Coffee. Asked of the
+        // session and not of the reason: `.timeUp` is also how a hold ends
+        // when its assertion cannot be taken again.
+        if state.session?.returnsToHold == true {
+            returnToHold()
+            return
+        }
         endNow(reason: .timeUp)
+    }
+
+    /// The time of a hold picked over Coffee is up: Coffee again, without
+    /// letting go of the Mac in between.
+    ///
+    /// The same swap as a press on Coffee. If it cannot be made, the timed
+    /// hold ends as it always did: a lid-shut hold must never outlive the
+    /// time it was given.
+    private func returnToHold() {
+        guard let expired = state.session else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.changeMode(toLidClosed: nil, returning: true)
+            guard outcome != .changed, self.state.session?.id == expired.id else { return }
+            if self.pendingStart != nil {
+                // Another change is being written down and will decide what
+                // runs next: a press, or this same hand-back started a moment
+                // ago by a check that ran twice. Looked at again shortly in
+                // case it is refused, which would leave this hold running
+                // with no end.
+                try? await Task.sleep(for: .milliseconds(500))
+                self.deadlineTick()
+                return
+            }
+            await self.end(reason: .timeUp)
+        }
     }
 
     /// Runs any outstanding journal retry now.
@@ -1875,6 +1932,10 @@ public final class KeepAwakeProvider: ActivityProvider {
                 lidClosed: session.lidHoldRequested,
                 lid: lidState,
                 resumed: announcesResume,
+                returnsToHold: session.returnsToHold == true && !session.isIndefinite ? true : nil,
+                returned: session.isIndefinite && returnedAt.map({
+                    now().timeIntervalSince($0) < Self.returnNewsLife
+                }) == true ? true : nil,
                 // Carried while running too. It was not, so anything that went
                 // wrong *during* a session — a mode change the disk refused,
                 // an assertion that could not be re-armed — was raised here

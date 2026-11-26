@@ -181,9 +181,15 @@ enum DeviceAnnouncementMetrics {
     }
 
     static func textWidth(for announcement: NotchAnnouncement) -> CGFloat {
+        min(naturalTextWidth(for: announcement), maximumTextWidth).rounded(.up)
+    }
+
+    /// The wider of the two lines before the cap is applied: what the text
+    /// would need to be drawn whole.
+    static func naturalTextWidth(for announcement: NotchAnnouncement) -> CGFloat {
         let name = width(of: announcement.title, font: nameFont)
         let subtitle = announcement.subtitle.map { width(of: $0, font: subtitleFont) } ?? 0
-        return min(max(name, subtitle), maximumTextWidth).rounded(.up)
+        return max(name, subtitle)
     }
 
     static func percent(_ level: Double) -> String {

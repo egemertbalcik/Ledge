@@ -286,30 +286,48 @@ public struct NotchAnnouncement: Equatable, Sendable {
         case .ready:
             return nil
         case .running:
+            // A timed hold ran out and the plain one it was picked over is on
+            // again. Nobody pressed anything and the Mac is still held awake.
+            if payload.returned == true {
+                return keepAwake(KeepAwakeCopy.returnedToAwake, KeepAwakeCopy.returnedToAwakeAdvice)
+            }
             guard payload.resumed else { return nil }
-            return NotchAnnouncement(
-                title: payload.isIndefinite
-                    ? KeepAwakeCopy.resumedIndefinitely
-                    : KeepAwakeCopy.resumed(
-                        remaining: SatelliteContent.keepAwakeLabel(remaining: payload.remaining),
+            return keepAwake(
+                KeepAwakeCopy.announcedResumed,
+                payload.isIndefinite
+                    ? KeepAwakeCopy.announcedUntilSwitchedOff
+                    : KeepAwakeCopy.announcedRemaining(
+                        SatelliteContent.keepAwakeLabel(remaining: payload.remaining),
                         until: payload.until
-                    ),
-                symbolName: "cup.and.saucer.fill",
-                accent: keepAwakeAccent
+                    )
             )
         case .finished(let reason):
             guard reason.isVisible else { return nil }
-            return NotchAnnouncement(
-                title: KeepAwakeCopy.finished(
+            return keepAwake(
+                KeepAwakeCopy.announcedEnded,
+                KeepAwakeCopy.announcedReason(
                     reason,
                     at: payload.until,
                     floor: payload.batteryFloor,
                     lidClosed: payload.lidClosed
-                ),
-                symbolName: "cup.and.saucer.fill",
-                accent: keepAwakeAccent
+                )
             )
         }
+    }
+
+    /// Two lines in the row a device uses: what happened and the reason
+    /// under it. One line the width of the closed notch could not hold the
+    /// sentences Keep Awake has to say, and they were drawn with both ends
+    /// cut off. Still the fixed three seconds: this is news for eyes that
+    /// are elsewhere.
+    private static func keepAwake(_ title: String, _ subtitle: String) -> NotchAnnouncement {
+        NotchAnnouncement(
+            title: title,
+            symbolName: "cup.and.saucer.fill",
+            accent: keepAwakeAccent,
+            style: .device,
+            subtitle: subtitle
+        )
     }
 
     /// Keep Awake's tan, the same one its card and ears wear. Warm rather than
