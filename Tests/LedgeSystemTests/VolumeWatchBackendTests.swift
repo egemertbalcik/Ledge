@@ -446,6 +446,72 @@ struct VolumeWatchTransitionTests {
         backend.stop()
     }
 
+    /// Opening Ledge showed the volume readout over its own greeting, as if a
+    /// key had been pressed: the level read when the watch starts went out
+    /// as a change. A switch of output was already kept quiet. The start was
+    /// left out of that on purpose and should not have been.
+    @Test("The level a device reports when the watch is pointed at it is marked as nobody's doing")
+    func aDeviceReportingIsNotAChange() {
+        let hardware = FakeAudioHardware()
+        let ui = Self.deliveryQueue()
+        let reports = OSAllocatedUnfairLock(initialState: 0)
+        let seen = OSAllocatedUnfairLock(initialState: [Int]())
+        let backend = VolumeWatchBackend(
+            hardware: hardware, deliveryQueue: ui,
+            deviceReported: { reports.withLock { $0 += 1 } })
+
+        // What had been reported by the time each level was delivered.
+        backend.start { _ in seen.withLock { $0.append(reports.withLock { $0 }) } }
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 1, "the start of watching")
+        #expect(seen.withLock { $0 } == [1], "marked before its level arrives")
+
+        // The same device named again: not a new report.
+        hardware.fireDefaultDeviceChanged()
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 1)
+
+        // A change on the device itself is somebody's doing.
+        hardware.setLevel(0.77, on: 100)
+        hardware.fire(selector: kAudioDevicePropertyVolumeScalar)
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 1)
+
+        // Another output.
+        hardware.setDefaultDevice(101)
+        hardware.fireDefaultDeviceChanged()
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 2)
+        backend.stop()
+    }
+
+    @Test("No output at all reports nothing, and one turning up later does")
+    func noOutputThenOne() {
+        let hardware = FakeAudioHardware()
+        hardware.setDefaultDevice(nil)
+        let ui = Self.deliveryQueue()
+        let reports = OSAllocatedUnfairLock(initialState: 0)
+        let backend = VolumeWatchBackend(
+            hardware: hardware, deliveryQueue: ui,
+            deviceReported: { reports.withLock { $0 += 1 } })
+
+        backend.start { _ in }
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 0)
+
+        hardware.setDefaultDevice(100)
+        hardware.fireDefaultDeviceChanged()
+        backend.settleForTesting()
+        Self.drain(ui)
+        #expect(reports.withLock { $0 } == 1)
+        backend.stop()
+    }
+
     @Test("Going away and back again does not deliver the value in between")
     func returningToTheDisplayedValueDropsTheIntermediate() {
         let ui = Self.deliveryQueue()

@@ -118,12 +118,18 @@ final class VolumeWatchBackend: @unchecked Sendable {
     /// - Parameter deliveryQueue: where finished readouts are handed over.
     ///   The main queue in the app; tests pass one they own, so proving the
     ///   delivery bound does not mean blocking the queue every other test needs.
+    /// Told each time the watch is pointed at a device, before that device's
+    /// level is published. See `bind`.
+    private let deviceReported: @Sendable () -> Void
+
     init(
         hardware: any AudioHardware = SystemAudioHardware(),
-        deliveryQueue: DispatchQueue = .main
+        deliveryQueue: DispatchQueue = .main,
+        deviceReported: @escaping @Sendable () -> Void = { VolumeController.noteOutputSwitch() }
     ) {
         self.hardware = hardware
         self.mailbox = MainMailbox(isEqual: ==, deliveryQueue: deliveryQueue)
+        self.deviceReported = deviceReported
     }
 
     // MARK: - Starting and stopping
@@ -320,8 +326,13 @@ final class VolumeWatchBackend: @unchecked Sendable {
 
         // A genuine switch. Only the device listeners go.
         deviceListeners.removeAll()
-        // The first binding is the start of watching, not a switch.
-        if boundDevice != nil { VolumeController.noteOutputSwitch() }
+        // The level published below is the device saying where it is. Nobody
+        // touched the volume, so the readout stays down for it. The first
+        // binding counts as well: it was left out, and opening Ledge showed
+        // the volume readout over its own greeting as if a key had been
+        // pressed. An output that turns up after a launch with none is the
+        // same case.
+        if device != nil { deviceReported() }
         boundDevice = device
         repairAttempts = 0
 
