@@ -128,6 +128,17 @@ public enum ProviderRegistry {
         // pointed at a scratch directory.
         keepAwakeProvider: (@MainActor () -> any ActivityProvider)? = nil
     ) -> [ProviderRegistration] {
+        // Which Bluetooth devices have ever reported a battery level: what
+        // the catalogue already remembers from earlier runs, so no new read
+        // of the hardware.
+        let levelReporters: (@Sendable () async -> Set<String>)?
+        if let catalogue {
+            levelReporters = {
+                DeviceObservations.bluetoothAddressesWithLevels(in: await catalogue.snapshot())
+            }
+        } else {
+            levelReporters = nil
+        }
         var registrations: [ProviderRegistration] = [
             ProviderRegistration(
                 // Lower-case to match `NowPlayingProvider.identifier`; see the
@@ -171,7 +182,8 @@ public enum ProviderRegistry {
                     BluetoothProvider(
                         source: IOBluetoothDeviceSource(),
                         observations: observations,
-                        paired: paired
+                        paired: paired,
+                        levelReporters: levelReporters
                     )
                 }
             ),

@@ -10,6 +10,17 @@ import LedgeSystem
 /// it. Wiring the catalogue therefore costs no scan time and no extra query.
 public enum DeviceObservations {
 
+    /// The Bluetooth devices the catalogue has ever seen a battery level
+    /// from, by address.
+    ///
+    /// Asked once when the Bluetooth provider starts, so it knows which
+    /// devices are worth holding a hello for while their levels arrive.
+    public static func bluetoothAddressesWithLevels(in catalogue: DeviceCatalogue) -> Set<String> {
+        Set(catalogue.devices.lazy
+            .filter { $0.id.source == .bluetoothAddress && !$0.readings.isEmpty }
+            .map(\.id.value))
+    }
+
     /// A connected or refreshed Bluetooth device.
     ///
     /// `system_profiler` and IOBluetooth report a level and nothing else, so

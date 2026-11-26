@@ -132,7 +132,9 @@ public final class DeviceAlertProvider: ActivityProvider {
                     : alert.allLevels,
                 isConnected: true,
                 isApple: alert.isApple,
-                statusText: alert.kind == .charged ? "Charged" : nil
+                statusText: alert.kind == .charged ? "Charged" : nil,
+                // What lets the notch stand up and say which battery.
+                alert: DevicePayload.Alert(kind: alert.kind, component: alert.component.label)
             ))
         )))
     }

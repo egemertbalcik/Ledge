@@ -80,18 +80,18 @@ public struct PendingPeek: Equatable, Sendable {
 
     /// Queues `entry` behind the stage, `limit` entries at most.
     ///
-    /// Two rules for keyboard facts, both following from the copy:
-    /// - The same card already waiting takes the newer copy in its place,
-    ///   rather than queueing twice. Live cards are looked up again at drain
-    ///   time, so for them a second entry only replays the same card; a copy
-    ///   is frozen, and two switches made behind one peek replayed the first,
-    ///   stale layout before the one in use.
-    /// - They wait at the front, ahead of anything that is not a keyboard
-    ///   fact, for the reason they cut in: the stage clearing is when the
-    ///   eyes come back, and they come back to type. The rest keep their
-    ///   order.
+    /// A card already waiting takes the newer entry in its place rather than
+    /// queueing twice. A keyboard fact brings a frozen copy: two switches
+    /// made behind one peek replayed the first, stale layout before the one
+    /// in use. Every other card is looked up again when its turn comes, so a
+    /// second entry could only replay the same card: two sound output
+    /// changes made behind one peek said the latest output twice.
+    ///
+    /// Keyboard facts wait at the front, ahead of anything that is not one,
+    /// for the reason they cut in: the stage clearing is when the eyes come
+    /// back and they come back to type. The rest keep their order.
     public static func enqueue(_ entry: PendingPeek, into queue: inout [PendingPeek], limit: Int) {
-        if entry.copy != nil, let waiting = queue.firstIndex(where: { $0.id == entry.id }) {
+        if let waiting = queue.firstIndex(where: { $0.id == entry.id }) {
             queue[waiting] = entry
             return
         }
@@ -101,6 +101,48 @@ public struct PendingPeek: Equatable, Sendable {
         } else {
             queue.append(entry)
         }
+    }
+
+    /// Takes the waiting entries for `id` out of the queue where `isEcho`
+    /// says so.
+    ///
+    /// For the sound output card that waits behind another peek while the
+    /// device it names says hello: the hello tells the same arrival in full,
+    /// and without this both took their turn, one after the other.
+    public static func drop(
+        _ id: ActivityID, from queue: inout [PendingPeek], where isEcho: (PendingPeek) -> Bool
+    ) {
+        drop(from: &queue) { $0.id == id && isEcho($0) }
+    }
+
+    /// Takes out every waiting entry that `isTold` says has been told by
+    /// something else.
+    ///
+    /// For the low battery alert that waits behind another peek while its
+    /// device says hello with that battery already drawn in red. Alerts have
+    /// an id for each device, so there is no one id to name.
+    public static func drop(from queue: inout [PendingPeek], where isTold: (PendingPeek) -> Bool) {
+        queue.removeAll(where: isTold)
+    }
+
+    /// Lets the waiting card `id` go ahead of the entries in front of it that
+    /// `yields` picks out. They are put straight behind it, in their order.
+    ///
+    /// For a hello that arrives while a low battery alert it draws in red is
+    /// already waiting. The hello plays first and the alert is dropped when
+    /// it does. Dropping the alert here would lose it if the hello's card
+    /// expired before its turn.
+    public static func letAhead(
+        _ id: ActivityID, in queue: inout [PendingPeek], of yields: (PendingPeek) -> Bool
+    ) {
+        guard let place = queue.firstIndex(where: { $0.id == id }) else { return }
+        var staying: [PendingPeek] = []
+        var yielding: [PendingPeek] = []
+        for entry in queue[..<place] {
+            if yields(entry) { yielding.append(entry) } else { staying.append(entry) }
+        }
+        guard !yielding.isEmpty else { return }
+        queue = staying + [queue[place]] + yielding + Array(queue[(place + 1)...])
     }
 
     /// Puts back the card a keyboard fact just cut short, to play once the

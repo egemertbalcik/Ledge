@@ -18,6 +18,10 @@ public final class BluetoothProvider: ActivityProvider {
     /// How long a connect or disconnect card stays up.
     static let lifetime: TimeInterval = 4
 
+    /// When a hello that came without levels looks for them, in ms after the
+    /// connect; after the last one it goes out bare.
+    static let lateLevelSteps = [250, 500, 800, 1200, 1600, 2000]
+
     /// How often connected devices are re-asked for their levels. Battery
     /// data otherwise only arrives at connect time, and AirPods die hours
     /// later.
@@ -47,7 +51,28 @@ public final class BluetoothProvider: ActivityProvider {
     /// process and no extra scan.
     private let paired: PairedDeviceRegistry
     private let now: () -> TimeInterval
+    private let flapGrace: TimeInterval
+    private let lateLevelSteps: [Int]
     private var continuation: AsyncStream<ProviderEvent>.Continuation?
+
+    /// Devices that have connected and not yet been told. A hello can be
+    /// waiting for battery levels when the link blips or the device leaves;
+    /// this is how the blip gets its hello back and how a device that left
+    /// before it was ever announced leaves without a "Disconnected".
+    private var helloOwed: Set<String> = []
+    /// The wait for levels running for each address, so a new one replaces
+    /// the old rather than both telling the same connection.
+    private var helloWaits: [String: Task<Void, Never>] = [:]
+    /// Devices seen with battery levels at least once, by lower-cased
+    /// address. Only these and Apple's own are worth holding a hello for.
+    private var reportsLevels: Set<String> = []
+    /// Which devices earlier runs saw with battery levels. Without it the
+    /// set above starts empty at every launch, so headphones that do report
+    /// a battery said hello without it the first time they connected.
+    private let levelReporters: (@Sendable () async -> Set<String>)?
+    /// Where a hello is noted so the sound output card stays quiet for it.
+    /// Shared with the route provider in the app; a test gives its own.
+    var recentConnections = RecentConnections.shared
 
     /// Ids currently on screen, keyed by device address, so a disconnect can
     /// retract the card the connect put up.
@@ -67,12 +92,18 @@ public final class BluetoothProvider: ActivityProvider {
         source: any BluetoothDeviceSource,
         observations: (any DeviceObservationSink)? = nil,
         paired: PairedDeviceRegistry = PairedDeviceRegistry(),
-        now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate }
+        now: @escaping () -> TimeInterval = { Date().timeIntervalSinceReferenceDate },
+        flapGrace: TimeInterval? = nil,
+        lateLevelSteps: [Int]? = nil,
+        levelReporters: (@Sendable () async -> Set<String>)? = nil
     ) {
         self.source = source
         self.observations = observations
         self.paired = paired
         self.now = now
+        self.flapGrace = flapGrace ?? Self.flapGrace
+        self.lateLevelSteps = lateLevelSteps ?? Self.lateLevelSteps
+        self.levelReporters = levelReporters
     }
 
     public func start() -> AsyncStream<ProviderEvent> {
@@ -86,6 +117,7 @@ public final class BluetoothProvider: ActivityProvider {
                 onDisconnect: { [weak self] address in self?.disconnected(address) }
             )
             self.startLowBatteryChecks()
+            self.recallLevelReporters()
             // Devices already connected when the provider starts (a login item
             // launching with the AirPods in) never produced a connect event,
             // so their first disconnect found nothing published and said no
@@ -148,6 +180,8 @@ public final class BluetoothProvider: ActivityProvider {
         lowBatteryTimer = nil
         for item in pendingGoodbyes.values { item.cancel() }
         pendingGoodbyes.removeAll()
+        helloOwed.removeAll()
+        helloWaits.removeAll()
         continuation?.finish()
         continuation = nil
         published.removeAll()
@@ -186,6 +220,17 @@ public final class BluetoothProvider: ActivityProvider {
             if device.isApple { lastKnownApple.insert(device.address) }
             report(device, cause: .periodicRefresh)
             Self.log.debug("suppressed flap for \(device.name, privacy: .private(mask: .hash))")
+            // Quiet, unless this connection has not been told yet. A blip
+            // while its hello waited for levels ended the wait. Staying
+            // quiet here as well meant the device never said hello at all.
+            if helloOwed.contains(device.address), let id = published[device.address] {
+                // Noted again from here: the hello is only now on its way,
+                // so the sound output card has to stay quiet for it from
+                // this moment, not from the first connect seconds ago.
+                recentConnections.noteConnected(device.name, at: now())
+                NotificationCenter.default.post(name: .ledgeDeviceConnectHeard, object: nil)
+                beginHello(device, id: id)
+            }
             return
         }
         // The address is the identity, not the name: two sets of the same
@@ -203,7 +248,47 @@ public final class BluetoothProvider: ActivityProvider {
             levels=\(device.batteryLevels.count, privacy: .public)
             """)
         report(device, cause: .connectionEvent)
+        recentConnections.noteConnected(device.name, at: now())
+        NotificationCenter.default.post(name: .ledgeDeviceConnectHeard, object: nil)
+        helloOwed.insert(device.address)
+        beginHello(device, id: id)
+    }
 
+    /// Asks which devices earlier runs saw with battery levels.
+    ///
+    /// Knowledge about the hardware, not about this run, so it is kept across
+    /// a stop and only ever added to.
+    private func recallLevelReporters() {
+        guard let levelReporters else { return }
+        var recall: Task<Void, Never>!
+        recall = Task { @MainActor [weak self] in
+            defer { self?.reads.remove(recall) }
+            let known = await levelReporters()
+            guard let self, !Task.isCancelled else { return }
+            self.reportsLevels.formUnion(known.map { $0.lowercased() })
+        }
+        reads.insert(recall)
+    }
+
+    /// Says hello now, or waits for the battery levels first.
+    ///
+    /// A hello without levels waits for them instead of going out bare and
+    /// filling in a moment later: the bare row and then the full one read as
+    /// a jump. Only a device that has levels to wait for is held, though. A
+    /// speaker or a mouse that never reports a battery used to sit through
+    /// the whole wait and say "Connected" two seconds late every time.
+    private func beginHello(_ device: BluetoothDeviceSnapshot, id: ActivityID) {
+        helloWaits.removeValue(forKey: device.address)?.cancel()
+        let worthWaiting = device.isApple || reportsLevels.contains(device.address.lowercased())
+        if device.batteryLevels.isEmpty, worthWaiting {
+            readLevelsLate(for: device, id: id)
+        } else {
+            sayHello(device, levels: device.batteryLevels, id: id)
+        }
+    }
+
+    private func sayHello(_ device: BluetoothDeviceSnapshot, levels: [String: Double], id: ActivityID) {
+        helloOwed.remove(device.address)
         continuation?.yield(.publish(Activity(
             id: id,
             createdAt: now(),
@@ -214,11 +299,57 @@ public final class BluetoothProvider: ActivityProvider {
                 // Absent battery data is normal, not a failure — the levels are
                 // transient and vanish once a device goes idle. The card renders
                 // fine without them.
-                batteryLevels: device.batteryLevels,
+                batteryLevels: levels,
                 isConnected: true,
-                isApple: device.isApple
+                isApple: device.isApple,
+                announcesConnection: true
             ))
         )))
+    }
+
+    /// The hello for a device that connected before macOS had its levels.
+    ///
+    /// Earbuds often attach a second or two before the levels exist. The
+    /// hello used to go out bare and be republished with them, which drew the
+    /// row twice in quick succession. Now it waits — a few looks over two
+    /// seconds — and goes out once: with the levels if they came, bare if
+    /// they did not. A disconnect inside the wait ends it with the hello
+    /// still owed; see `helloOwed` for what happens to it then.
+    private func readLevelsLate(for device: BluetoothDeviceSnapshot, id: ActivityID) {
+        let session = self.session
+        let steps = lateLevelSteps
+        var read: Task<Void, Never>!
+        read = Task { @MainActor [weak self] in
+            defer {
+                self?.reads.remove(read)
+                if self?.helloWaits[device.address] == read { self?.helloWaits[device.address] = nil }
+            }
+            var levels: [String: Double] = [:]
+            var waited = 0
+            for step in steps {
+                try? await Task.sleep(for: .milliseconds(step - waited))
+                waited = step
+                guard let self, !Task.isCancelled, self.session == session,
+                      self.published[device.address] == id,
+                      self.pendingGoodbyes[device.address] == nil
+                else { return }
+                let connected = await self.source.connectedDevices()
+                guard !Task.isCancelled, self.session == session else { return }
+                if let fresh = connected.first(where: { $0.address == device.address }),
+                   !fresh.batteryLevels.isEmpty {
+                    self.report(fresh, cause: .periodicRefresh)
+                    levels = fresh.batteryLevels
+                    break
+                }
+            }
+            guard let self, !Task.isCancelled, self.session == session,
+                  self.published[device.address] == id,
+                  self.pendingGoodbyes[device.address] == nil
+            else { return }
+            self.sayHello(device, levels: levels, id: id)
+        }
+        reads.insert(read)
+        helloWaits[device.address] = read
     }
 
     private func disconnected(_ address: String) {
@@ -233,20 +364,27 @@ public final class BluetoothProvider: ActivityProvider {
         // Retract the "connected" card rather than leaving it to expire; the
         // goodbye itself waits out the flap grace.
         continuation?.yield(.retract(id))
+        // A hello still waiting for levels stops here. It stays owed, so a
+        // reconnect inside the grace can still say it.
+        helloWaits.removeValue(forKey: address)?.cancel()
 
         pendingGoodbyes[address]?.cancel()
         let item = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.pendingGoodbyes.removeValue(forKey: address)
-                self.announceGoodbye(address)
+                // A device that left before it was ever announced leaves
+                // without a card: "Disconnected" for something that never
+                // said "Connected" is news about nothing.
+                let neverTold = self.helloOwed.remove(address) != nil
+                self.announceGoodbye(address, withCard: !neverTold)
             }
         }
         pendingGoodbyes[address] = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.flapGrace, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + flapGrace, execute: item)
     }
 
-    private func announceGoodbye(_ address: String) {
+    private func announceGoodbye(_ address: String, withCard: Bool) {
         // An observed detach, reported as the event it is. The catalogue keeps
         // the last known levels; their age is what marks them old.
         if let observations {
@@ -270,6 +408,7 @@ public final class BluetoothProvider: ActivityProvider {
         // it made the map grow per paired device forever and let a spurious
         // late disconnect announce a phantom second goodbye.
         published.removeValue(forKey: address)
+        guard withCard else { return }
         continuation?.yield(.publish(Activity(
             id: goodbye,
             createdAt: now(),
@@ -279,7 +418,8 @@ public final class BluetoothProvider: ActivityProvider {
                 symbolName: lastKnownSymbol[address] ?? "headphones",
                 batteryLevels: [:],
                 isConnected: false,
-                isApple: lastKnownApple.contains(address)
+                isApple: lastKnownApple.contains(address),
+                announcesConnection: true
             ))
         )))
     }
@@ -357,6 +497,9 @@ public final class BluetoothProvider: ActivityProvider {
         cause: ObservationCause,
         at: Date? = nil
     ) {
+        // Ahead of the guard: this is the provider's own memory, wanted
+        // whether or not anything is listening to observations.
+        if !device.batteryLevels.isEmpty { reportsLevels.insert(device.address.lowercased()) }
         guard let observations else { return }
         let observation = DeviceObservations.fromBluetooth(
             device,

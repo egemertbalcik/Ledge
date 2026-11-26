@@ -22,7 +22,14 @@ extension NotchPresentation {
             bottomRadius: preferences.bottomRadius,
             closedBottomRadius: preferences.closedBottomRadius,
             gutterRadius: preferences.gutterRadius,
-            isAnnouncing: announcement != nil
+            isAnnouncing: announcement != nil,
+            // A device's stand-up is sized to what it says; see
+            // `DeviceAnnouncementMetrics`.
+            announceContent: announcement.flatMap {
+                $0.style == .device
+                    ? DeviceAnnouncementMetrics.size(for: $0, bottomRadius: preferences.bottomRadius)
+                    : nil
+            }
         )
     }
 

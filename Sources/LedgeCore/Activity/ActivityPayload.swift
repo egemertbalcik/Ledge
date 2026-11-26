@@ -550,6 +550,34 @@ public struct DevicePayload: Equatable, Sendable, Codable {
 
     public var statusStyle: StatusStyle
 
+    /// Whether this card *is* the news of a device attaching or leaving.
+    ///
+    /// Set only where a connection was actually observed — the Bluetooth
+    /// provider's hello and goodbye. Other cards borrow this payload and carry
+    /// a connection state without being that news: a low-battery alert is
+    /// about a device that is connected, and a case opening on the desk
+    /// reports whatever the paired list last said. Reading `isConnected` as
+    /// "this is a connection" stood the notch up saying "Connected" for the
+    /// first and "Disconnected" for the second.
+    public var announcesConnection: Bool
+
+    /// A battery alert this card is the news of: which battery and whether
+    /// it ran low or finished charging.
+    public struct Alert: Equatable, Sendable, Codable {
+        public var kind: AlertKind
+        /// The battery the alert is about, by its label: "Left", "Case",
+        /// "Battery".
+        public var component: String
+
+        public init(kind: AlertKind, component: String) {
+            self.kind = kind
+            self.component = component
+        }
+    }
+
+    /// Set only by the battery alert provider. Nil for every other card.
+    public var alert: Alert?
+
     public init(
         name: String,
         symbolName: String = "headphones",
@@ -557,7 +585,9 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         isConnected: Bool? = true,
         isApple: Bool = false,
         statusText: String? = nil,
-        statusStyle: StatusStyle = .plain
+        statusStyle: StatusStyle = .plain,
+        announcesConnection: Bool = false,
+        alert: Alert? = nil
     ) {
         self.name = name
         self.symbolName = symbolName
@@ -566,6 +596,8 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         self.isApple = isApple
         self.statusText = statusText
         self.statusStyle = statusStyle
+        self.announcesConnection = announcesConnection
+        self.alert = alert
     }
 
     /// The cell that matters — the one that dies first.
@@ -583,6 +615,7 @@ public struct DevicePayload: Equatable, Sendable, Codable {
     /// encoder is too.
     private enum CodingKeys: String, CodingKey {
         case name, symbolName, batteryLevels, isConnected, isApple, statusText, statusStyle
+        case announcesConnection, alert
     }
 
     public init(from decoder: any Decoder) throws {
@@ -602,6 +635,10 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         isApple = try c.decodeIfPresent(Bool.self, forKey: .isApple) ?? false
         statusText = try c.decodeIfPresent(String.self, forKey: .statusText)
         statusStyle = try c.decodeIfPresent(StatusStyle.self, forKey: .statusStyle) ?? .plain
+        // Absent means no: a payload that did not say so was never the news
+        // of a connection, whatever its connection state.
+        announcesConnection = try c.decodeIfPresent(Bool.self, forKey: .announcesConnection) ?? false
+        alert = try c.decodeIfPresent(Alert.self, forKey: .alert)
     }
 
     /// Written by hand for one reason: `isConnected` is encoded even when it
@@ -617,6 +654,8 @@ public struct DevicePayload: Equatable, Sendable, Codable {
         try c.encode(isApple, forKey: .isApple)
         try c.encodeIfPresent(statusText, forKey: .statusText)
         try c.encode(statusStyle, forKey: .statusStyle)
+        try c.encode(announcesConnection, forKey: .announcesConnection)
+        try c.encodeIfPresent(alert, forKey: .alert)
     }
 }
 

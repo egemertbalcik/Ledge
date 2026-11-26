@@ -1018,7 +1018,7 @@ public struct NotchOverlayView: View {
                         .frame(height: geometry.notchSize.height + NotchLayout.compactExtraHeight)
                     AnnouncementStrip(
                         announcement: announcement,
-                        height: NotchLayout.announceExtraHeight(for: geometry),
+                        height: AnnouncementStrip.height(for: announcement, geometry: geometry),
                         bottomRadius: preferences.bottomRadius
                     )
                     .transition(.opacity.combined(with: .move(edge: .top)))
